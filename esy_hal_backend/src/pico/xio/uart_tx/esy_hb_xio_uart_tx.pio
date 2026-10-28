@@ -1,0 +1,26 @@
+; SPDX-FileCopyrightText: 2026 EsyProject contributors
+;
+; SPDX-License-Identifier: Apache-2.0
+
+.program xio_uart_tx
+; 8N1 TX, 1 bit = 8 instruction cycles, no sideset.
+; C-side setup:
+;   - out_shift_right = 1
+;   - out_autopull    = 0
+;   - clkdiv          = clk_sys / (8 * baud)
+;   - OUT and SET map to the same TX pin.
+
+.wrap_target
+start:
+    pull      block           ; Pull one byte into OSR.
+    set  pins, 1    [7]       ; Stop or idle high for 8 cycles.
+    set  x, 7                 ; Bit counter = 8.
+    set  pins, 0    [7]       ; Start bit low for 8 cycles.
+
+bitloop:
+    out  pins, 1              ; Output one data bit, LSB first.
+    jmp  x--   bitloop  [6]   ; 8 cycles per bit.
+
+    set  pins, 1    [7]       ; Stop bit high for 8 cycles.
+    jmp  start
+.wrap

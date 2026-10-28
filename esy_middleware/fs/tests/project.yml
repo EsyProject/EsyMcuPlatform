@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+:paths:
+  :test: []
+  :source:
+    - ../src
+  :include:
+    - ../include
+    - ../include/esy_middleware/fs
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+:files:
+  :test:
+    - ./test_esy_fs.c
+  :source:
+    - ../src/esy_fs.c
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :json_artifact_filename: coverage.json
+    :report_include: '../src/.*|../../file/src/adapters/esy_file_fs\.c'
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -Wall
+      - -Wextra
+      - -Werror
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

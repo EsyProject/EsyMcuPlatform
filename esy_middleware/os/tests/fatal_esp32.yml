@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+:defines:
+  :test:
+    - ESY_PLATFORM_ESP32
+    - configNUMBER_OF_CORES=2

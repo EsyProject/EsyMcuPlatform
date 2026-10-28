@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - ./bin
+    - ./modbus
+  :source:
+    - ../src/bin
+    - ../src/modbus
+    - ../../io_scheduler/src
+    - ../../network/src
+    - ../../network/lwip/tests/lwip_support
+    - ../../../esy_test/fake/os
+    - ../../../esy_common/protocol_codec/src
+    - ../../../esy_common/ds/src
+    - ../../../esy_common/utils/src/**
+    - ../../../esy_test/fake/hal
+    - ../../usb/src
+    - ../../../esy_test/fake/third_party/tinyusb
+    - ../../../esy_test/fake/third_party/lwip
+  :include:
+    - .
+    - ../include
+    - ../include/esy_middleware/protocol
+    - ../../io_scheduler/include
+    - ../../os/include
+    - ../../../esy_test/fake/os
+    - ../../../esy_common/protocol_codec/include
+    - ../../../esy_common/protocol_codec/include/esy_common/protocol
+    - ../../../esy_common/ds/include
+    - ../../../esy_common/ds/include/esy_common/ds
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../esy_common/device/include
+    - ../../../esy_common/utils/include
+    - ../../../esy_common/utils/include/esy_common/utils/**
+    - ../../../esy_common/utils/include/esy_common
+    - ../../../esy_hal/include
+    - ../../../esy_hal/include/esy_hal
+    - ../../../esy_test/fake/hal
+    - ../../usb/include
+    - ../../network/include
+    - ../../network/include/esy_middleware/network
+    - ../../network/lwip/tests/lwip_support
+    - ../../usb/include/esy_middleware/usb
+    - ../../usb/src
+    - ../../../esy_test/fake/third_party/tinyusb
+    - ../../../esy_test/fake/third_party/lwip
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../../../esy_test/fake/third_party/lwip/fake_lwip.c
+    - ../../network/src/esy_network_lwip.c
+    - ../../network/lwip/tests/lwip_support/network_lwip_dns_fixture.c
+    - ../src/bin/esy_proto_bin_tcp_channel.c
+    - ../src/modbus/esy_proto_modbus_manager.c
+    - ../src/modbus/esy_proto_modbus_tcp_channel.c
+    - ../src/modbus/esy_proto_modbus_uart_channel.c
+    - ../src/modbus/esy_proto_modbus_uart_worker.c
+    - ../../io_scheduler/src/esy_uart_tx_scheduler.c
+    - ../../../esy_test/fake/os/fake_esy_os.c
+    - ../../../esy_test/fake/os/fake_esy_os_task.c
+    - ../src/bin/esy_proto_bin_session.c
+    - ../src/bin/esy_proto_bin_uart_channel.c
+    - ../src/bin/esy_proto_bin_usb_channel.c
+    - ../../../esy_common/protocol_codec/src/esy_proto_bin.c
+    - ../../../esy_common/protocol_codec/src/esy_proto_modbus.c
+    - ../../../esy_common/protocol_codec/src/esy_proto_tlv.c
+    - ../../../esy_common/ds/src/esy_block_ring.c
+    - ../../../esy_common/ds/src/esy_prio_slot_queue.c
+    - ../../../esy_common/ds/src/esy_ring_buffer.c
+    - ../../../esy_common/utils/src/integrity/esy_crc32.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_system.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_dma.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_uart.c
+    - ../../usb/src/esy_usb_cdc.c
+    - ../../usb/src/esy_usb_cdc_backend_tinyusb.c
+    - ../../../esy_test/fake/third_party/tinyusb/fake_tinyusb.c
+
+:defines:
+  :test:
+    - TEST
+    - ESY_PROTO_MODBUS_MASTER_PRIV_BYTES=768u
+    - ESY_PROTO_MODBUS_SLAVE_PRIV_BYTES=384u
+    - CFG_TUD_CDC=2u
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: '../src/(bin|modbus)/.*\.c$'
+
+:flags:
+  :test:
+    :compile:
+      - -std=c11
+  :gcov:
+    :compile:
+      - -std=c11

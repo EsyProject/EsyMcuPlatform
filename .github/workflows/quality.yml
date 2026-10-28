@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: EsyMcuPlatform Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Contract checks and module tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build python3 gcovr ruby ripgrep unzip mosquitto libssl-dev openssl
+          sudo gem install ceedling -v 1.1.8 --no-document
+
+      - name: Prepare pinned software providers
+        run: ./setup.sh
+
+      - name: Run quality gate
+        run: tools/quality/ci_quality_gate.sh test:all
+
+      - name: Verify MQTT plain TCP and TLS broker interoperability
+        run: |
+          command -v mosquitto
+          python3 -B esy_middleware/mqtt/tests/test_broker_smoke.py
+
+      - name: Verify pinned native LVGL provider
+        run: python3 -B esy_middleware/lvgl/tests/test_cmake_consumer.py
+
+  coverage:
+    name: Gcov threshold gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install coverage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build python3 gcovr ruby ripgrep unzip openssl
+          sudo gem install ceedling -v 1.1.8 --no-document
+
+      - name: Prepare pinned software providers
+        run: ./setup.sh
+
+      - name: Run gcov quality gate
+        run: tools/quality/ci_quality_gate.sh gcov:all
+
+      - name: Enforce gcov thresholds
+        run: tools/checks/check_gcov_thresholds.sh
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: esymcuplatform-gcov-reports
+          path: |
+            esy_common/*/tests/build/artifacts/gcov/gcovr/
+            esy_common/protocol_codec/tests/json/build/artifacts/gcov/gcovr/
+            esy_middleware/protocol/tests/json/build/artifacts/gcov/gcovr/
+            esy_hal/tests/build/artifacts/gcov/gcovr/
+            esy_middleware/*/tests/build/artifacts/gcov/gcovr/
+            esy_middleware/network/lwip/tests/build/artifacts/gcov/gcovr/
+          if-no-files-found: ignore
+
+  release-readiness:
+    name: Release tag checklist
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - host-tests
+      - coverage
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release readiness
+        run: tools/checks/check_release_readiness.sh "${GITHUB_REF_NAME}"
+
+      - name: Generate release notes draft
+        run: tools/quality/generate_changelog.sh "${GITHUB_REF_NAME}" > release-notes.md
+
+      - name: Upload release notes draft
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes-${{ github.ref_name }}
+          path: release-notes.md

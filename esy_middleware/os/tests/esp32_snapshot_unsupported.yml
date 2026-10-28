@@ -1,0 +1,6 @@
+# Reject snapshots when cross-core name lifetime protection is not established.
+:project:
+  :build_root: build/esp32_snapshot_unsupported
+:defines:
+  :test:
+    - ESY_PLATFORM_ESP32

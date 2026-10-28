@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/esy_port.cmake")
+if(DEFINED ESY_TARGET_DEVICE)
+    include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/esy_target_device.cmake")
+    esy_configure_target_device()
+endif()
+
+add_library(esy_coredump_core STATIC src/esy_coredump.c)
+target_compile_features(esy_coredump_core PUBLIC c_std_11)
+target_include_directories(esy_coredump_core PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
+target_link_libraries(esy_coredump_core PUBLIC esy_common_defs PRIVATE esy_opt_default)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(esy_coredump_core PRIVATE
+        -ffreestanding -fno-builtin -fno-stack-protector -fno-lto
+        -fno-tree-loop-distribute-patterns)
+endif()
+if(ESY_BUILD_PORT)
+    esy_call_port_hook(configure_coredump_target esy_coredump_core)
+endif()
+add_library(esy_coredump INTERFACE)
+target_link_libraries(esy_coredump INTERFACE esy_coredump_core)
+
+if(ENABLE_ESY_COREDUMP_LOGGER)
+    if(NOT TARGET esy_logger)
+        message(FATAL_ERROR "ENABLE_ESY_COREDUMP_LOGGER requires ENABLE_ESY_LOGGER")
+    endif()
+    add_library(esy_coredump_logger STATIC src/esy_coredump_logger.c)
+    target_link_libraries(esy_coredump_logger PUBLIC esy_coredump_core PRIVATE esy_logger esy_opt_default)
+    target_link_libraries(esy_coredump INTERFACE esy_coredump_logger)
+endif()
+if(ENABLE_ESY_COREDUMP_FILE)
+    if(NOT ENABLE_ESY_FILE OR NOT TARGET esy_file)
+        message(FATAL_ERROR "ENABLE_ESY_COREDUMP_FILE requires ENABLE_ESY_FILE and esy_file")
+    endif()
+    add_library(esy_coredump_file STATIC src/esy_coredump_file.c)
+    target_link_libraries(esy_coredump_file PUBLIC esy_coredump_core esy_file PRIVATE esy_opt_default)
+    target_link_libraries(esy_coredump INTERFACE esy_coredump_file)
+endif()

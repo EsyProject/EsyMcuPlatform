@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+  :include:
+    - .
+    - ../src
+    - ../include
+    - ../include/esy_hal
+    - ../include/esy_hal/xio
+    - ../../esy_common/defs/include
+    - ../../esy_common/defs/include/esy_common/defs/**
+    - ../../esy_common/device/include
+    - ../../esy_common/utils/include
+    - ../../esy_common/utils/include/esy_common/utils/**
+    - ../../esy_common/utils/include/esy_common
+    - ../../esy_hal_backend/include
+    - ../../esy_hal_backend/include/esy_hal_backend
+    - ../../esy_test/fake/hal
+
+:files:
+  :source:
+    - hal_test_fakes.c
+    - ../src/esy_hal_adc.c
+    - ../src/esy_hal_boot.c
+    - ../src/esy_hal_can.c
+    - ../../esy_test/fake/hal/fake_esy_hal_can_provider.c
+    - ../src/esy_hal_dma.c
+    - ../src/esy_hal_flash.c
+    - ../src/esy_hal_fault.c
+    - ../src/esy_hal_gpio.c
+    - ../src/esy_hal_gpio_pm.c
+    - ../src/esy_hal_spi.c
+    - ../src/esy_hal_spi_io.c
+    - ../src/esy_hal_uart.c
+    - ../src/esy_hal_uart_io.c
+    - ../src/esy_hal_i2c.c
+    - ../src/esy_hal_low_power.c
+    - ../src/esy_hal_multicore.c
+    - ../src/esy_hal_pwm.c
+    - ../src/esy_hal_rtc.c
+    - ../../esy_test/fake/hal/fake_esy_hal_rtc_provider.c
+    - ../src/esy_hal_system.c
+    - ../src/esy_hal_timer.c
+    - ../src/esy_hal_timer_capture.c
+    - ../src/esy_hal_usb_dev.c
+    - ../src/esy_hal_watchdog.c
+    - ../src/esy_hal_wakeup_timer.c
+    - ../src/xio/esy_hal_xio_spi.c
+    - ../src/xio/esy_hal_xio_uart.c
+    - ../src/xio/esy_hal_xio_uart_tx.c
+    - ../src/xio/esy_hal_xio_uart_rx.c
+
+  # Keep shared implementations linked into every test; production files above
+  # also require source registration for coverage instrumentation in Ceedling 1.0.1.
+  :support:
+    - ../src/esy_hal_spi_io.c
+    - ../../esy_common/utils/src/integrity/esy_crc32.c
+    - ../../esy_common/utils/src/time/esy_datetime.c
+    - ../src/esy_hal_uart_io.c
+    - ../src/xio/esy_hal_xio_uart_tx.c
+    - ../src/xio/esy_hal_xio_uart_rx.c
+    - ../../esy_common/utils/src/integrity/esy_sha256.c
+    - ../../esy_common/device/src/esy_device.c
+
+:defines:
+  :test:
+    - TEST
+    - OTA_SLOT_A_ADDR=0x10000000u
+    - OTA_SLOT_B_ADDR=0x10010000u
+    - OTA_SLOT_A_META_ADDR=0x1000F000u
+    - OTA_SLOT_B_META_ADDR=0x1001F000u
+    - OTA_SLOT_TOTAL_SIZE=0x10000u
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :json_artifact_filename: coverage.json
+    :report_include: "../src/.*[.]c$"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

@@ -1,0 +1,21 @@
+EsyMcuPlatform
+EsyProject - Embedded software for you
+Copyright 2025-2026 EsyProject contributors
+
+Original project contributions are licensed under Apache-2.0. See LICENSE.
+
+The following PIO adapters include code adapted from Raspberry Pi pico-examples:
+
+  esy_hal_backend/src/pico/xio/spi/esy_hb_xio_spi.pio
+  Upstream: https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
+
+  esy_hal_backend/src/pico/xio/uart_rx/esy_hb_xio_uart_rx.pio
+  Upstream: https://github.com/raspberrypi/pico-examples/blob/master/pio/uart_rx/uart_rx.pio
+
+Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+These upstream portions retain BSD-3-Clause terms. The adapters combine those
+terms with Apache-2.0 for project contributions, as stated in their SPDX notices.
+The full upstream license is included in LICENSES/BSD-3-Clause.txt.
+
+External SDKs, RTOS kernels, and other providers retain their own copyright and
+license notices. They are not relicensed by this project.

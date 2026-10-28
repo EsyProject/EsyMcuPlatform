@@ -1,0 +1,6 @@
+:project:
+  :build_root: build/tick16
+:defines:
+  :test:
+    - TEST_TICK_TYPE=uint16_t
+    - configTICK_RATE_HZ=100

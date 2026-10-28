@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:defines:
+  :test:
+    - configNUMBER_OF_CORES=2
+    - configTICK_CORE=0

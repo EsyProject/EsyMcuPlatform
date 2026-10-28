@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+    - "@ESY_COREMQTT_PATH@/source"
+  :include:
+    - ../include
+    - ../../network/include
+    - ../include/esy_middleware/mqtt
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - "@ESY_COREMQTT_PATH@/source/include"
+    - "@ESY_COREMQTT_PATH@/source/interface"
+
+:files:
+  :test: []
+  :source:
+    - ../src/esy_mqtt.c
+  :support:
+    - "@ESY_COREMQTT_PATH@/source/core_mqtt.c"
+    - "@ESY_COREMQTT_PATH@/source/core_mqtt_state.c"
+    - "@ESY_COREMQTT_PATH@/source/core_mqtt_serializer.c"
+
+:defines:
+  :test:
+    - TEST
+    - MQTT_DO_NOT_USE_CUSTOM_CONFIG=1
+    - MQTT_SEND_TIMEOUT_MS=20U
+    - MQTT_RECV_POLLING_TIMEOUT_MS=10U
+    - MQTT_PINGRESP_TIMEOUT_MS=20U
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :report_root: ".."
+    :json_artifact_filename: coverage.json
+    :report_include: '../src/.*'
+
+:flags:
+  :test:
+    :compile:
+      - -std=c11
+      - -Wall
+      - -Wextra
+  :gcov:
+    :compile:
+      - -std=c11

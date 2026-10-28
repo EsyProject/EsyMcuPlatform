@@ -1,0 +1,6 @@
+:project:
+  :build_root: build/tick64
+:defines:
+  :test:
+    - TEST_TICK_TYPE=uint64_t
+    - configRUN_TIME_COUNTER_TYPE=uint64_t

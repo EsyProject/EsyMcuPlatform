@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+    - ../../file/src
+    - ../../file/src/adapters
+    - ../../logger/src
+    - ../../../esy_test/fake/hal
+  :include:
+    - .
+    - ../include
+    - ../include/esy_middleware/coredump
+    - ../../file/include
+    - ../../file/include/esy_middleware/file
+    - ../../logger/include
+    - ../../logger/include/esy_middleware/logger
+    - ../../../esy_hal/include
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../esy_test/fake/hal
+
+:files:
+  :source:
+    - ../src/esy_coredump.c
+    - ../src/esy_coredump_logger.c
+    - ../src/esy_coredump_file.c
+  :support:
+    - ../../logger/src/esy_logger.c
+    - ../../file/src/esy_file.c
+    - ../../file/src/adapters/esy_file_ram.c
+    - ../../file/src/esy_file_flash.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_flash.c
+
+:defines:
+  :test:
+    - TEST
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :json_artifact_filename: coverage.json
+    :report_include: "../src/.*"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -Wall
+      - -Wextra
+      - -Werror
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

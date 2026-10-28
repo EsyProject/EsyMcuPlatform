@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../../src/json
+    - ../../../usb/src
+    - ../../../../esy_common/protocol_codec/src
+    - "@ESY_COREJSON_PATH@/source"
+  :include:
+    - ../../include
+    - ../../include/esy_middleware/protocol
+    - ../../../network/include
+    - ../../../usb/include
+    - ../../../usb/src
+    - ../../../../esy_test/fake/third_party/tinyusb
+    - ../../../../esy_common/defs/include
+    - ../../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../../esy_common/protocol_codec/include
+    - "@ESY_COREJSON_PATH@/source/include"
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../../src/json/esy_proto_json_tcp_channel.c
+    - ../../src/json/esy_proto_json_usb_channel.c
+    - ../../../usb/src/esy_usb_cdc.c
+    - ../../../usb/src/esy_usb_cdc_backend_tinyusb.c
+    - ../../../../esy_test/fake/third_party/tinyusb/fake_tinyusb.c
+    - ../../../../esy_common/protocol_codec/src/esy_proto_json_reader.c
+    - ../../../../esy_common/protocol_codec/src/esy_proto_json_writer.c
+    - "@ESY_COREJSON_PATH@/source/core_json.c"
+
+:defines:
+  :test:
+    - TEST
+    - CFG_TUD_CDC=2u
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: '../../src/json/.*'
+
+:flags:
+  :test:
+    :compile:
+      - -std=c11
+      - -Wall
+      - -Wextra
+  :gcov:
+    :compile:
+      - -std=c11

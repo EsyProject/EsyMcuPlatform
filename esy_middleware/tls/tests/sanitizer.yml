@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :build_root: build/sanitizer
+:flags:
+  :test:
+    :compile:
+      - -std=c11
+      - -fsanitize=address,undefined
+      - -fno-sanitize-recover=all
+      - -fno-omit-frame-pointer
+      - -fno-pie
+    :link:
+      - -fsanitize=address,undefined
+      - -no-pie

@@ -1,0 +1,5 @@
+:project:
+  :build_root: build/esp32_critical
+:defines:
+  :test:
+    - ESY_PLATFORM_ESP32

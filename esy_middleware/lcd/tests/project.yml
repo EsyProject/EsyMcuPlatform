@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+    - ../src/ili9488
+    - ../../../esy_test/fake/hal
+  :include:
+    - .
+    - ../include
+    - ../../io_scheduler/include
+    - ../../io_scheduler/include/esy_middleware/io_scheduler
+    - ../../os/include
+    - ../../../esy_common/ds/include
+    - ../../../esy_test/fake/os
+    - ../include/esy_middleware/lcd
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../esy_common/device/include
+    - ../../../esy_common/utils/include
+    - ../../../esy_common/utils/include/esy_common/utils/**
+    - ../../../esy_common/utils/include/esy_common
+    - ../../../esy_hal/include
+    - ../../../esy_hal/include/esy_hal
+    - ../../../esy_test/fake/hal
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../../io_scheduler/src/esy_spi_scheduler.c
+    - ../../io_scheduler/src/esy_spi_scheduler_core.c
+    - ../../../esy_common/ds/src/esy_block_ring.c
+    - ../../../esy_test/fake/os/fake_esy_os.c
+    - ../../../esy_test/fake/os/fake_esy_os_task.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_dma.c
+    - ../src/esy_lcd.c
+    - ../src/esy_lcd_device.c
+    - ../src/ili9488/esy_ili9488_device.c
+    - ../src/ili9488/esy_ili9488.c
+    - ../../../esy_common/device/src/esy_device.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_gpio_pm.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_gpio.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_spi.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_system.c
+
+:defines:
+  :test:
+    - TEST
+    - FAKE_ESY_HAL_SPI_TX_HISTORY=96
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: "../src/.*"
+
+:flags:
+  :test:
+    :compile:
+      :*:
+        - -std=c11

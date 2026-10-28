@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+  :include:
+    - ../include
+    - ../include/esy_middleware/event_bus
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../os/include
+    - ../../../esy_test/fake/os
+
+:files:
+  :source:
+    - ../src/esy_event_bus.c
+  :support:
+    - ../../../esy_test/fake/os/fake_esy_os.c
+    - ../../../esy_test/fake/os/fake_esy_os_queue.c
+    - ../../../esy_test/fake/os/fake_esy_os_task.c
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :json_artifact_filename: coverage.json
+    :report_include: "../src/.*"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -Wall
+      - -Wextra
+      - -Werror
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

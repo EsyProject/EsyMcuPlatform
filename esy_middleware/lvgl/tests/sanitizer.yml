@@ -1,0 +1,12 @@
+:flags:
+  :test:
+    :compile:
+      :*:
+        - -std=c11
+        - -fsanitize=address,undefined
+        - -fno-omit-frame-pointer
+        - -fno-pie
+    :link:
+      :*:
+        - -fsanitize=address,undefined
+        - -no-pie

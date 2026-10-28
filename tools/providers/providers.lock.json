@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "default_providers": ["corejson", "coremqtt", "llhttp", "mbedtls", "littlefs", "fatfs", "lvgl"],
+  "providers": {
+    "corejson": {
+      "version": "3.3.1",
+      "kind": "git",
+      "url": "https://github.com/FreeRTOS/coreJSON.git",
+      "revision": "cffa492da18c890181d64462f8af63992a69d3b0",
+      "directory": "coreJSON-v3.3.1",
+      "environment": "ESY_COREJSON_PATH",
+      "required_files": ["source/core_json.c", "source/include/core_json.h"]
+    },
+    "coremqtt": {
+      "version": "2.3.1",
+      "kind": "git",
+      "url": "https://github.com/FreeRTOS/coreMQTT.git",
+      "revision": "2beef04725328923e05e576b884212d53ec97af7",
+      "directory": "coreMQTT-v2.3.1",
+      "environment": "ESY_COREMQTT_PATH",
+      "required_files": [
+        "source/core_mqtt.c", "source/core_mqtt_serializer.c",
+        "source/core_mqtt_state.c", "source/include/core_mqtt.h"
+      ]
+    },
+    "llhttp": {
+      "version": "9.4.3",
+      "kind": "git",
+      "url": "https://github.com/nodejs/llhttp.git",
+      "revision": "0e815792b167a9bd8ace259b95b7da953776c288",
+      "directory": "llhttp-v9.4.3",
+      "environment": "ESY_LLHTTP_PATH",
+      "required_files": ["src/api.c", "src/http.c", "src/llhttp.c", "include/llhttp.h"]
+    },
+    "mbedtls": {
+      "version": "3.6.7",
+      "kind": "git",
+      "url": "https://github.com/Mbed-TLS/mbedtls.git",
+      "revision": "068ff080b369adfac81509f9b57b2afabaf82dc5",
+      "submodules": true,
+      "directory": "mbedtls-v3.6.7",
+      "environment": "ESY_MBEDTLS_PATH",
+      "required_files": [
+        "CMakeLists.txt", "include/mbedtls/version.h", "include/mbedtls/build_info.h",
+        "library/ssl_tls.c", "framework/CMakeLists.txt"
+      ]
+    },
+    "littlefs": {
+      "version": "2.11.2",
+      "kind": "git",
+      "url": "https://github.com/littlefs-project/littlefs.git",
+      "revision": "adad0fbbcf5382c20978d07f94f9c13be9041c1b",
+      "directory": "littlefs-v2.11.2",
+      "environment": "ESY_LITTLEFS_PATH",
+      "required_files": ["lfs.c", "lfs.h", "lfs_util.c", "lfs_util.h"]
+    },
+    "fatfs": {
+      "version": "R0.16",
+      "kind": "zip",
+      "url": "https://elm-chan.org/fsw/ff/arc/ff16.zip",
+      "sha256": "99f7dc1f7e095356e4a9e3dbe29959090d8b948afe2bbc5441e52fdf4b85449e",
+      "directory": "fatfs-r016",
+      "environment": "ESY_FATFS_PATH",
+      "source_subdirectory": "source",
+      "required_files": ["ff.c", "ff.h", "diskio.h", "ffunicode.c"]
+    },
+    "lvgl": {
+      "version": "9.6.0",
+      "kind": "git",
+      "url": "https://github.com/lvgl/lvgl.git",
+      "revision": "80ca777e37a2b176770726a02e07a6fb79ef0b39",
+      "directory": "lvgl-v9.6.0",
+      "environment": "LVGL_PATH",
+      "required_files": ["CMakeLists.txt", "lvgl.h", "src/lvgl.h"]
+    }
+  }
+}

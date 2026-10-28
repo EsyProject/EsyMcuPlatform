@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+build
+__pycache__/
+*.py[cod]
+.vscode
+.agents
+.codex
+AGENTS.md
+/docs/agents
+/.third-party/

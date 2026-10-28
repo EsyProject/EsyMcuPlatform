@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-FileCopyrightText: 2026 EsyCloud
+#
+# SPDX-License-Identifier: Apache-2.0
+
+if(NOT ESY_FIRMWARE_TARGET)
+    message(FATAL_ERROR "Set ESY_FIRMWARE_TARGET to an existing consumer firmware target.")
+endif()
+if(NOT TARGET ${ESY_FIRMWARE_TARGET})
+    message(FATAL_ERROR "ESY_FIRMWARE_TARGET does not exist: ${ESY_FIRMWARE_TARGET}")
+endif()
+get_target_property(esy_firmware_configured ${ESY_FIRMWARE_TARGET} ESY_FIRMWARE_CONFIGURED)
+if(esy_firmware_configured)
+    return()
+endif()
+if(NOT TARGET esy_opt_default)
+    message(FATAL_ERROR "Firmware integration requires the esy_opt_default target.")
+endif()
+target_link_libraries(${ESY_FIRMWARE_TARGET} PRIVATE esy_opt_default)
+target_compile_definitions(${ESY_FIRMWARE_TARGET} PRIVATE ${ESY_FIRMWARE_COMPILE_DEFINITIONS})
+if(TARGET esy_interrupts)
+    target_link_libraries(${ESY_FIRMWARE_TARGET} PRIVATE esy_interrupts)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/esy_port.cmake")
+if(DEFINED ESY_TARGET_DEVICE)
+    include("${CMAKE_CURRENT_LIST_DIR}/esy_target_device.cmake")
+    esy_configure_target_device()
+endif()
+if(NOT ESY_BUILD_PORT)
+    message(FATAL_ERROR "Unsupported firmware ESY_TARGET_PLATFORM=${ESY_TARGET_PLATFORM}.")
+endif()
+esy_get_port_file(post_project esy_port_firmware_file)
+if(NOT esy_port_firmware_file)
+    message(FATAL_ERROR "Unsupported firmware ESY_TARGET_PLATFORM=${ESY_TARGET_PLATFORM}.")
+endif()
+include("${esy_port_firmware_file}")
+if(NOT COMMAND esy_port_${ESY_BUILD_PORT}_configure_firmware)
+    message(FATAL_ERROR
+        "Port ${ESY_BUILD_PORT} must define esy_port_${ESY_BUILD_PORT}_configure_firmware(target) in post_project.cmake.")
+endif()
+cmake_language(CALL esy_port_${ESY_BUILD_PORT}_configure_firmware "${ESY_FIRMWARE_TARGET}")
+set_property(TARGET ${ESY_FIRMWARE_TARGET} PROPERTY ESY_FIRMWARE_CONFIGURED TRUE)

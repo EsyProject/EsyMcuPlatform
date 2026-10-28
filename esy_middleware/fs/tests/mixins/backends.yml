@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+:project:
+  :build_root: "#{ENV.fetch('ESY_FS_TEST_BUILD_ROOT', 'build')}"
+:paths:
+  :source:
+    - ../src/backends
+    - ../src/media
+  :include:
+    - ../../file/include
+    - ../../file/include/esy_middleware/file
+    - ../../../esy_hal/include
+    - ../../../esy_test/fake/hal
+    - "#{ENV.fetch('ESY_LITTLEFS_PATH')}"
+    - "#{ENV.fetch('ESY_TEST_FATFS_PATH')}"
+:files:
+  :test:
+    - ./test_esy_file_fs.c
+    - ./test_esy_fs_littlefs.c
+    - ./test_esy_fs_flash.c
+    - ./test_esy_fs_fatfs.c
+  :source:
+    - ../src/backends/esy_fs_littlefs.c
+    - ../src/backends/esy_fs_fatfs.c
+    - ../src/media/esy_fs_flash.c
+    - ../../file/src/esy_file.c
+    - ../../file/src/adapters/esy_file_fs.c
+  :support:
+    - ../src/esy_fs.c
+    - ../../file/src/esy_file.c
+    - ../src/backends/esy_fs_fatfs.c
+    - "#{ENV.fetch('ESY_LITTLEFS_PATH')}/lfs.c"
+    - "#{ENV.fetch('ESY_LITTLEFS_PATH')}/lfs_util.c"
+    - "#{ENV.fetch('ESY_TEST_FATFS_PATH')}/ff.c"
+    - "#{ENV.fetch('ESY_TEST_FATFS_PATH')}/ffunicode.c"
+    - ../../../esy_test/fake/hal/fake_esy_hal_flash.c
+:defines:
+  :test:
+    - LFS_NO_MALLOC
+    - LFS_NO_DEBUG
+    - LFS_NO_WARN
+    - LFS_NO_ERROR

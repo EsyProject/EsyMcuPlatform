@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+    - ../src/adapters
+  :include:
+    - ../include
+    - ../include/esy_middleware/remote_manager
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../ota/include
+    - ../../ota/include/esy_middleware/ota
+    - ../../ota/src
+    - ../../settings/include
+    - ../../settings/include/esy_middleware/settings
+    - ../../dual_flash_store/include
+    - ../../dual_flash_store/include/esy_middleware/dual_flash_store
+    - ../../file/include
+    - ../../file/include/esy_middleware/file
+    - ../../coredump/include
+    - ../../coredump/include/esy_middleware/coredump
+    - ../../diagnostics/include
+    - ../../diagnostics/include/esy_middleware/diagnostics
+    - ../../../esy_hal/include
+    - ../../../esy_common/utils/include
+    - ../../../esy_common/utils/include/esy_common/utils/**
+    - ../../../esy_test/fake/hal
+
+:files:
+  :source:
+    - ../src/esy_remote_manager.c
+    - ../src/esy_remote_manager_config.c
+    - ../src/esy_remote_manager_operations.c
+    - ../src/esy_remote_manager_stats.c
+    - ../src/esy_remote_manager_diagnostics.c
+    - ../src/adapters/esy_remote_manager_stats_table.c
+    - ../src/adapters/esy_remote_manager_proto_bin.c
+    - ../src/adapters/esy_remote_manager_ota_adapter.c
+    - ../src/adapters/esy_remote_manager_settings.c
+    - ../src/adapters/esy_remote_manager_coredump_store.c
+    - ../src/adapters/esy_remote_manager_diagnostics_adapter.c
+  :support:
+    - ../src/esy_remote_manager_stats.c
+    - ../src/esy_remote_manager_diagnostics.c
+    - ../../diagnostics/src/esy_diagnostics.c
+    - ../../ota/src/esy_ota.c
+    - ../src/esy_remote_manager_operations.c
+    - ../../settings/src/esy_settings.c
+    - ../../dual_flash_store/src/esy_dual_flash_store.c
+    - ../../file/src/esy_file.c
+    - ../../file/src/adapters/esy_file_ram.c
+    - ../../file/src/adapters/esy_file_dual_flash_store.c
+    - ../../coredump/src/esy_coredump.c
+    - ../../coredump/src/esy_coredump_file.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_flash.c
+    - ../../../esy_common/utils/src/integrity/esy_crc32.c
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :json_artifact_filename: coverage.json
+    :report_include: "../src/.*"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -Wall
+      - -Wextra
+      - -Werror
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

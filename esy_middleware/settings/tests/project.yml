@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - .
+    - ../src
+    - ../../dual_flash_store/src
+    - ../../file/src
+    - ../../file/src/adapters
+    - ../../../esy_test/fake/hal
+    - ../../../esy_common/utils/src/**
+  :include:
+    - .
+    - ../include
+    - ../include/esy_middleware/settings
+    - ../../dual_flash_store/include
+    - ../../file/include
+    - ../../file/include/esy_middleware/file
+    - ../../../esy_hal/include
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../esy_common/utils/include
+    - ../../../esy_common/utils/include/esy_common/utils/**
+    - ../../../esy_test/fake/hal
+
+:files:
+  :source:
+    - ../src/esy_settings.c
+  :support:
+    - settings_wire_fixture.c
+    - ../../dual_flash_store/src/esy_dual_flash_store.c
+    - ../../file/src/esy_file.c
+    - ../../file/src/adapters/esy_file_ram.c
+    - ../../file/src/adapters/esy_file_dual_flash_store.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_flash.c
+    - ../../../esy_common/utils/src/integrity/esy_crc32.c
+
+:defines:
+  :test:
+    - TEST
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :json_artifact_filename: coverage.json
+    :report_include: "../src/.*"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -Wall
+      - -Wextra
+      - -Werror
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

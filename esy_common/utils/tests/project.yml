@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src/**
+  :include:
+    - .
+    - ../include
+    - ../include/esy_common/utils/**
+    - ../include/esy_common
+    - ../../defs/include
+    - ../../defs/include/esy_common/defs/**
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../src/integrity/esy_crc32.c
+    - ../src/integrity/esy_sha256.c
+    - ../src/base/esy_sort.c
+    - ../src/time/esy_datetime.c
+
+:defines:
+  :test:
+    - TEST
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: "../src/.*"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

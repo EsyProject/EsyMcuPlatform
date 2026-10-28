@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+    - ../../../esy_common/ds/src
+    - ../../../esy_test/fake/os
+    - ../../../esy_test/fake/hal
+    - ../../../esy_test/fake/third_party/segger_rtt
+  :include:
+    - .
+    - ../src
+    - ../include
+    - ../include/esy_middleware/logger
+    - ../../../esy_common/ds/include
+    - ../../../esy_common/ds/include/esy_common/ds
+    - ../../os/include
+    - ../../os/include/esy_middleware/os
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../esy_common/device/include
+    - ../../../esy_common/utils/include
+    - ../../../esy_common/utils/include/esy_common/utils/**
+    - ../../../esy_common/utils/include/esy_common
+    - ../../../esy_hal/include
+    - ../../../esy_hal/include/esy_hal
+    - ../../../esy_test/fake/os
+    - ../../../esy_test/fake/hal
+    - ../../../esy_test/fake/third_party/segger_rtt
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../src/esy_logger.c
+    - ../src/esy_logger_backend_printf.c
+    - ../src/esy_logger_backend_printf_core.c
+    - ../src/esy_logger_backend_rtt.c
+    - ../src/esy_logger_backend_rtt_core.c
+    - ../src/esy_logger_backend_uart.c
+    - ../src/esy_logger_backend_uart_core.c
+    - ../../../esy_common/ds/src/esy_block_pool.c
+    - ../../../esy_common/ds/src/esy_block_ring.c
+    - ../../../esy_test/fake/os/fake_esy_os.c
+    - ../../../esy_test/fake/os/fake_esy_os_task.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_dma.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_system.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_uart.c
+    - ../../../esy_test/fake/third_party/segger_rtt/fake_segger_rtt.c
+
+:defines:
+  :test:
+    - TEST
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: "../src/.*"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

@@ -1,0 +1,340 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+add_library(esy_middleware INTERFACE)
+
+if(ENABLE_ESY_OTA_FLASH AND NOT ENABLE_ESY_OTA)
+    message(FATAL_ERROR "ENABLE_ESY_OTA_FLASH requires ENABLE_ESY_OTA")
+endif()
+
+if(ENABLE_ESY_BLE_BTSTACK AND NOT ENABLE_ESY_BLE)
+    message(FATAL_ERROR "ENABLE_ESY_BLE_BTSTACK requires ENABLE_ESY_BLE")
+endif()
+if(ENABLE_ESY_BLE)
+    add_subdirectory(ble)
+    target_link_libraries(esy_middleware INTERFACE esy_ble)
+    if(TARGET esy_ble_btstack)
+        target_link_libraries(esy_middleware INTERFACE esy_ble_btstack)
+    endif()
+endif()
+
+foreach(time_adapter IN ITEMS ENABLE_ESY_TIME_SNTP ENABLE_ESY_TIME_RTC)
+    if(${time_adapter} AND NOT ENABLE_ESY_TIME)
+        message(FATAL_ERROR "${time_adapter} requires ENABLE_ESY_TIME")
+    endif()
+endforeach()
+if(ENABLE_ESY_TIME)
+    add_subdirectory(time)
+    target_link_libraries(esy_middleware INTERFACE esy_time)
+    foreach(time_target IN ITEMS esy_sntp esy_time_rtc)
+        if(TARGET ${time_target})
+            target_link_libraries(esy_middleware INTERFACE ${time_target})
+        endif()
+    endforeach()
+endif()
+
+if(ENABLE_ESY_DUAL_FLASH_STORE)
+    add_subdirectory(dual_flash_store)
+    target_link_libraries(esy_middleware INTERFACE esy_dual_flash_store)
+endif()
+
+foreach(fs_adapter IN ITEMS LITTLEFS FATFS FLASH)
+    if(ENABLE_ESY_FS_${fs_adapter} AND NOT ENABLE_ESY_FS)
+        message(FATAL_ERROR "ENABLE_ESY_FS_${fs_adapter} requires ENABLE_ESY_FS")
+    endif()
+endforeach()
+if(ENABLE_ESY_FS)
+    add_subdirectory(fs)
+    target_link_libraries(esy_middleware INTERFACE esy_fs)
+    foreach(fs_target IN ITEMS esy_fs_littlefs esy_fs_fatfs esy_fs_flash)
+        if(TARGET ${fs_target})
+            target_link_libraries(esy_middleware INTERFACE ${fs_target})
+        endif()
+    endforeach()
+endif()
+
+foreach(file_adapter IN ITEMS FLASH DUAL_FLASH_STORE FS)
+    if(ENABLE_ESY_FILE_${file_adapter} AND NOT ENABLE_ESY_FILE)
+        message(FATAL_ERROR "ENABLE_ESY_FILE_${file_adapter} requires ENABLE_ESY_FILE")
+    endif()
+endforeach()
+if(ENABLE_ESY_COREDUMP_FILE AND NOT ENABLE_ESY_COREDUMP)
+    message(FATAL_ERROR "ENABLE_ESY_COREDUMP_FILE requires ENABLE_ESY_COREDUMP")
+endif()
+if(ENABLE_ESY_FILE)
+    add_subdirectory(file)
+    target_link_libraries(esy_middleware INTERFACE esy_file)
+    foreach(file_target IN ITEMS esy_file_flash esy_file_dual_flash_store esy_file_fs)
+        if(TARGET ${file_target})
+            target_link_libraries(esy_middleware INTERFACE ${file_target})
+        endif()
+    endforeach()
+endif()
+
+if(ENABLE_ESY_SETTINGS)
+    add_subdirectory(settings)
+    target_link_libraries(esy_middleware INTERFACE esy_settings)
+endif()
+
+if(ENABLE_ESY_DIAGNOSTICS)
+    add_subdirectory(diagnostics)
+    target_link_libraries(esy_middleware INTERFACE esy_diagnostics)
+endif()
+foreach(adapter IN ITEMS PROTO_BIN SETTINGS COREDUMP OTA DIAGNOSTICS)
+    if(ENABLE_ESY_REMOTE_MANAGER_${adapter} AND NOT ENABLE_ESY_REMOTE_MANAGER)
+        message(FATAL_ERROR "ENABLE_ESY_REMOTE_MANAGER_${adapter} requires ENABLE_ESY_REMOTE_MANAGER")
+    endif()
+endforeach()
+
+# Feature trimming: add and link each enabled module.
+if(ESY_RTOS STREQUAL "FreeRTOS")
+    add_subdirectory(os)
+    target_link_libraries(esy_middleware INTERFACE esy_os)
+endif()
+
+if(ENABLE_ESY_EVENT_BUS)
+    add_subdirectory(event_bus)
+    target_link_libraries(esy_middleware INTERFACE esy_event_bus)
+endif()
+
+if(ENABLE_ESY_POWER_MANAGER)
+    if(NOT ENABLE_ESY_LOW_POWER)
+        message(FATAL_ERROR "ENABLE_ESY_POWER_MANAGER requires ENABLE_ESY_LOW_POWER")
+    endif()
+    add_subdirectory(power_manager)
+    target_link_libraries(esy_middleware INTERFACE
+        esy_power_manager
+        esy_power_hal_backend
+    )
+    if(TARGET esy_power_freertos_adapter)
+        target_link_libraries(esy_middleware INTERFACE
+            esy_power_freertos_adapter
+        )
+    endif()
+endif()
+
+if(ENABLE_ESY_LOGGER)
+    add_subdirectory(logger)
+    target_link_libraries(esy_middleware INTERFACE esy_logger)
+endif()
+
+if(ENABLE_ESY_COREDUMP)
+    add_subdirectory(coredump)
+    target_link_libraries(esy_middleware INTERFACE esy_coredump)
+endif()
+
+if(ENABLE_ESY_CORE_LOCKOUT)
+    add_subdirectory(core_lockout)
+    if(ESY_RTOS STREQUAL "FreeRTOS")
+        target_link_libraries(esy_middleware INTERFACE esy_core_lockout)
+    else()
+        target_link_libraries(esy_middleware INTERFACE esy_core_lockout_core)
+    endif()
+endif()
+
+if(ENABLE_ESY_NUMERICS)
+    add_subdirectory(numerics)
+    target_link_libraries(esy_middleware INTERFACE esy_numerics)
+endif()
+
+if(ENABLE_ESY_USB)
+    add_subdirectory(usb)
+    if(TARGET esy_usb)
+        target_link_libraries(esy_middleware INTERFACE esy_usb)
+    endif()
+endif()
+
+foreach(tls_dependency IN ITEMS NETWORK CREDENTIALS CRYPTO)
+    if(ENABLE_ESY_TLS AND NOT ENABLE_ESY_${tls_dependency})
+        message(FATAL_ERROR "ENABLE_ESY_TLS requires ENABLE_ESY_${tls_dependency}")
+    endif()
+endforeach()
+
+foreach(credentials_store_dependency IN ITEMS CREDENTIALS FILE)
+    if(ENABLE_ESY_CREDENTIALS_STORE AND NOT ENABLE_ESY_${credentials_store_dependency})
+        message(FATAL_ERROR "ENABLE_ESY_CREDENTIALS_STORE requires ENABLE_ESY_${credentials_store_dependency}")
+    endif()
+endforeach()
+
+if(ENABLE_ESY_CREDENTIALS)
+    add_subdirectory(credentials)
+    target_link_libraries(esy_middleware INTERFACE esy_credentials)
+    if(TARGET esy_credentials_store)
+        target_link_libraries(esy_middleware INTERFACE esy_credentials_store)
+    endif()
+endif()
+
+if(ENABLE_ESY_CRYPTO)
+    add_subdirectory(crypto)
+    target_link_libraries(esy_middleware INTERFACE esy_crypto)
+endif()
+
+if(ENABLE_ESY_NETWORK)
+    add_subdirectory(network)
+    target_link_libraries(esy_middleware INTERFACE esy_network)
+    if(TARGET esy_network_lwip)
+        target_link_libraries(esy_middleware INTERFACE esy_network_lwip)
+    endif()
+endif()
+
+if(ENABLE_ESY_TLS)
+    add_subdirectory(tls)
+    target_link_libraries(esy_middleware INTERFACE esy_tls)
+endif()
+
+if(ENABLE_ESY_IO_SCHEDULER)
+    add_subdirectory(io_scheduler)
+    foreach(adapter IN ITEMS esy_spi_scheduler esy_uart_tx_scheduler)
+        if(TARGET ${adapter})
+            target_link_libraries(esy_middleware INTERFACE ${adapter})
+        elseif(TARGET ${adapter}_core)
+            target_link_libraries(esy_middleware INTERFACE ${adapter}_core)
+        endif()
+    endforeach()
+endif()
+
+foreach(channel IN ITEMS ENABLE_ESY_PROTO_BIN_UART_CHANNEL ENABLE_ESY_PROTO_BIN_USB_CHANNEL
+                         ENABLE_ESY_PROTO_BIN_TCP_CHANNEL)
+    if(${channel} AND NOT ENABLE_ESY_PROTO_BIN)
+        message(FATAL_ERROR "${channel} requires ENABLE_ESY_PROTO_BIN")
+    endif()
+endforeach()
+foreach(component IN ITEMS ENABLE_ESY_PROTO_MODBUS_UART_CHANNEL ENABLE_ESY_PROTO_MODBUS_UART_WORKER
+                           ENABLE_ESY_PROTO_MODBUS_TCP_CHANNEL)
+    if(${component} AND NOT ENABLE_ESY_PROTO_MODBUS)
+        message(FATAL_ERROR "${component} requires ENABLE_ESY_PROTO_MODBUS")
+    endif()
+endforeach()
+if(ENABLE_ESY_PROTO_BIN OR ENABLE_ESY_PROTO_MODBUS OR ENABLE_ESY_PROTO_JSON_TCP_CHANNEL
+        OR ENABLE_ESY_PROTO_JSON_USB_CHANNEL)
+    add_subdirectory(protocol)
+    foreach(protocol_target IN ITEMS esy_proto_bin_session esy_proto_modbus_manager
+            esy_proto_bin_uart_channel esy_proto_bin_usb_channel esy_proto_bin_tcp_channel
+            esy_proto_modbus_uart_channel esy_proto_modbus_uart_worker esy_proto_modbus_tcp_channel
+            esy_proto_json_tcp_channel esy_proto_json_usb_channel)
+        if(TARGET ${protocol_target})
+            target_link_libraries(esy_middleware INTERFACE ${protocol_target})
+        endif()
+    endforeach()
+endif()
+
+if(ENABLE_ESY_HTTP_CLIENT)
+    if(NOT ENABLE_ESY_NETWORK)
+        message(FATAL_ERROR "ENABLE_ESY_HTTP_CLIENT requires ENABLE_ESY_NETWORK")
+    endif()
+    add_subdirectory(http)
+    target_link_libraries(esy_middleware INTERFACE esy_http_client)
+endif()
+
+if(ENABLE_ESY_MQTT)
+    add_subdirectory(mqtt)
+    target_link_libraries(esy_middleware INTERFACE esy_mqtt)
+endif()
+
+if(ENABLE_ESY_INPUT)
+    add_subdirectory(input)
+    target_link_libraries(esy_middleware INTERFACE esy_input)
+    if(TARGET esy_input_gpio)
+        target_link_libraries(esy_middleware INTERFACE esy_input_gpio)
+    endif()
+endif()
+
+if(ENABLE_ESY_SENSOR)
+    add_subdirectory(sensor)
+    target_link_libraries(esy_middleware INTERFACE esy_sensor)
+    if(TARGET esy_sensor_i2c)
+        target_link_libraries(esy_middleware INTERFACE esy_sensor_i2c)
+    endif()
+endif()
+
+if(ENABLE_ESY_TOUCH)
+    add_subdirectory(touch)
+    target_link_libraries(esy_middleware INTERFACE esy_touch)
+    if(TARGET esy_touch_device)
+        target_link_libraries(esy_middleware INTERFACE esy_touch_device)
+    endif()
+endif()
+
+if(ENABLE_ESY_LCD)
+    add_subdirectory(lcd)
+    target_link_libraries(esy_middleware INTERFACE esy_lcd)
+    if(TARGET esy_lcd_device)
+        target_link_libraries(esy_middleware INTERFACE esy_lcd_device)
+    endif()
+endif()
+
+if(ENABLE_ESY_LVGL)
+    add_subdirectory(lvgl)
+    target_link_libraries(esy_middleware INTERFACE esy_lvgl)
+    if(TARGET esy_lvgl_touch)
+        target_link_libraries(esy_middleware INTERFACE esy_lvgl_touch)
+    endif()
+endif()
+
+if(ENABLE_ESY_BOOTLOADER)
+    add_subdirectory(bootloader)
+    target_link_libraries(esy_middleware INTERFACE esy_bootloader)
+endif()
+
+if(ENABLE_ESY_OTA)
+    add_subdirectory(ota)
+    target_link_libraries(esy_middleware INTERFACE esy_ota_core)
+    if(TARGET esy_ota_flash)
+        target_link_libraries(esy_middleware INTERFACE esy_ota_flash)
+    endif()
+endif()
+
+if(ENABLE_ESY_REMOTE_MANAGER)
+    add_subdirectory(remote_manager)
+    target_link_libraries(esy_middleware INTERFACE esy_remote_manager)
+    foreach(adapter IN ITEMS proto_bin settings coredump_store ota diagnostics)
+        if(TARGET esy_remote_manager_${adapter})
+            target_link_libraries(esy_middleware INTERFACE esy_remote_manager_${adapter})
+        endif()
+    endforeach()
+endif()
+
+if(ENABLE_ESY_WIFI_MANAGER)
+    if(NOT ENABLE_ESY_WIFI)
+        message(FATAL_ERROR "ENABLE_ESY_WIFI_MANAGER requires ENABLE_ESY_WIFI")
+    endif()
+    add_subdirectory(wifi)
+    target_link_libraries(esy_middleware INTERFACE esy_wifi_manager)
+endif()
+
+if(ENABLE_ESY_WATCHDOG_MONITOR)
+    add_subdirectory(watchdog_monitor)
+    if(ESY_RTOS STREQUAL "FreeRTOS")
+        target_link_libraries(esy_middleware INTERFACE esy_watchdog_monitor)
+    else()
+        target_link_libraries(esy_middleware INTERFACE esy_watchdog_monitor_core)
+    endif()
+endif()
+
+if(TARGET esy_power_manager AND TARGET esy_watchdog_monitor_core)
+    add_library(esy_power_watchdog_constraint STATIC
+        power_manager/src/esy_power_watchdog_constraint.c
+    )
+    target_include_directories(esy_power_watchdog_constraint
+        PUBLIC
+            ${CMAKE_CURRENT_LIST_DIR}/power_manager/include
+    )
+    target_link_libraries(esy_power_watchdog_constraint
+        PUBLIC
+            esy_power_manager
+            esy_watchdog_monitor_core
+        PRIVATE
+            esy_common
+            esy_opt_default
+    )
+endif()
+
+
+if(ENABLE_ESY_FREQ_SYNTH)
+    add_subdirectory(freq_synth)
+    target_link_libraries(esy_middleware INTERFACE esy_freq_synth)
+    if(TARGET esy_freq_synth_device)
+        target_link_libraries(esy_middleware INTERFACE esy_freq_synth_device)
+    endif()
+endif()

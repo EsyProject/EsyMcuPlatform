@@ -1,0 +1,6 @@
+# Exercise the real wrapper when native snapshots are unavailable.
+:project:
+  :build_root: build/trace_disabled
+:defines:
+  :test:
+    - configUSE_TRACE_FACILITY=0

@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+  :include:
+    - .
+    - ../include
+    - ../include/esy_common/smf
+    - ../../defs/include
+    - ../../defs/include/esy_common/defs/**
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../src/esy_smf.c
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :config_file: gcovr.cfg
+    :report_root: ".."
+    :json_artifact_filename: coverage.json
+
+:flags:
+  :test:
+    :compile:
+      - -std=c11
+      - -Wall
+      - -Wextra
+      - -Werror
+  :gcov:
+    :compile:
+      - -std=c11

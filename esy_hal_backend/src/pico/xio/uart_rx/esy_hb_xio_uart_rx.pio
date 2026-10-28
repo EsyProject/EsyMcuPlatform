@@ -1,0 +1,36 @@
+; SPDX-FileCopyrightText: 2026 EsyProject contributors
+; SPDX-FileCopyrightText: 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+;
+; Adapted from pico-examples/pio/uart_rx/uart_rx.pio.
+; See LICENSES/BSD-3-Clause.txt for the upstream license.
+
+.pio_version 0
+
+.program xio_uart_rx
+; 8N1 RX, 1 bit = 8 instruction cycles. Push only after a valid stop bit.
+; C-side setup:
+;   - sm_config_set_in_shift(right=true, autopush=false, thresh=32)
+;   - sm_config_set_in_pins(pin=rx_pin)
+;   - sm_config_set_jmp_pin(pin=rx_pin)
+;   - clkdiv = clk_sys / (8 * baud)
+
+.wrap_target
+start:
+    wait 0 pin 0           ; Wait for the low start bit.
+    set  x, 7    [10]      ; Delay to the center of the first data bit.
+
+bitloop:
+    in   pins, 1           ; Sample one bit, LSB first.
+    jmp  x-- bitloop [6]   ; 8 cycles per bit.
+
+    jmp  pin good_stop     ; Stop bit must be high.
+    irq  4      rel        ; Framing or break marker.
+    wait 1 pin 0           ; Wait for the line to return idle.
+    jmp  start             ; Drop this byte.
+
+good_stop:
+    push                   ; Push only valid frames.
+    jmp  start
+.wrap

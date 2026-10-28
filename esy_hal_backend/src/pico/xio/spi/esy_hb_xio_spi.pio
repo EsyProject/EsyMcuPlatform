@@ -1,0 +1,137 @@
+; SPDX-FileCopyrightText: 2026 EsyProject contributors
+; SPDX-FileCopyrightText: 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+;
+; Adapted from pico-examples/pio/spi/spi.pio.
+; See LICENSES/BSD-3-Clause.txt for the upstream license.
+
+; -----------------------------------------------------------------------------
+; EsyProject XIO SPI (PIO)
+; - Based on the official SDK spi_cpha0/1 programs.
+; - Keeps explicit stall points, CPHA=1 front porch, and CS porch timing.
+; -----------------------------------------------------------------------------
+.pio_version 0
+
+; =========================
+; CPHA = 0, sample on rising edge.
+; =========================
+.program xio_spi_cpha0
+.side_set 1
+    ; TX FIFO stalls here while SCK remains low.
+    out pins, 1 side 0 [1]
+    in  pins, 1 side 1 [1]
+
+; =========================
+; CPHA = 1, sample on falling edge.
+; =========================
+.program xio_spi_cpha1
+.side_set 1
+    out x, 1    side 0        ; Stall here with SCK low.
+    mov pins, x side 1 [1]    ; Update MOSI on the rising edge.
+    in  pins, 1  side 0       ; Sample MISO on the falling edge.
+
+; =========================
+; CPHA = 0 with external trigger.
+; =========================
+.program xio_spi_cpha0_trig
+.side_set 1 opt
+.wrap_target
+start:
+    wait 0 pin 0              ; placeholder -> wait 0 gpio TRIG
+    wait 1 pin 0              ; placeholder -> wait 1 gpio TRIG
+    set   y, 31               ; placeholder -> set y, (data_bits-1) & 0x1f
+
+bitloop:
+    out  pins, 1 side 0 [1]   ; Update MOSI before the falling edge.
+    in   pins, 1 side 1 [1]   ; Sample MISO on the rising edge.
+    jmp  y-- bitloop
+    jmp  start side 0        ; Restore idle SCK before waiting for the next trigger.
+.wrap
+
+; =========================
+; CPHA = 1 with external trigger.
+; =========================
+.program xio_spi_cpha1_trig
+.side_set 1 opt
+.wrap_target
+start:
+    wait 0 pin 0              ; -> wait 0 gpio TRIG
+    wait 1 pin 0              ; -> wait 1 gpio TRIG
+    set   y, 31               ; -> set y, (data_bits-1)
+
+bitloop:
+    out  x, 1   side 0        ; Stall point with SCK low.
+    mov  pins, x side 1 [1]   ; Update MOSI on the rising edge.
+    in   pins, 1  side 0      ; Sample MISO on the falling edge.
+    jmp  y-- bitloop
+    jmp  start side 0
+.wrap
+
+
+; =========================
+; Slave CPHA = 0: master samples rising edge; slave updates MISO while SCK is low.
+; =========================
+.program xio_spi_slave_cpha0
+wait_cs_low:
+    wait 0 pin 0            ; Placeholder patched to CS active level.
+    pull ifempty            ; Preload OSR before the first clock.
+
+sync_sck_low:
+    jmp pin sync_sck_low    ; Start after SCK is low.
+
+bitloop:
+    wait 0 pin 0            ; Keep CS active inside the frame.
+    out pins, 1             ; Drive the next MISO bit while SCK is low.
+wait_rise:
+    jmp pin got_rise
+    jmp wait_rise
+got_rise:
+    in pins, 1              ; Sample MOSI on the rising edge.
+wait_fall:
+    jmp pin wait_fall       ; Wait until SCK returns low.
+    jmp bitloop
+
+wait_cs_high:
+    wait 1 pin 0            ; Placeholder patched to CS inactive level.
+    jmp wait_cs_low
+
+
+; Independent CS monitor. Side-set controls only MISO output enable, while the
+; data SM controls only its value. It keeps running when data/clock work stalls.
+; The backend patches both WAITs to the selected CS GPIO and polarity.
+.program xio_spi_slave_cs
+.side_set 1 pindirs
+    wait 0 pin 0 side 0      ; High impedance while waiting for active CS.
+    wait 1 pin 0 side 1      ; Drive only until CS becomes inactive; then wrap.
+
+
+
+
+; =========================
+; Slave CPHA = 1: master samples falling edge; slave updates MISO on rising edge.
+; =========================
+.program xio_spi_slave_cpha1
+wait_cs_low:
+    wait 0 pin 0            ; Placeholder patched to CS active level.
+    pull ifempty            ; Preload OSR.
+
+sync_sck_low:
+    jmp pin sync_sck_low
+
+bitloop:
+    wait 0 pin 0            ; Keep CS active inside the frame.
+    out x, 1                ; Fetch the next output bit into X.
+wait_rise1:
+    jmp pin set_miso        ; Wait for the rising edge.
+    jmp wait_rise1
+set_miso:
+    mov pins, x             ; Update MISO on the rising edge.
+wait_fall1:
+    jmp pin wait_fall1      ; Wait for the falling edge.
+    in pins, 1              ; Sample MOSI on the falling edge.
+    jmp bitloop
+
+wait_cs_high:
+    wait 1 pin 0            ; Placeholder patched to CS inactive level.
+    jmp wait_cs_low

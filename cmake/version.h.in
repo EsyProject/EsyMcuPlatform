@@ -1,0 +1,17 @@
+/*
+ * SPDX-FileCopyrightText: 2026 EsyProject contributors
+ * SPDX-FileCopyrightText: 2026 EsyCloud
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @file version.h
+ * @brief Firmware version generated from the consumer's CMake project version.
+ */
+#pragma once
+
+#define APP_VERSION_MAJOR @ESY_APP_VERSION_MAJOR@
+#define APP_VERSION_MINOR @ESY_APP_VERSION_MINOR@
+#define APP_VERSION_PATCH @ESY_APP_VERSION_PATCH@
+#define APP_VERSION (APP_VERSION_MAJOR * 10000 + APP_VERSION_MINOR * 100 + APP_VERSION_PATCH)

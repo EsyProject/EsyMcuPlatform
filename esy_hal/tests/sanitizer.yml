@@ -1,0 +1,10 @@
+:flags:
+  :test:
+    :compile:
+      - -fsanitize=address,undefined,float-cast-overflow
+      - -fno-sanitize-recover=all
+      - -fno-omit-frame-pointer
+      - -fno-pie
+    :link:
+      - -fsanitize=address,undefined,float-cast-overflow
+      - -no-pie

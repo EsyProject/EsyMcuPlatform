@@ -1,0 +1,12 @@
+:project:
+  :build_root: build/sanitizer
+:flags:
+  :test:
+    :compile:
+      - -fsanitize=address,undefined
+      - -fno-sanitize-recover=all
+      - -fno-omit-frame-pointer
+      - -fno-pie
+    :link:
+      - -fsanitize=address,undefined
+      - -no-pie

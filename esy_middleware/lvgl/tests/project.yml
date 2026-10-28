@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+    - ../../lcd/src
+    - ../../touch/src
+    - ../../../esy_test/fake/third_party/lvgl
+  :include:
+    - .
+    - ../include
+    - ../include/esy_middleware/lvgl
+    - ../../lcd/include
+    - ../../lcd/include/esy_middleware/lcd
+    - ../../touch/include
+    - ../../touch/include/esy_middleware/touch
+    - ../../os/include
+    - ../../os/include/esy_middleware/os
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../esy_common/utils/include
+    - ../../../esy_common/utils/include/esy_common/utils/**
+    - ../../../esy_common/utils/include/esy_common
+    - ../../../esy_common/device/include
+    - ../../../esy_common/device/include/esy_common/device
+    - ../../../esy_hal/include
+    - ../../../esy_hal/include/esy_hal
+    - ../../../esy_test/fake/os
+    - ../../../esy_test/fake/hal
+    - ../../../esy_test/fake/third_party/lvgl
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../../../esy_test/fake/third_party/lvgl/fake_lvgl.c
+    - ../../lcd/src/esy_lcd.c
+    - ../../touch/src/esy_touch.c
+    - ../../../esy_common/device/src/esy_device.c
+    - ../../../esy_test/fake/os/fake_esy_os.c
+    - ../../../esy_test/fake/os/fake_esy_os_queue.c
+    - ../../../esy_test/fake/os/fake_esy_os_task.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_system.c
+
+:defines:
+  :test:
+    - TEST
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: "../src/.*"
+
+:flags:
+  :test:
+    :compile:
+      :*:
+        - -std=c11

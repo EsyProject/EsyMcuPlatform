@@ -1,0 +1,15 @@
+:project:
+  :build_root: build/sanitizer
+:defines:
+  :test:
+    - ESY_PROTOCOL_SANITIZER=1
+:flags:
+  :test:
+    :compile:
+      - -fsanitize=address,undefined
+      - -fno-sanitize-recover=all
+      - -fno-omit-frame-pointer
+      - -fno-pie
+    :link:
+      - -fsanitize=address,undefined
+      - -no-pie

@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ..
+  :include:
+    - .
+    - ..
+    - ../../../../esy_common/defs/include
+    - ../../../../esy_common/defs/include/esy_common/defs/**
+    - ../../../../esy_common/device/include
+    - ../../../../esy_common/device/include/esy_common/device
+    - ../../../../esy_hal/include
+    - ../../../../esy_hal/include/esy_hal
+
+:files:
+  :test: []
+  :source: []
+  :support:
+    - ../fake_esy_hal_gpio.c
+    - ../fake_esy_hal_gpio_pm.c
+    - ../fake_esy_hal_system.c
+    - ../fake_esy_hal_boot.c
+    - ../fake_esy_hal_flash.c
+    - ../fake_esy_hal_dma.c
+    - ../fake_esy_hal_pwm.c
+    - ../fake_esy_hal_spi.c
+    - ../fake_esy_hal_i2c.c
+    - ../fake_esy_hal_uart.c
+
+:defines:
+  :test:
+    - TEST
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+  :gcovr:
+    :report_include: "../fake_esy_hal_(gpio|gpio_pm|system|boot|flash|dma|pwm|spi|i2c|uart)\\.c"
+
+:tools:
+  :test_compiler:
+    :name: gcc
+    :flags:
+      - -std=c11
+      - -fprofile-arcs
+      - -ftest-coverage
+  :test_linker:
+    :name: gcc
+    :flags:
+      - -fprofile-arcs
+      - -ftest-coverage

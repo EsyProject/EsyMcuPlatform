@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-FileCopyrightText: 2026 EsyCloud
+#
+# SPDX-License-Identifier: Apache-2.0
+
+include_guard(DIRECTORY)
+
+# An explicit consumer import and automatic library assembly share one setup.
+if(esy_project_import_complete)
+    return()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/esy_feature_snapshot.cmake")
+esy_invalidate_feature_snapshot()
+
+# This entry runs after the consumer project(), before library assembly.
+if(NOT CMAKE_C_COMPILER_LOADED AND NOT CMAKE_CXX_COMPILER_LOADED)
+    message(FATAL_ERROR "Include esy_project_import.cmake after project().")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/esy_target_device.cmake")
+esy_configure_target_device()
+if(NOT ESY_BOARD_PATH)
+    message(FATAL_ERROR "Project import requires an explicit ESY_BOARD_PATH.")
+endif()
+if(ESY_FEATURE_IMPORT_FILE)
+    if(NOT EXISTS "${ESY_FEATURE_IMPORT_FILE}")
+        message(FATAL_ERROR "ESY_FEATURE_IMPORT_FILE does not exist: ${ESY_FEATURE_IMPORT_FILE}")
+    endif()
+    include("${ESY_FEATURE_IMPORT_FILE}")
+endif()
+if(NOT TARGET esy_project_options)
+    add_library(esy_project_options INTERFACE)
+endif()
+if(NOT TARGET Esy::project_options)
+    add_library(Esy::project_options ALIAS esy_project_options)
+endif()
+target_compile_definitions(esy_project_options INTERFACE "ESY_PLATFORM_${ESY_TARGET_PLATFORM}")
+target_compile_definitions(esy_project_options INTERFACE ${ESY_PROJECT_COMPILE_DEFINITIONS})
+if(ENABLE_ESY_QEMU)
+    target_compile_definitions(esy_project_options INTERFACE ENABLE_ESY_QEMU)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/esy_port.cmake")
+esy_call_port_hook(configure_project_options)
+
+if(ESY_SPECS_DIR)
+    target_include_directories(esy_project_options INTERFACE
+        "${ESY_SPECS_DIR}/include"
+        "${ESY_SPECS_DIR}/include/specs")
+endif()
+if(ESY_RTOS_CONFIG_DIR)
+    target_include_directories(esy_project_options INTERFACE "${ESY_RTOS_CONFIG_DIR}")
+endif()
+if(ESY_VERSION_TEMPLATE)
+    if(NOT GENERATED_INCLUDE_DIR)
+        message(FATAL_ERROR "ESY_VERSION_TEMPLATE requires GENERATED_INCLUDE_DIR.")
+    endif()
+    if(NOT EXISTS "${ESY_VERSION_TEMPLATE}")
+        message(FATAL_ERROR "ESY_VERSION_TEMPLATE does not exist: ${ESY_VERSION_TEMPLATE}")
+    endif()
+    # Keep rendering variables local and preserve custom PROJECT_VERSION fields.
+    function(esy_configure_version_header esy_version_template_path esy_version_output_path)
+        foreach(esy_version_component IN ITEMS MAJOR MINOR PATCH)
+            # Render decimal literals without interpreting zero padding as octal.
+            string(REGEX REPLACE "^0+" "" ESY_APP_VERSION_${esy_version_component}
+                "${PROJECT_VERSION_${esy_version_component}}")
+            if(ESY_APP_VERSION_${esy_version_component} STREQUAL "")
+                set(ESY_APP_VERSION_${esy_version_component} 0)
+            endif()
+        endforeach()
+        configure_file("${esy_version_template_path}" "${esy_version_output_path}" @ONLY)
+    endfunction()
+    esy_configure_version_header("${ESY_VERSION_TEMPLATE}" "${GENERATED_INCLUDE_DIR}/version.h")
+endif()
+if(GENERATED_INCLUDE_DIR)
+    target_include_directories(esy_project_options INTERFACE "${GENERATED_INCLUDE_DIR}")
+endif()
+
+foreach(option_target IN ITEMS esy_opt_default esy_opt_speed)
+    if(NOT TARGET ${option_target})
+        add_library(${option_target} INTERFACE)
+        if(option_target STREQUAL "esy_opt_default")
+            target_compile_options(${option_target} INTERFACE ${ESY_DEFAULT_COMPILE_OPTIONS})
+        else()
+            target_compile_options(${option_target} INTERFACE ${ESY_SPEED_COMPILE_OPTIONS})
+        endif()
+        target_link_options(${option_target} INTERFACE ${ESY_DEFAULT_LINK_OPTIONS})
+    endif()
+    target_link_libraries(${option_target} INTERFACE esy_project_options)
+    target_compile_options(${option_target} INTERFACE ${ESY_PLATFORM_COMPILE_OPTIONS})
+    target_link_options(${option_target} INTERFACE ${ESY_PLATFORM_LINK_OPTIONS})
+endforeach()
+
+include("${CMAKE_CURRENT_LIST_DIR}/esy_third_party_import.cmake")
+esy_generate_feature_snapshot()
+set(esy_project_import_complete TRUE)

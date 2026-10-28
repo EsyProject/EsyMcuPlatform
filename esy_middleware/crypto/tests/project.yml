@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+:project:
+  :which_ceedling: gem
+  :ceedling_version: 1.1.8
+  :use_mocks: FALSE
+  :use_test_preprocessor: :all
+  :build_root: build
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - .
+  :source:
+    - ../src
+  :include:
+    - ../include
+    - ../include/esy_middleware/crypto
+    - ../../../esy_common/defs/include
+    - ../../../esy_common/defs/include/esy_common/defs/**
+    - support
+    - "@ESY_MBEDTLS_PATH@/include"
+    - "@ESY_MBEDTLS_PATH@/library"
+
+:files:
+  :test: []
+  :source:
+    - ../src/esy_crypto_mbedtls.c
+  :support:
+    - "@ESY_MBEDTLS_PATH@/library/ctr_drbg.c"
+    - "@ESY_MBEDTLS_PATH@/library/aes.c"
+    - "@ESY_MBEDTLS_PATH@/library/platform_util.c"
+
+:defines:
+  :test:
+    - TEST
+    - 'MBEDTLS_CONFIG_FILE=<crypto_test_config.h>'
+
+:plugins:
+  :enabled:
+    - report_tests_pretty_stdout
+    - compile_commands_json_db
+    - gcov
+
+:gcov:
+  :reports:
+    - Text
+    - HtmlDetailed
+    - Json
+  :gcovr:
+    :report_root: ".."
+    :json_artifact_filename: coverage.json
+    :report_include: '../src/.*'
+
+:flags:
+  :test:
+    :compile:
+      - -std=c11
+      - -Wall
+      - -Wextra
+  :gcov:
+    :compile:
+      - -std=c11
