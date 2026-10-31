@@ -24,8 +24,11 @@ All public headers are in `include/esy_middleware/freq_synth/`:
   ADF4372 additionally provides calibration capture and fast tuning.
 - `esy_adf4351_device.h` and `esy_adf4372_device.h`: typed graph registration.
 - `esy_lmx2594.h` and `esy_lmx2592.h`: independent chip configurations,
-  init/deinit, register readback and lock checks. Both TI backends use synchronous caller-driven calls without an OS dependency or a
-  device-graph/PM adapter.
+  init/deinit, register readback and lock checks. LMX2594 also supplies
+  `esy_lmx2594_vco_calibration_t`, `esy_lmx2594_read_vco_calibration()` and
+  `esy_lmx2594_set_frequency_fast()` for explicit calibration capture and
+  exact-frequency full assist. Both TI backends use synchronous caller-driven
+  calls without an OS dependency or a device-graph/PM adapter.
 
 `set_frequency_hz` is the core attachment capability. An attached handle may be
 faulted; attachment alone does not imply that operations are available. Missing
@@ -127,6 +130,38 @@ deinit; cleanup failure leaves the owner-held handle attached for another
 `esy_adf4351_deinit()` attempt. Do not reset or reuse it. The frequency query
 reports the programmed value, not a measured PLL lock. RF enabling is a separate
 `esy_freq_synth_set_output_enable()` operation after product startup admission.
+
+For an initialized LMX2594 handle at an automatically calibrated frequency,
+capture a caller-owned snapshot, reestablish lock after readback restoration,
+then revisit that exact frequency with full assist:
+
+```c
+#include "esy_middleware/freq_synth/esy_lmx2594.h"
+
+esy_err_t capture_and_revisit(esy_freq_synth_t *synth) {
+    esy_lmx2594_vco_calibration_t saved;
+    esy_err_t result = esy_lmx2594_read_vco_calibration(synth, 10000u, &saved);
+    if (result == ESY_OK) {
+        result = esy_lmx2594_wait_for_lock(synth, 10000u);
+    }
+    if (result == ESY_OK) {
+        result = esy_lmx2594_set_frequency_fast(synth, saved.frequency_hz, &saved);
+    }
+    if (result == ESY_OK) {
+        result = esy_lmx2594_wait_for_lock(synth, 200u);
+    }
+    return result;
+}
+```
+
+The caller retains the initialized handle, SPI and GPIO for this serialized,
+non-ISR call and remains responsible for analog settling, output admission
+and eventual `esy_lmx2594_deinit()`. Capture is active hardware I/O and its
+restoration rearms the lock guard. A mutating I/O or restoration failure
+requires deinit with all borrowed resources retained; do not continue tuning
+a faulted handle. The example returns unsupported assistance or lock timeout
+to its owner instead of promising a scan deadline. The library stores no
+calibration cache or frequency-neighborhood policy.
 
 For PM, initialize the hardware and synthesizer, register the SPI parent and
 then the matching typed synthesizer binding with that parent in its dependency
@@ -240,15 +275,20 @@ the integer-Hz portion of PFD/DEN/output-divider.
 
 Initialization resets the chip, writes every required register R78 down to R0,
 waits 10 ms and triggers FCAL. Automatic no-assist calibration uses amplitude
-start 300, capcode start 183 and VCO7, except 11.9..12.1 GHz uses VCO4 as TI
-requires. Every tune programs N, NUM/DEN, MASH/PFD fields and triggers FCAL.
+start 300, capcode start 183 and VCO7, except the inclusive 11.9..12.1 GHz
+interval uses VCO4 and capcode start 1 as TI requires, retaining amplitude
+start 300. Initialization and normal transitions update R78 for that interval.
+Normal generic tuning programs N, NUM/DEN and MASH/PFD fields,
+clears full-assist force bits and triggers FCAL, including identical requests.
 RFoutA is MAIN; RFoutB is AUX and starts powered down, routed to VCO to avoid
 unnecessary divider power. Enabling AUX routes it to the same fixed frequency
 as MAIN. Both power codes are 0..63 and must be characterized with the actual
 output pullups.
 `mute_till_lock` programs TI's OUT_MUTE and complementary OUT_FORCE fields for
 calibration muting. It does not establish the analog output's settling time or
-provide an RF safety interlock.
+provide an RF safety interlock. A consumer response delay that starts at the end
+of programming and overlaps lock waiting is not a post-lock or post-unmute
+delay; characterize the interval from RF restoration to the actual measurement.
 
 MUXout normally indicates combined calibration and indirect-Vtune lock detect
 (LD_TYPE=1, LD_DLY=1000). Readback temporarily selects its serial-data function
@@ -259,12 +299,48 @@ restoration faults the handle; register output objects remain unchanged on
 errors. Ordinary lock checks never write registers: after the guard they read
 only MUXout. Once a lock check observes the guard complete, time-counter wrap
 does not restart it; a new tune or diagnostic readback rearms it.
-The guard rejects immediate stale status; it is not evidence of
-analog settling. The explicit lock waiter polls at 5 us with a caller-supplied
-timeout; it uses the HAL time counter and can be extended by scheduling and
+The guard rejects immediate stale status; it is not evidence of completed
+amplitude calibration or analog settling. It is a software policy rather than
+a guaranteed maximum calibration time. The explicit lock waiter polls at 5 us
+with a caller-supplied timeout; it uses the HAL time counter and can be extended by scheduling and
 blocking transfers. Initialization and ordinary tuning do not wait for lock.
 Consumers must characterize RF and analog response before choosing measurement
 delays.
+
+LMX2594 full assist uses an explicitly captured, caller-owned snapshot containing
+the exact MAIN frequency, reference frequency, PFD, output divider, DACISET,
+VCO core and CAPCTRL. `esy_lmx2594_read_vco_calibration()` requires automatic
+mode and first establishes lock. It selects MUXout readback once, waits at
+least 50 us for the R0 amplitude-calibration side effect, checks indirect Vtune
+and captures R110, R111 and R112 in the same readback session. Restoration to
+lock detect is attempted on every exit after the switch. The destination is
+unchanged unless the complete capture succeeds. A recoverable read error or
+timeout with successful restoration leaves the handle usable; failed
+restoration returns `ESY_ERR_STATE` and faults it. Successful restoration rearms
+the 50 us guard, so the owner must recheck lock and analog settling before
+sampling or admitting the snapshot to an acquisition cache.
+
+The capture timeout uses the HAL monotonic 32-bit microsecond clock and includes
+initial lock, readback guard and reads. Its range is 0..INT32_MAX us; a zero
+timeout probes initial lock and returns timeout without switching MUXout.
+Synchronous transfers and mandatory restoration may extend elapsed time.
+The clock must advance throughout the call, with observations less than
+2^31 us apart.
+
+`esy_lmx2594_set_frequency_fast()` accepts only an exact frequency and matching
+reference, PFD and divider. It writes changed frequency and forced-calibration
+fields without R0 or FCAL, preserving output enables and power. It rearms the
+conservative 50 us guard; success means programmed full assist, not verified
+lock or analog settling. Invalid snapshots and unsupported VCO assistance
+perform no SPI/GPIO access. Partial mutating I/O faults the handle and permits
+only deinit. The inclusive 11.9..12.1 GHz VCO interval is unsupported by both
+capture and full assist, returning `ESY_ERR_NOT_SUPPORTED` without I/O; use
+normal automatic tuning there. No interpolation or nearby-frequency reuse is
+provided. A snapshot is valid only for the same physical device and initialization
+lifecycle; consumers must invalidate their caches after reset, power/reference
+changes or other conditions that invalidate calibration, and characterize
+supply/temperature validity. The backend retains no snapshot, LRU policy,
+background worker or prewarming behavior.
 
 LMX2592 follows [TI SNAS646G](https://www.ti.com/lit/ds/symlink/lmx2592.pdf),
 Tables 7-2 and 7-4, Figure 7-5 and Sections 7.3 through 7.6. It is a distinct
@@ -372,6 +448,10 @@ check descending initialization and delayed FCAL, exercise 101-point stepping,
 readback restoration, lock timeouts, rejected configurations and cleanup retry.
 LMX2594 lock-guard regressions cover a complete microsecond-counter cycle,
 continued MUXout sampling and rearming after tuning or diagnostic readback.
+Full-assist regressions additionally cover exact snapshot/configuration
+matching, the unsupported VCO interval, batched capture/restoration, timeout and
+read failures, output preservation, forced-field programming without FCAL, and
+faulted-handle retention after mutating or restoration failures.
 LMX2592 additionally checks sparse initialization, the independent prescaler and
 fraction fields, all fixed divider segments, MASH minimum-N changes, the
 3.55 GHz route boundary and the 6.5 GHz VTUNE_ADJ threshold.
@@ -394,10 +474,11 @@ empty reports instead of accepting a partial module set.
 - Only MAIN is supported by ADF4351.
   ADF4351/ADF4372 do not poll lock; their PFD diagnostics are integer-Hz
   approximations even though planning preserves the reference ratio.
-- Both LMX backends support explicit lock polling but have no calibration
-  cache/full assist, reference multiplication or PM adapter. LMX2594 does not
-  implement hardware ramp, SYNC or SysRef. LMX2592 does not enable fast
-  calibration, VCO doubling or phase adjustment.
+- Both LMX backends support explicit lock polling without reference multiplication
+  or a PM adapter. LMX2594 full assist is exact-frequency only, excludes
+  11.9..12.1 GHz VCO, and supplies no calibration cache or interpolation policy.
+  It does not implement hardware ramp, SYNC or SysRef. LMX2592 does not enable
+  fast calibration/full assist, VCO doubling or phase adjustment.
   No scan-duration, noise or lock-time requirement is established by host tests.
 - ADF4372 PFD above 125 MHz and calibration-region discovery are unsupported.
   Fast-lock validity is a caller responsibility, not inferred from frequency

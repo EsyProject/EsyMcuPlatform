@@ -55,6 +55,25 @@ typedef struct {
 } esy_lmx2594_config_t;
 
 /**
+ * @brief Caller-owned snapshot captured after automatic calibration.
+ *
+ * Copyable values for exactly one output frequency and initialization setup.
+ * Keep snapshots private to the physical device and initialization lifetime.
+ * Invalidate them after reset, power/reference changes or a hardware fault;
+ * temperature, supply and analog-performance validity remain caller policy.
+ * Editing fields or reusing a nearby frequency is unsupported.
+ */
+typedef struct {
+  uint64_t frequency_hz; /**< Exact MAIN output frequency used for capture. */
+  uint32_t ref_clk_hz; /**< Initialization OSCin frequency. */
+  uint32_t pfd_hz; /**< Initialization phase-detector frequency. */
+  uint16_t output_divider; /**< Initialization fixed output divisor. */
+  uint16_t daciset; /**< Captured amplitude code, 0..511. */
+  uint8_t vco_core; /**< Captured VCO core, 1..7. */
+  uint8_t capctrl; /**< Captured capacitor-bank code, 0..255. */
+} esy_lmx2594_vco_calibration_t;
+
+/**
  * @brief Fill defaults: 100 MHz reference, divide-by-four, 2 GHz, RF disabled.
  * @param[out] config Destination; NULL is ignored.
  */
@@ -67,8 +86,10 @@ void esy_lmx2594_default_config(esy_lmx2594_config_t *config);
  * unchanged; repeated init returns STATE. Failed I/O attempts deinit. Failed
  * cleanup retains a faulted binding and borrowed resources for deinit retry.
  * Success does not promise PLL lock: call wait_for_lock before relying on RF.
- * Frequency changes use automatic VCO calibration; hardware ramping, SYNC,
- * SysRef, reference multiplication and calibration bypass are not supported.
+ * Generic frequency changes write only changed fields and always trigger
+ * automatic calibration, including identical requests. They also leave any
+ * full-assist mode. Hardware ramping, SYNC, SysRef and reference multiplication
+ * are not supported; explicit full assist uses the backend-specific API below.
  * @param[in,out] synth Stable, caller-owned handle.
  * @param[in] config Configuration copied during the call.
  * @retval ESY_OK Registers programmed and calibration triggered.
@@ -110,6 +131,57 @@ esy_err_t esy_lmx2594_deinit(esy_freq_synth_t *synth);
  */
 esy_err_t esy_lmx2594_read_register(esy_freq_synth_t *synth, uint8_t address,
                                    uint16_t *value);
+
+/**
+ * @brief Capture one exact-frequency snapshot from automatic calibration.
+ *
+ * Task context only; externally serialize this call with the handle and SPI.
+ * Holds any registered logical-device reference for the complete operation.
+ * Requires automatic mode; waits for lock, switches MUXout once, waits at least
+ * 50 us for the R0 amplitude-calibration side effect, checks indirect Vtune,
+ * then reads all three calibration fields. Lock-detect restoration is always
+ * attempted after switching; failure faults the binding and requires deinit.
+ * The destination is unchanged on failure. Successful restoration restarts
+ * the 50 us guard even on a recoverable read error or timeout: wait for lock
+ * and analog settling again before measuring RF. This is not a passive read.
+ *
+ * Uses the HAL monotonic 32-bit microsecond clock. The timeout includes lock,
+ * readback guard and reads; synchronous I/O and mandatory restoration may
+ * extend elapsed time. Observe at least once per 2^31 us; the clock must keep
+ * advancing during the call. A zero timeout only probes initial lock, then
+ * returns TIMEOUT without switching. No cache or allocation is retained.
+ * @param[in,out] synth Initialized, non-faulted LMX2594 handle.
+ * @param[in] timeout_us Budget, 0..INT32_MAX microseconds.
+ * @param[out] out Caller-owned snapshot, unchanged on failure.
+ * @return OK, INVALID_ARG, STATE (including full-assist mode), TIMEOUT,
+ * NOT_SUPPORTED for 11.9..12.1 GHz VCO, or propagated I/O error. A restoration
+ * failure returns STATE to distinguish a fault requiring cleanup.
+ */
+esy_err_t esy_lmx2594_read_vco_calibration(
+    esy_freq_synth_t *synth, uint32_t timeout_us,
+    esy_lmx2594_vco_calibration_t *out);
+
+/**
+ * @brief Apply an exact-frequency snapshot, bypassing automatic calibration.
+ *
+ * Task context only; externally serialize with the handle and SPI. Holds any
+ * registered logical-device reference until return. The snapshot frequency,
+ * reference, PFD and divider must match exactly; no interpolation is implied.
+ * Writes only changed frequency/forced calibration fields and never writes R0.
+ * Preserves output enables and power. Every success rearms the conservative
+ * 50 us old-status guard; success does not promise lock or analog settling.
+ * Partial I/O failure faults the binding; only deinit may recover it. Invalid
+ * input and unsupported VCO assistance perform no SPI/GPIO I/O. Normal generic
+ * tuning explicitly clears all force bits and runs automatic calibration.
+ * @param[in,out] synth Initialized, non-faulted LMX2594 handle.
+ * @param[in] frequency_hz Exact captured MAIN output frequency in Hz.
+ * @param[in] calibration Caller-owned snapshot, borrowed only for this call.
+ * @return OK, INVALID_ARG, STATE, NOT_SUPPORTED for 11.9..12.1 GHz VCO,
+ * or propagated I/O error; I/O failure leaves a faulted binding.
+ */
+esy_err_t esy_lmx2594_set_frequency_fast(
+    esy_freq_synth_t *synth, uint64_t frequency_hz,
+    const esy_lmx2594_vco_calibration_t *calibration);
 
 /**
  * @brief Check combined calibration/indirect-Vtune lock on MUXout.
