@@ -167,7 +167,9 @@ esy_err_t esy_lmx2594_read_vco_calibration(
  * Task context only; externally serialize with the handle and SPI. Holds any
  * registered logical-device reference until return. The snapshot frequency,
  * reference, PFD and divider must match exactly; no interpolation is implied.
- * Writes only changed frequency/forced calibration fields and never writes R0.
+ * Writes changed frequency/forced calibration fields and never writes R0.
+ * Frequency changes hold MASH in reset until all fields are applied, then
+ * release it; identical frequency and calibration requests perform no writes.
  * Preserves output enables and power. Every success rearms the conservative
  * 50 us old-status guard; success does not promise lock or analog settling.
  * Partial I/O failure faults the binding; only deinit may recover it. Invalid

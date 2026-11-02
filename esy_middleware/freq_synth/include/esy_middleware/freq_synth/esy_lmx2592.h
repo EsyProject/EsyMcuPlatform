@@ -58,6 +58,24 @@ typedef struct {
 } esy_lmx2592_config_t;
 
 /**
+ * @brief Copyable, caller-owned automatic-calibration result for one frequency.
+ *
+ * Keep snapshots private to the physical device and initialization lifetime.
+ * Invalidate them after reset, power/reference changes or hardware faults;
+ * validity across temperature, supply and analog changes is caller policy.
+ * Editing fields, interpolation and nearby-frequency reuse are unsupported.
+ */
+typedef struct {
+  uint64_t frequency_hz; /**< Exact MAIN frequency used during capture. */
+  uint32_t ref_clk_hz; /**< Initialization OSCin frequency. */
+  uint32_t pfd_hz; /**< Initialization phase-detector frequency. */
+  uint16_t output_divider; /**< Actual selected divisor, including auto mode. */
+  uint16_t daciset; /**< Captured VCO_IDAC, 250..450 per SNAS646G. */
+  uint8_t vco_core; /**< Captured VCO core, 1..7. */
+  uint8_t capctrl; /**< Captured capacitor-bank code, 0..183. */
+} esy_lmx2592_vco_calibration_t;
+
+/**
  * @brief Fill defaults: 100 MHz reference, automatic divider, 2 GHz, RF off.
  *
  * Charge-pump bitmask 12 with multiplier 0 selects nominal 3.125 mA.
@@ -74,8 +92,10 @@ void esy_lmx2592_default_config(esy_lmx2592_config_t *config);
  * Success does not establish lock: call wait_for_lock before relying on RF.
  * The reference path bypasses the doubler/multiplier, PLL_N_PRE is two, and
  * frequency planning uses integer or the highest legal MASH order up to three.
- * VCO doubling, phase synchronization, assisted/fast calibration and PM are
- * unsupported. This chip has no LMX2594-style OUT_MUTE: RF during calibration
+ * Generic tuning always triggers automatic calibration and leaves full assist;
+ * explicit exact-frequency full assist uses the APIs below. VCO doubling, phase
+ * synchronization, FCAL_FAST/ACAL_FAST algorithms and PM are unsupported.
+ * This chip has no LMX2594-style OUT_MUTE: RF during calibration
  * and settling must be managed by the consumer or an external interlock.
  * @param[in,out] synth Stable caller-owned, initially zeroed handle.
  * @param[in] config Configuration copied during the call.
@@ -120,6 +140,58 @@ esy_err_t esy_lmx2592_read_register(esy_freq_synth_t *synth, uint8_t address,
                                    uint16_t *value);
 
 /**
+ * @brief Capture one exact-frequency snapshot in automatic-calibration mode.
+ *
+ * Task context only; externally serialize the handle, SPI and MUXout. Holds any
+ * registered device reference until return. Establishes lock, selects MUXout
+ * readback once, waits the reference-scaled calibration guard, checks Vtune,
+ * and reads R68..R70. The destination is unchanged on failure. Lock-detect
+ * restoration is attempted on every exit after switching, including I/O errors.
+ * Failed restoration returns STATE and faults the handle; only deinit recovers.
+ * Successful restoration rearms the calibration guard even on recoverable read
+ * errors/timeouts. Reestablish lock and analog settling before measuring RF.
+ *
+ * Uses the advancing HAL monotonic 32-bit microsecond clock, with observations
+ * less than 2^31 us apart. The timeout includes initial lock, guard and reads;
+ * synchronous I/O and mandatory restoration may extend elapsed time. A zero
+ * timeout probes initial lock, then returns TIMEOUT without switching MUXout.
+ * No allocation, snapshot cache or background worker is retained.
+ * @param[in,out] synth Initialized, non-faulted LMX2592 handle.
+ * @param[in] timeout_us Budget, 0..INT32_MAX microseconds.
+ * @param[out] out Caller-owned snapshot, unchanged on failure.
+ * @return OK, INVALID_ARG, STATE (including full-assist mode), TIMEOUT or I/O
+ * failure. Invalid captured core, CAPCTRL or IDAC returns a recoverable I/O error.
+ */
+esy_err_t esy_lmx2592_read_vco_calibration(
+    esy_freq_synth_t *synth, uint32_t timeout_us,
+    esy_lmx2592_vco_calibration_t *out);
+
+/**
+ * @brief Revisit an exact captured frequency with manual VCO calibration values.
+ *
+ * Task context only; externally serialize the handle and complete SPI operation.
+ * Holds any registered device reference until return. Snapshot frequency, OSCin,
+ * PFD and actual output divisor must match the planned target exactly. Programs
+ * changed frequency fields plus R19 IDAC, R22 CAPCTRL, R23 forced core and R8
+ * amplitude/cap overrides. Does not write R0 or trigger FCAL. Output enables and
+ * power are preserved; divider-route changes briefly mute both outputs as for
+ * normal tuning. This is full assist, not the FCAL_FAST/ACAL_FAST algorithms.
+ *
+ * Every success rearms the existing reference-scaled calibration guard as a
+ * conservative stale-status policy; no faster lock-time bound is promised.
+ * Wait for lock and analog settling before measuring RF. Invalid snapshots
+ * cause no SPI/GPIO I/O. Partial mutating I/O faults the binding; only deinit
+ * may recover. Generic tuning clears overrides and runs automatic calibration.
+ * @param[in,out] synth Initialized, non-faulted LMX2592 handle.
+ * @param[in] frequency_hz Exact captured MAIN output frequency in Hz.
+ * @param[in] calibration Caller-owned snapshot borrowed only during this call.
+ * @return OK, INVALID_ARG, STATE or propagated I/O error.
+ */
+esy_err_t esy_lmx2592_set_frequency_fast(
+    esy_freq_synth_t *synth, uint64_t frequency_hz,
+    const esy_lmx2592_vco_calibration_t *calibration);
+
+/**
  * @brief Check MUXout Vtune lock detect without accessing SPI.
  *
  * Returns false during a software guard scaled from 800 us at a 100 MHz
@@ -127,7 +199,9 @@ esy_err_t esy_lmx2592_read_register(esy_freq_synth_t *synth, uint8_t address,
  * Calibration clock is OSCin / 2^CAL_CLK_DIV and is kept below 200 MHz. This
  * scaled wait rejects immediate stale status; it is not a guaranteed lock or
  * settling time for every frequency, reference, supply and loop filter.
- * Thereafter LD_EN=1 and LD_TYPE=1 provide the GPIO lock indication. Consumers
+ * Full-assist requests conservatively retain this same guard, despite bypassing
+ * automatic calibration. Thereafter LD_EN=1 and LD_TYPE=1 provide the GPIO lock
+ * indication. Consumers
  * must characterize both locking and analog settling on their hardware.
  * @param[in,out] synth Initialized, non-faulted LMX2592 handle.
  * @param[out] locked Destination, unchanged on failure.

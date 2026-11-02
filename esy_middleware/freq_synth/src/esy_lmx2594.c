@@ -37,6 +37,7 @@
 #define LMX2594_OUTA_POWER_MASK 0x3F00u
 #define LMX2594_OUTB_POWER_MASK 0x003Fu
 #define LMX2594_OUTA_MUX_VCO 0x0800u
+#define LMX2594_MASH_RESET_N 0x0020u
 #define LMX2594_VCO_ASSIST_MIN_HZ 11900000000ULL
 #define LMX2594_VCO_ASSIST_MAX_HZ 12100000000ULL
 #define LMX2594_VCO_SEL_FORCE 0x0400u
@@ -248,11 +249,14 @@ static esy_err_t lmx2594_write_changed(lmx2594_ctx_t *ctx, uint8_t address,
 }
 
 static esy_err_t lmx2594_write_frequency_fields(lmx2594_ctx_t *ctx,
-                                               const lmx2594_plan_t *plan) {
+                                               const lmx2594_plan_t *plan,
+                                               bool hold_mash) {
   for (size_t i = 0u; i < LMX2594_TUNE_CORE; i++) {
-    const esy_err_t err = lmx2594_write_changed(ctx, k_tune_registers[i],
-        lmx2594_frequency_register(ctx, plan, k_tune_registers[i]),
-        &ctx->frequency_regs[i]);
+    uint16_t next = lmx2594_frequency_register(ctx, plan, k_tune_registers[i]);
+    if (hold_mash && i == LMX2594_TUNE_OUTPUT)
+      next &= (uint16_t)~LMX2594_MASH_RESET_N;
+    const esy_err_t err = lmx2594_write_changed(ctx, k_tune_registers[i], next,
+                                               &ctx->frequency_regs[i]);
     if (err != ESY_OK) return err;
   }
   return ESY_OK;
@@ -281,7 +285,7 @@ static esy_err_t lmx2594_set_frequency(void *context, uint64_t frequency_hz) {
     err = lmx2594_write_changed(ctx, 20u,
         lmx2594_frequency_register(ctx, &plan, 20u),
         &ctx->frequency_regs[LMX2594_TUNE_CORE]);
-  if (err == ESY_OK) err = lmx2594_write_frequency_fields(ctx, &plan);
+  if (err == ESY_OK) err = lmx2594_write_frequency_fields(ctx, &plan, false);
   if (err == ESY_OK)
     err = lmx2594_write_changed(ctx, 20u,
         lmx2594_frequency_register(ctx, &plan, 20u),
@@ -715,7 +719,19 @@ esy_err_t esy_lmx2594_set_frequency_fast(
     return ESY_ERR_INVALID_ARG;
   err = lmx2594_acquire(ctx);
   if (err != ESY_OK) return err;
-  err = lmx2594_write_frequency_fields(ctx, &plan);
+  const bool frequency_changed = frequency_hz != ctx->requested_hz;
+  if (frequency_changed) {
+    /* SNAS696C Table 28: R44[5]=0 resets/holds MASH and ignores fractions.
+     * SNAA336A section 3.1: each write takes effect immediately. Hold the
+     * modulator across partial N/NUM/DEN and forced-VCO updates so shrinking
+     * DEN cannot feed the previous NUM/state into an active fractional engine.
+     * This does not write R0 or restart frequency/amplitude calibration. */
+    err = lmx2594_write_changed(ctx, 44u,
+        (uint16_t)(ctx->reg44 & ~LMX2594_MASH_RESET_N),
+        &ctx->frequency_regs[LMX2594_TUNE_OUTPUT]);
+  }
+  if (err == ESY_OK)
+    err = lmx2594_write_frequency_fields(ctx, &plan, frequency_changed);
   if (err == ESY_OK)
     err = lmx2594_write_changed(ctx, 16u, calibration->daciset, &ctx->reg16);
   if (err == ESY_OK)
@@ -731,6 +747,10 @@ esy_err_t esy_lmx2594_set_frequency_fast(
     err = lmx2594_write_changed(ctx, 8u,
         (uint16_t)(k_register_defaults[8] | LMX2594_VCO_AMPLITUDE_CAP_FORCE),
         &ctx->reg8);
+  if (err == ESY_OK && frequency_changed)
+    err = lmx2594_write_changed(ctx, 44u,
+        lmx2594_frequency_register(ctx, &plan, 44u),
+        &ctx->frequency_regs[LMX2594_TUNE_OUTPUT]);
   if (err == ESY_OK) {
     ctx->full_assist = true;
     lmx2594_commit_plan(ctx, &plan, frequency_hz);

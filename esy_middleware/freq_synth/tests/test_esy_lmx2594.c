@@ -981,12 +981,86 @@ void test_lmx2594_fast_hops_update_exact_ratio_and_only_changed_calibration(void
   fake_esy_hal_spi_reset();
   TEST_ASSERT_EQUAL(ESY_OK,
       esy_lmx2594_set_frequency_fast(&synth, second.frequency_hz, &second));
-  static const uint8_t k_hop[] = {36u, 43u, 19u};
+  static const uint8_t k_hop[] = {44u, 36u, 43u, 19u, 44u};
   TEST_ASSERT_EQUAL_UINT32(sizeof(k_hop),
                           fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
   for (size_t i = 0u; i < sizeof(k_hop); i++)
     TEST_ASSERT_EQUAL_UINT8(k_hop[i], test_frame(i, NULL));
   test_assert_frequency(&synth, second.frequency_hz, config.ref_clk_hz);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2594_deinit(&synth));
+}
+
+static void test_assert_held_fast_transition(
+    const esy_lmx2594_vco_calibration_t *snapshot) {
+  const size_t count = fake_esy_hal_spi_get_tx_count(&s_ctx.spi);
+  const uint16_t output_bits = s_ctx.registers[44] & 0x3fc0u;
+  TEST_ASSERT_GREATER_THAN_UINT32(2u, count);
+  TEST_ASSERT_EQUAL_UINT8(44u, test_frame(0u, NULL));
+  TEST_ASSERT_EQUAL_UINT8(44u, test_frame(count - 1u, NULL));
+  for (size_t i = 0u; i < count; i++) {
+    uint16_t value;
+    const uint8_t address = test_frame(i, &value);
+    TEST_ASSERT_NOT_EQUAL(0u, address);
+    TEST_ASSERT_LESS_THAN_UINT8(TEST_LMX2594_REGISTER_COUNT, address);
+    s_ctx.registers[address] = value;
+    s_ctx.written[address] = true;
+    TEST_ASSERT_EQUAL_HEX16(output_bits, s_ctx.registers[44] & 0x3fc0u);
+    if (i + 1u < count) {
+      TEST_ASSERT_BITS_LOW_MESSAGE(0x0020u, s_ctx.registers[44],
+          "MASH must stay held through every intermediate register update");
+    } else {
+      TEST_ASSERT_BITS_HIGH(0x0020u, s_ctx.registers[44]);
+      TEST_ASSERT_EQUAL_UINT16(snapshot->daciset, s_ctx.registers[16]);
+      TEST_ASSERT_EQUAL_UINT8(snapshot->capctrl, s_ctx.registers[19] & 0xffu);
+      TEST_ASSERT_EQUAL_UINT8(snapshot->vco_core,
+                              (s_ctx.registers[20] >> 11u) & 7u);
+      TEST_ASSERT_BITS_HIGH(0x0400u, s_ctx.registers[20]);
+      TEST_ASSERT_BITS_HIGH(0x4800u, s_ctx.registers[8]);
+    }
+    if ((s_ctx.registers[44] & 0x0020u) != 0u) {
+      const uint32_t numerator = ((uint32_t)s_ctx.registers[42] << 16u) |
+                                 s_ctx.registers[43];
+      const uint32_t denominator = ((uint32_t)s_ctx.registers[38] << 16u) |
+                                   s_ctx.registers[39];
+      TEST_ASSERT_NOT_EQUAL(0u, denominator);
+      TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(denominator, numerator,
+          "Active MASH must never see a partial NUM/DEN ratio");
+    }
+  }
+}
+
+void test_lmx2594_fast_hops_hold_mash_across_fraction_and_integer_boundaries(void) {
+  static const uint64_t k_frequencies[] = {
+      2543500000ULL, 2550000000ULL, 2549800000ULL, 2543123456ULL,
+      2499700000ULL, 2500000000ULL, 2500300000ULL};
+  esy_freq_synth_t synth = {0};
+  esy_lmx2594_config_t config;
+  test_config(&config);
+  config.initial_freq_hz = 2543123456ULL;
+  config.initial_output_enabled = true;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2594_init(&synth, &config));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_freq_synth_set_power_level(
+      &synth, ESY_FREQ_SYNTH_PORT_MAIN, 9u));
+  esy_lmx2594_vco_calibration_t snapshot =
+      test_snapshot(&config, config.initial_freq_hz);
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2594_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+  test_capture_registers();
+  for (size_t i = 0u; i < sizeof(k_frequencies) / sizeof(k_frequencies[0]); i++) {
+    snapshot.frequency_hz = k_frequencies[i];
+    snapshot.daciset++;
+    snapshot.capctrl++;
+    snapshot.vco_core = i % 2u == 0u ? 3u : 4u;
+    fake_esy_hal_spi_reset();
+    TEST_ASSERT_EQUAL(ESY_OK,
+        esy_lmx2594_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    test_assert_held_fast_transition(&snapshot);
+    test_assert_frequency(&synth, snapshot.frequency_hz, config.ref_clk_hz);
+    fake_esy_hal_spi_reset();
+    TEST_ASSERT_EQUAL(ESY_OK,
+        esy_lmx2594_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  }
   TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2594_deinit(&synth));
 }
 
@@ -1128,7 +1202,19 @@ void test_lmx2594_capture_restores_after_each_failure_and_faults_failed_restore(
 }
 
 void test_lmx2594_each_fast_write_failure_faults_binding_and_requires_cleanup(void) {
-  for (size_t failure = 0u; failure < 9u; failure++) {
+  esy_freq_synth_t baseline = {0};
+  esy_lmx2594_config_t baseline_config;
+  test_config(&baseline_config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2594_init(&baseline, &baseline_config));
+  const esy_lmx2594_vco_calibration_t baseline_snapshot =
+      test_snapshot(&baseline_config, 3135300000ULL);
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2594_set_frequency_fast(
+      &baseline, baseline_snapshot.frequency_hz, &baseline_snapshot));
+  const size_t count = fake_esy_hal_spi_get_tx_count(&s_ctx.spi);
+  TEST_ASSERT_GREATER_THAN_UINT32(9u, count);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2594_deinit(&baseline));
+  for (size_t failure = 0u; failure < count; failure++) {
     esy_freq_synth_t synth = {0};
     esy_lmx2594_config_t config;
     setUp();

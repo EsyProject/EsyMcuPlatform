@@ -27,7 +27,10 @@ All public headers are in `include/esy_middleware/freq_synth/`:
   init/deinit, register readback and lock checks. LMX2594 also supplies
   `esy_lmx2594_vco_calibration_t`, `esy_lmx2594_read_vco_calibration()` and
   `esy_lmx2594_set_frequency_fast()` for explicit calibration capture and
-  exact-frequency full assist. Both TI backends use synchronous caller-driven
+  exact-frequency full assist. LMX2592 provides the corresponding
+  `esy_lmx2592_vco_calibration_t`, `esy_lmx2592_read_vco_calibration()` and
+  `esy_lmx2592_set_frequency_fast()` APIs with its independent register layout.
+  Both TI backends use synchronous caller-driven
   calls without an OS dependency or a device-graph/PM adapter.
 
 `set_frequency_hz` is the core attachment capability. An attached handle may be
@@ -162,6 +165,36 @@ requires deinit with all borrowed resources retained; do not continue tuning
 a faulted handle. The example returns unsupported assistance or lock timeout
 to its owner instead of promising a scan deadline. The library stores no
 calibration cache or frequency-neighborhood policy.
+
+An initialized LMX2592 handle can use the same capture/revisit pattern with its
+own snapshot type. The caller supplies a timeout suited to the reference-scaled
+calibration guard and retains the handle, SPI and GPIO until successful deinit:
+
+```c
+#include "esy_middleware/freq_synth/esy_lmx2592.h"
+
+esy_err_t capture_and_revisit_lmx2592(esy_freq_synth_t *synth,
+                                    uint32_t timeout_us) {
+    esy_lmx2592_vco_calibration_t saved;
+    esy_err_t result = esy_lmx2592_read_vco_calibration(synth, timeout_us, &saved);
+    if (result == ESY_OK) {
+        result = esy_lmx2592_wait_for_lock(synth, timeout_us);
+    }
+    if (result == ESY_OK) {
+        result = esy_lmx2592_set_frequency_fast(synth, saved.frequency_hz, &saved);
+    }
+    if (result == ESY_OK) {
+        result = esy_lmx2592_wait_for_lock(synth, timeout_us);
+    }
+    return result;
+}
+```
+
+Call from the serialized non-ISR owner, with `ENABLE_ESY_LMX2592` and the HAL
+resources described above. The example leaves analog settling and eventual
+`esy_lmx2592_deinit()` to that owner. A fault requires cleanup with borrowed
+resources retained. Fast requests bypass automatic calibration; they retain the
+existing conservative software guard and do not establish a scan deadline.
 
 For PM, initialize the hardware and synthesizer, register the SPI parent and
 then the matching typed synthesizer binding with that parent in its dependency
@@ -329,7 +362,12 @@ The clock must advance throughout the call, with observations less than
 
 `esy_lmx2594_set_frequency_fast()` accepts only an exact frequency and matching
 reference, PFD and divider. It writes changed frequency and forced-calibration
-fields without R0 or FCAL, preserving output enables and power. It rearms the
+fields without R0 or FCAL, preserving output enables and power. Frequency
+changes hold R44 MASH_RESET_N low through all frequency and forced-VCO updates,
+then release MASH after the complete ratio and calibration are programmed.
+This prevents an active fractional engine from seeing a partial NUM/DEN ratio
+when moving between reduced fractions or integer mode. An identical frequency
+and calibration request performs no writes. It rearms the
 conservative 50 us guard; success means programmed full assist, not verified
 lock or analog settling. Invalid snapshots and unsupported VCO assistance
 perform no SPI/GPIO access. Partial mutating I/O faults the handle and permits
@@ -371,9 +409,10 @@ The independent LMX2592 initialization resets the chip and writes only the
 all unnamed bits, enables reference and charge pump, enables amplitude and
 automatic VCO calibration, sets LD_TYPE=1, and leaves calibration overrides and
 fast calibration disabled. The 10 ms delay before final FCAL is an intentional
-power-on margin, rather than a data-sheet-mandated delay. Every tune writes
-R38's N, R40/R41's denominator, R44/R45's numerator, legal MASH/PFD settings,
-and VTUNE_ADJ according to the 6.5 GHz VCO threshold, then triggers FCAL. R42/43
+power-on margin, rather than a data-sheet-mandated delay. Normal tuning writes
+changed R38 N, R40/R41 denominator, R44/R45 numerator and legal MASH/PFD fields,
+updates VTUNE_ADJ at the 6.5 GHz VCO threshold, clears full-assist overrides,
+then triggers FCAL even for an identical request. R42/43
 are MASH seed and are not mistaken for the numerator. R68..R70 are read-only
 status registers, and no unlisted addresses are programmed.
 
@@ -395,6 +434,39 @@ exits, and conservatively restarts the guard. Failed restoration faults the
 handle. Frequency and PFD diagnostics use `u64`, N/NUM/DEN use `u32`, and
 `RF_DIV_SEL.u8` reports the actual divisor (one means direct VCO). Channel
 spacing is the integer-Hz portion of `2 * PFD / DEN / divider`.
+
+LMX2592 exact-frequency full assist follows SNAS646G Tables 7-10, 7-17,
+7-19, 7-20 and 7-48 through 7-50. Capture reads R68 Vtune/core, R69 CAPCTRL and
+R70 DACISET in one MUXout readback session. It first establishes automatic-mode
+lock, then waits the reference-scaled calibration guard after selecting readback
+before checking Vtune and reading the complete result. Capture rejects core zero,
+CAPCTRL above 183, or IDAC outside 250..450. The destination is unchanged on
+failure. Every exit after switching attempts restoration; successful restoration
+rearms the guard and requires lock and analog settling again. A recoverable read
+error or timeout retains the binding; failed restoration returns STATE and faults
+it. The timeout includes initial lock, readback guard and reads on the advancing
+HAL 32-bit microsecond clock, with observations less than 2^31 us apart. Zero
+only probes initial lock before returning timeout without switching. Synchronous
+I/O and mandatory restoration may extend the timeout.
+
+Fast tuning uses only an exact frequency, OSCin, PFD and actual selected output
+divisor. It programs changed frequency fields, R19 IDAC[11:3], R22 CAPCTRL[7:0],
+R23 core[13:11]/VCO_SEL_FORCE[10] and R8 IDAC_OVR[13]/CAPCTRL_OVR[10], without
+writing R0 or triggering FCAL. Reserved bits and output power/enables are retained;
+a divider-route change uses the same brief buffer muting as normal tuning. Normal
+tuning clears both overrides and forced core before automatic FCAL. Invalid
+snapshots produce no SPI/GPIO I/O; mutating I/O failure faults the binding and
+requires deinit. No LMX2594 register layout or unsupported-frequency interval is
+assumed. These APIs use full manual assistance; FCAL_FAST/ACAL_FAST algorithms
+remain disabled. Fast requests deliberately retain the reference-scaled 800 us
+at 100 MHz software guard until independently qualified on LMX2592 hardware.
+No faster lock, analog settling or complete-sweep deadline is promised.
+
+Snapshots remain private to one physical device and initialization lifetime.
+Consumers invalidate them after reset, power/reference changes or hardware fault,
+and own temperature/supply validity, static cache capacity and replacement policy.
+No interpolation, nearby-frequency reuse, heap, cache or background worker is
+introduced by either TI backend.
 
 ### Concurrency
 
@@ -451,7 +523,14 @@ continued MUXout sampling and rearming after tuning or diagnostic readback.
 Full-assist regressions additionally cover exact snapshot/configuration
 matching, the unsupported VCO interval, batched capture/restoration, timeout and
 read failures, output preservation, forced-field programming without FCAL, and
-faulted-handle retention after mutating or restoration failures.
+faulted-handle retention after mutating or restoration failures. Frame-by-frame
+checks cover MASH hold/release across large-to-small denominators and integer
+boundaries, unchanged output state, zero-write identical requests, and every
+partial fast-write failure including final MASH release.
+LMX2592 full-assist regressions check its independent override/readback fields,
+manual-code bounds, exact snapshot inputs, automatic divider-route transitions,
+output preservation, capture timeout/read/restore failures, reference balancing,
+all partial fast-write failures, and guard expiry/rearming across counter wraps.
 LMX2592 additionally checks sparse initialization, the independent prescaler and
 fraction fields, all fixed divider segments, MASH minimum-N changes, the
 3.55 GHz route boundary and the 6.5 GHz VTUNE_ADJ threshold.
@@ -477,8 +556,9 @@ empty reports instead of accepting a partial module set.
 - Both LMX backends support explicit lock polling without reference multiplication
   or a PM adapter. LMX2594 full assist is exact-frequency only, excludes
   11.9..12.1 GHz VCO, and supplies no calibration cache or interpolation policy.
-  It does not implement hardware ramp, SYNC or SysRef. LMX2592 does not enable
-  fast calibration/full assist, VCO doubling or phase adjustment.
+  It does not implement hardware ramp, SYNC or SysRef. LMX2592 full assist also
+  requires exact captured frequencies and retains its reference-scaled software
+  guard; FCAL_FAST/ACAL_FAST, VCO doubling and phase adjustment remain disabled.
   No scan-duration, noise or lock-time requirement is established by host tests.
 - ADF4372 PFD above 125 MHz and calibration-region discovery are unsupported.
   Fast-lock validity is a caller responsibility, not inferred from frequency
