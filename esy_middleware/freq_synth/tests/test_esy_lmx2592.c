@@ -816,3 +816,562 @@ void test_lmx2592_shared_readonly_table_preserves_typed_identity(void) {
   TEST_ASSERT_EQUAL_PTR(ops, synth.ops);
   TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
 }
+
+static esy_lmx2592_vco_calibration_t test_snapshot(
+    const esy_lmx2592_config_t *config, uint64_t frequency_hz,
+    uint16_t divider) {
+  const esy_lmx2592_vco_calibration_t snapshot = {
+      .frequency_hz = frequency_hz,
+      .ref_clk_hz = config->ref_clk_hz,
+      .pfd_hz = config->ref_clk_hz / config->r_divider,
+      .output_divider = divider,
+      .daciset = 302u, .vco_core = 5u, .capctrl = 135u,
+  };
+  return snapshot;
+}
+
+static void test_capture_response(uint8_t core, uint8_t cap, uint16_t amplitude) {
+  const uint16_t r68 = (uint16_t)(0x0400u | ((uint16_t)core << 5u));
+  const uint8_t received[] = {
+      0u, (uint8_t)(r68 >> 8u), (uint8_t)r68,
+      0u, 0u, cap, 0u, (uint8_t)(amplitude >> 8u), (uint8_t)amplitude,
+  };
+  fake_esy_hal_spi_set_rx_data(&s_ctx.spi, received, sizeof(received));
+}
+
+static void test_ready_to_capture(void) {
+  fake_esy_hal_gpio_set_read_value_for_pin(TEST_LMX2592_MUXOUT_PIN, true);
+  esy_hal_system_delay_us(800u);
+  fake_esy_hal_spi_reset();
+  test_capture_response(5u, 135u, 302u);
+}
+
+void test_lmx2592_capture_batches_readback_and_requires_relock_after_restore(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t snapshot;
+  bool locked = true;
+  test_config(&config);
+  config.initial_freq_hz = 3150300000ULL;
+  config.r_divider = 2u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  test_ready_to_capture();
+  const uint64_t start = fake_esy_hal_system_get_ctx()->time_us;
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &snapshot));
+  TEST_ASSERT_EQUAL_UINT64(800u, fake_esy_hal_system_get_ctx()->time_us - start);
+  TEST_ASSERT_EQUAL_UINT64(config.initial_freq_hz, snapshot.frequency_hz);
+  TEST_ASSERT_EQUAL_UINT32(config.ref_clk_hz, snapshot.ref_clk_hz);
+  TEST_ASSERT_EQUAL_UINT32(50000000u, snapshot.pfd_hz);
+  TEST_ASSERT_EQUAL_UINT16(2u, snapshot.output_divider);
+  TEST_ASSERT_EQUAL_UINT8(5u, snapshot.vco_core);
+  TEST_ASSERT_EQUAL_UINT8(135u, snapshot.capctrl);
+  TEST_ASSERT_EQUAL_UINT16(302u, snapshot.daciset);
+  static const uint8_t k_addresses[] = {0u, 0xc4u, 0xc5u, 0xc6u, 0u};
+  TEST_ASSERT_EQUAL_UINT32(sizeof(k_addresses),
+                          fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  for (size_t i = 0u; i < sizeof(k_addresses); i++)
+    TEST_ASSERT_EQUAL_UINT8(k_addresses[i], test_frame(i, NULL));
+  uint16_t r0;
+  test_frame(0u, &r0);
+  TEST_ASSERT_BITS_LOW(0x000cu, r0);
+  test_frame(4u, &r0);
+  TEST_ASSERT_BITS_HIGH(4u, r0);
+  TEST_ASSERT_BITS_LOW(8u, r0);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_FALSE(locked);
+  esy_hal_system_delay_us(799u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_FALSE(locked);
+  esy_hal_system_delay_us(1u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_TRUE(locked);
+  fake_esy_hal_system_get_ctx()->time_us += UINT64_C(1) << 32u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_TRUE(locked);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_capture_timeouts_preserve_destination_restore_and_rearm_guard(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t out;
+  memset(&out, 0xa5, sizeof(out));
+  const esy_lmx2592_vco_calibration_t before = out;
+  test_config(&config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_lmx2592_read_vco_calibration(&synth, UINT32_MAX, &out));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, NULL));
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT,
+      esy_lmx2592_read_vco_calibration(&synth, 0u, &out));
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT,
+      esy_lmx2592_read_vco_calibration(&synth, 805u, &out));
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  test_ready_to_capture();
+  fake_esy_hal_system_get_ctx()->time_us = UINT32_MAX - 20u;
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT,
+      esy_lmx2592_read_vco_calibration(&synth, 799u, &out));
+  TEST_ASSERT_EQUAL_UINT32(2u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_EQUAL_MEMORY(&before, &out, sizeof(out));
+  TEST_ASSERT_FALSE(esy_freq_synth_runtime(&synth)->faulted);
+  bool locked = true;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_FALSE(locked);
+  test_ready_to_capture();
+  fake_esy_hal_system_get_ctx()->time_us = UINT32_MAX - 20u;
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_read_vco_calibration(&synth, INT32_MAX, &out));
+  TEST_ASSERT_EQUAL_UINT8(5u, out.vco_core);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_capture_poll_timeout_and_bad_readback_are_recoverable(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t out;
+  test_config(&config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  test_ready_to_capture();
+  fake_esy_hal_spi_set_rx_data(&s_ctx.spi, NULL, 0u);
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT,
+      esy_lmx2592_read_vco_calibration(&synth, 810u, &out));
+  TEST_ASSERT_BITS_HIGH(4u, test_last_write(0u));
+  TEST_ASSERT_FALSE(esy_freq_synth_runtime(&synth)->faulted);
+  test_ready_to_capture();
+  test_capture_response(0u, 135u, 302u);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &out));
+  TEST_ASSERT_FALSE(esy_freq_synth_runtime(&synth)->faulted);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_capture_restores_after_each_failure_and_faults_failed_restore(void) {
+  for (size_t failure = 0u; failure < 5u; failure++) {
+    esy_freq_synth_t synth = {0};
+    esy_lmx2592_config_t config;
+    esy_lmx2592_vco_calibration_t out;
+    memset(&out, 0xa5, sizeof(out));
+    const esy_lmx2592_vco_calibration_t before = out;
+    setUp();
+    test_config(&config);
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+    test_ready_to_capture();
+    fake_esy_hal_spi_fail_write_after(failure, ESY_ERR_IO);
+    TEST_ASSERT_EQUAL(failure == 4u ? ESY_ERR_STATE : ESY_ERR_IO,
+        esy_lmx2592_read_vco_calibration(&synth, 2000u, &out));
+    TEST_ASSERT_EQUAL_MEMORY(&before, &out, sizeof(out));
+    TEST_ASSERT_EQUAL(failure == 4u,
+                      esy_freq_synth_runtime(&synth)->faulted);
+    TEST_ASSERT_BITS_HIGH(4u, test_last_write(0u));
+    TEST_ASSERT_BITS_LOW(8u, test_last_write(0u));
+    TEST_ASSERT_TRUE(fake_esy_hal_gpio_get_written_value(TEST_LMX2592_CSB_PIN));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+  }
+}
+
+void test_lmx2592_each_fast_write_failure_faults_binding_and_requires_cleanup(void) {
+  for (size_t failure = 0u; failure < 9u; failure++) {
+    esy_freq_synth_t synth = {0};
+    esy_lmx2592_config_t config;
+    setUp();
+    test_config(&config);
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+    const esy_lmx2592_vco_calibration_t snapshot =
+        test_snapshot(&config, 3135300000ULL, 2u);
+    fake_esy_hal_spi_reset();
+    fake_esy_hal_spi_fail_write_after(failure, ESY_ERR_IO);
+    TEST_ASSERT_EQUAL(ESY_ERR_IO,
+        esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    TEST_ASSERT_TRUE(esy_freq_synth_runtime(&synth)->faulted);
+    TEST_ASSERT_EQUAL_UINT32(failure + 1u,
+                            fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+    TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+        esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+        esy_freq_synth_set_frequency_hz(&synth, snapshot.frequency_hz));
+    fake_esy_hal_spi_fail_write_after(0u, ESY_ERR_IO);
+    TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_lmx2592_deinit(&synth));
+    TEST_ASSERT_TRUE(esy_freq_synth_is_attached(&synth));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+  }
+}
+
+void test_lmx2592_each_full_assist_exit_failure_faults_before_another_tune(void) {
+  for (size_t failure = 0u; failure < 3u; failure++) {
+    esy_freq_synth_t synth = {0};
+    esy_lmx2592_config_t config;
+    setUp();
+    test_config(&config);
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+    const esy_lmx2592_vco_calibration_t snapshot =
+        test_snapshot(&config, config.initial_freq_hz, 2u);
+    TEST_ASSERT_EQUAL(ESY_OK,
+        esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    fake_esy_hal_spi_reset();
+    fake_esy_hal_spi_fail_write_after(failure, ESY_ERR_IO);
+    TEST_ASSERT_EQUAL(ESY_ERR_IO,
+        esy_freq_synth_set_frequency_hz(&synth, snapshot.frequency_hz));
+    TEST_ASSERT_TRUE(esy_freq_synth_runtime(&synth)->faulted);
+    TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+        esy_freq_synth_set_frequency_hz(&synth, snapshot.frequency_hz));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+  }
+}
+
+void test_lmx2592_capture_budget_counts_io_and_cleanup_can_extend_deadline(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t out;
+  test_config(&config);
+  config.cs_high_delay_us = 5u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  test_ready_to_capture();
+  const uint64_t started = fake_esy_hal_system_get_ctx()->time_us;
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT,
+      esy_lmx2592_read_vco_calibration(&synth, 815u, &out));
+  /* 5 us selection + 800 us guard + 2 reads + 5 us mandatory restoration. */
+  TEST_ASSERT_EQUAL_UINT64(820u,
+      fake_esy_hal_system_get_ctx()->time_us - started);
+  TEST_ASSERT_EQUAL_UINT32(4u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_EQUAL_UINT8(0xc5u, test_frame(2u, NULL));
+  TEST_ASSERT_EQUAL_UINT8(0u, test_frame(3u, NULL));
+  TEST_ASSERT_FALSE(esy_freq_synth_runtime(&synth)->faulted);
+  test_ready_to_capture();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_read_vco_calibration(&synth, 820u, &out));
+  TEST_ASSERT_EQUAL_UINT32(5u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+static esy_err_t test_device_transition(esy_device_t *device,
+                                        esy_device_pm_action_t action,
+                                        esy_power_state_t system_state) {
+  (void)device;
+  (void)action;
+  (void)system_state;
+  return ESY_OK;
+}
+
+void test_lmx2592_direct_apis_balance_device_references_on_all_exit_paths(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t out;
+  ESY_DEVICE_REGISTRY_STATIC_STORAGE(storage, 1u);
+  esy_device_registry_static_resources_t resources;
+  ESY_DEVICE_REGISTRY_BIND_STATIC_RESOURCES(&resources, storage);
+  const esy_device_registry_config_t registry_config = {
+      .static_resources = &resources};
+  esy_device_registry_t registry = {0};
+  esy_device_t device = {0};
+  static const esy_device_ops_t k_ops = {.pm_action = test_device_transition};
+  const esy_device_config_t device_config = {
+      .name = "lmx", .ops = &k_ops,
+      .supported_state_mask = ESY_POWER_STATE_MASK(ESY_POWER_STATE_ACTIVE)};
+  test_config(&config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  const esy_lmx2592_vco_calibration_t snapshot =
+      test_snapshot(&config, config.initial_freq_hz, 2u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_init(&registry, &registry_config));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_register(&registry, &device, &device_config));
+  /* Module-internal binding injection isolates reference ownership from GPIO
+   * profile/PM adapter behavior already covered by lifecycle regressions. */
+  esy_freq_synth_runtime(&synth)->device = &device;
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY,
+      esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &out));
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_start(&registry));
+  test_ready_to_capture();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &out));
+  uint32_t usage = UINT32_MAX;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&device, &usage));
+  TEST_ASSERT_EQUAL_UINT32(0u, usage);
+  test_ready_to_capture();
+  fake_esy_hal_spi_fail_read_after(1u, ESY_ERR_IO);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &out));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&device, &usage));
+  TEST_ASSERT_EQUAL_UINT32(0u, usage);
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&device, &usage));
+  TEST_ASSERT_EQUAL_UINT32(0u, usage);
+  esy_lmx2592_vco_calibration_t other = snapshot;
+  other.capctrl++;
+  fake_esy_hal_spi_fail_write_after(0u, ESY_ERR_IO);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO,
+      esy_lmx2592_set_frequency_fast(&synth, other.frequency_hz, &other));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&device, &usage));
+  TEST_ASSERT_EQUAL_UINT32(0u, usage);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_lmx2592_deinit(&synth));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_deinit(&registry));
+  esy_freq_synth_runtime(&synth)->device = NULL;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_fast_chip_select_failures_fault_without_leaking_resources(void) {
+  for (size_t edge = 0u; edge < 2u; edge++) {
+    esy_freq_synth_t synth = {0};
+    esy_lmx2592_config_t config;
+    setUp();
+    test_config(&config);
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+    const esy_lmx2592_vco_calibration_t snapshot =
+        test_snapshot(&config, config.initial_freq_hz, 2u);
+    fake_esy_hal_gpio_fail_write_after(edge, ESY_ERR_IO);
+    TEST_ASSERT_EQUAL(ESY_ERR_IO,
+        esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    TEST_ASSERT_TRUE(esy_freq_synth_runtime(&synth)->faulted);
+    TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+        esy_lmx2592_set_frequency_fast(&synth, snapshot.frequency_hz, &snapshot));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+    TEST_ASSERT_TRUE(fake_esy_hal_gpio_get_written_value(TEST_LMX2592_CSB_PIN));
+  }
+}
+
+static void test_assert_addresses(const uint8_t *addresses, size_t count) {
+  TEST_ASSERT_EQUAL_UINT32(count, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  for (size_t i = 0u; i < count; i++)
+    TEST_ASSERT_EQUAL_UINT8(addresses[i], test_frame(i, NULL));
+}
+
+void test_lmx2592_fast_mode_uses_its_override_fields_and_normal_tune_clears_them(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t snapshot;
+  test_config(&config);
+  config.initial_freq_hz = 3150300000ULL;
+  config.initial_output_enabled = true;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  test_capture_registers();
+  test_ready_to_capture();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &snapshot));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_freq_synth_set_power_level(
+      &synth, ESY_FREQ_SYNTH_PORT_MAIN, 7u));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_freq_synth_set_power_level(
+      &synth, ESY_FREQ_SYNTH_PORT_AUX, 11u));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_freq_synth_set_output_enable(
+      &synth, ESY_FREQ_SYNTH_PORT_AUX, true));
+  test_capture_registers();
+  const uint16_t outputs = s_ctx.registers[46];
+  const uint16_t auxiliary = s_ctx.registers[47];
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_set_frequency_fast(
+      &synth, snapshot.frequency_hz, &snapshot));
+  static const uint8_t k_enter[] = {19u, 22u, 23u, 8u};
+  test_assert_addresses(k_enter, sizeof(k_enter));
+  TEST_ASSERT_EQUAL_HEX16(0x0975u, test_last_write(19u));
+  TEST_ASSERT_EQUAL_HEX16(0x2387u, test_last_write(22u));
+  TEST_ASSERT_EQUAL_HEX16(0xac42u, test_last_write(23u));
+  TEST_ASSERT_EQUAL_HEX16(0x3484u, test_last_write(8u));
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+      esy_lmx2592_read_vco_calibration(&synth, 2000u, &snapshot));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_set_frequency_fast(
+      &synth, snapshot.frequency_hz, &snapshot));
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_freq_synth_set_frequency_hz(&synth, snapshot.frequency_hz));
+  static const uint8_t k_exit[] = {8u, 23u, 0u};
+  test_assert_addresses(k_exit, sizeof(k_exit));
+  TEST_ASSERT_EQUAL_HEX16(0x1084u, test_last_write(8u));
+  TEST_ASSERT_EQUAL_HEX16(0x8842u, test_last_write(23u));
+  TEST_ASSERT_BITS_HIGH(8u, test_last_write(0u));
+  test_capture_registers();
+  TEST_ASSERT_EQUAL_HEX16(outputs, s_ctx.registers[46]);
+  TEST_ASSERT_EQUAL_HEX16(auxiliary, s_ctx.registers[47]);
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_freq_synth_set_frequency_hz(&synth, snapshot.frequency_hz));
+  static const uint8_t k_identical[] = {0u};
+  test_assert_addresses(k_identical, sizeof(k_identical));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_fast_hops_preserve_exact_ratio_and_write_only_changed_fields(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  test_config(&config);
+  config.initial_freq_hz = 3135300000ULL;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  test_assert_frequency(&synth, config.initial_freq_hz, config.ref_clk_hz, 2u);
+  const esy_lmx2592_vco_calibration_t first =
+      test_snapshot(&config, config.initial_freq_hz, 2u);
+  esy_lmx2592_vco_calibration_t second =
+      test_snapshot(&config, 3150300000ULL, 2u);
+  second.capctrl--;
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, first.frequency_hz, &first));
+  test_capture_registers();
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, second.frequency_hz, &second));
+  static const uint8_t k_hop[] = {45u, 22u};
+  test_assert_addresses(k_hop, sizeof(k_hop));
+  test_assert_frequency(&synth, second.frequency_hz, config.ref_clk_hz, 2u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_fast_snapshots_validate_exact_inputs_and_documented_code_limits(void) {
+  esy_freq_synth_t synth = {0}, empty = {0};
+  esy_lmx2592_config_t config;
+  esy_lmx2592_vco_calibration_t out;
+  test_config(&config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  const esy_lmx2592_vco_calibration_t valid =
+      test_snapshot(&config, config.initial_freq_hz, 2u);
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_lmx2592_set_frequency_fast(NULL, valid.frequency_hz, &valid));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+      esy_lmx2592_set_frequency_fast(&empty, valid.frequency_hz, &valid));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_lmx2592_set_frequency_fast(&synth, valid.frequency_hz, NULL));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_lmx2592_set_frequency_fast(&synth, 0u, &valid));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_lmx2592_read_vco_calibration(NULL, 2000u, &out));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+      esy_lmx2592_read_vco_calibration(&empty, 2000u, &out));
+  const esy_freq_synth_vtable_t foreign_ops = *synth.ops;
+  esy_freq_synth_t foreign = {0};
+  foreign.ops = &foreign_ops;
+  foreign.ctx = synth.ctx;
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+      esy_lmx2592_set_frequency_fast(&foreign, valid.frequency_hz, &valid));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+      esy_lmx2592_read_vco_calibration(&foreign, 2000u, &out));
+  esy_freq_synth_detach(&foreign);
+  for (size_t edge = 0u; edge < 9u; edge++) {
+    esy_lmx2592_vco_calibration_t invalid = valid;
+    switch (edge) {
+      case 0u: invalid.frequency_hz++; break;
+      case 1u: invalid.ref_clk_hz++; break;
+      case 2u: invalid.pfd_hz++; break;
+      case 3u: invalid.output_divider++; break;
+      case 4u: invalid.vco_core = 0u; break;
+      case 5u: invalid.vco_core = 8u; break;
+      case 6u: invalid.capctrl = 184u; break;
+      case 7u: invalid.daciset = 249u; break;
+      default: invalid.daciset = 451u; break;
+    }
+    TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+        esy_lmx2592_set_frequency_fast(&synth, valid.frequency_hz, &invalid));
+  }
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_FALSE(esy_freq_synth_runtime(&synth)->faulted);
+  esy_lmx2592_vco_calibration_t boundary = valid;
+  boundary.capctrl = 0u;
+  boundary.daciset = 250u;
+  boundary.vco_core = 1u;
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, boundary.frequency_hz, &boundary));
+  boundary.capctrl = 183u;
+  boundary.daciset = 450u;
+  boundary.vco_core = 7u;
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, boundary.frequency_hz, &boundary));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_fast_route_changes_use_the_captured_actual_divider_and_restore_outputs(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  test_config(&config);
+  config.initial_freq_hz = 3549700000ULL;
+  config.initial_output_enabled = true;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  test_assert_frequency(&synth, config.initial_freq_hz, config.ref_clk_hz, 2u);
+  const esy_lmx2592_vco_calibration_t lower =
+      test_snapshot(&config, config.initial_freq_hz, 2u);
+  const esy_lmx2592_vco_calibration_t upper =
+      test_snapshot(&config, 3550300000ULL, 1u);
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, lower.frequency_hz, &lower));
+  test_capture_registers();
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, upper.frequency_hz, &upper));
+  uint16_t first;
+  TEST_ASSERT_EQUAL_UINT8(46u, test_frame(0u, &first));
+  TEST_ASSERT_BITS_HIGH(0x00c0u, first);
+  test_assert_frequency(&synth, upper.frequency_hz, config.ref_clk_hz, 1u);
+  TEST_ASSERT_BITS_LOW(0x0040u, s_ctx.registers[46]);
+  TEST_ASSERT_BITS_HIGH(0x0080u, s_ctx.registers[46]);
+  TEST_ASSERT_BITS_LOW(0x0001u, s_ctx.registers[30]);
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_lmx2592_set_frequency_fast(&synth, lower.frequency_hz, &lower));
+  test_assert_frequency(&synth, lower.frequency_hz, config.ref_clk_hz, 2u);
+  TEST_ASSERT_BITS_LOW(0x0040u, s_ctx.registers[46]);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_fast_guard_crosses_wrap_expires_once_and_rearms_on_identical_apply(void) {
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  bool locked = true;
+  test_config(&config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  const esy_lmx2592_vco_calibration_t snapshot =
+      test_snapshot(&config, config.initial_freq_hz, 2u);
+  fake_esy_hal_gpio_set_read_value_for_pin(TEST_LMX2592_MUXOUT_PIN, true);
+  fake_esy_hal_system_get_ctx()->time_us = UINT32_MAX - 399u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_set_frequency_fast(
+      &synth, snapshot.frequency_hz, &snapshot));
+  esy_hal_system_delay_us(799u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_FALSE(locked);
+  esy_hal_system_delay_us(1u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_TRUE(locked);
+  fake_esy_hal_system_get_ctx()->time_us += UINT64_C(1) << 32u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_TRUE(locked);
+  fake_esy_hal_gpio_set_read_value_for_pin(TEST_LMX2592_MUXOUT_PIN, false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_FALSE(locked);
+  fake_esy_hal_gpio_set_read_value_for_pin(TEST_LMX2592_MUXOUT_PIN, true);
+  fake_esy_hal_spi_reset();
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_set_frequency_fast(
+      &synth, snapshot.frequency_hz, &snapshot));
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_spi_get_tx_count(&s_ctx.spi));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_FALSE(locked);
+  esy_hal_system_delay_us(800u);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_is_locked(&synth, &locked));
+  TEST_ASSERT_TRUE(locked);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}
+
+void test_lmx2592_capture_rejects_unsafe_manual_codes_without_replacing_destination(void) {
+  static const uint16_t k_invalid[][3] = {
+      {0u, 135u, 302u}, {5u, 184u, 302u},
+      {5u, 135u, 249u}, {5u, 135u, 451u}};
+  esy_freq_synth_t synth = {0};
+  esy_lmx2592_config_t config;
+  test_config(&config);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_init(&synth, &config));
+  for (size_t i = 0u; i < sizeof(k_invalid) / sizeof(k_invalid[0]); i++) {
+    esy_lmx2592_vco_calibration_t out;
+    memset(&out, 0xa5, sizeof(out));
+    const esy_lmx2592_vco_calibration_t before = out;
+    test_ready_to_capture();
+    test_capture_response((uint8_t)k_invalid[i][0], (uint8_t)k_invalid[i][1],
+                          k_invalid[i][2]);
+    TEST_ASSERT_EQUAL(ESY_ERR_IO,
+        esy_lmx2592_read_vco_calibration(&synth, 2000u, &out));
+    TEST_ASSERT_EQUAL_MEMORY(&before, &out, sizeof(out));
+    TEST_ASSERT_FALSE(esy_freq_synth_runtime(&synth)->faulted);
+  }
+  TEST_ASSERT_EQUAL(ESY_OK, esy_lmx2592_deinit(&synth));
+}

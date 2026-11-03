@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ESY_COMMIT_MESSAGE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   host-tests:
     name: Contract checks and module tests
@@ -22,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Install host test tools
         run: |
@@ -49,6 +54,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Install coverage tools
         run: |

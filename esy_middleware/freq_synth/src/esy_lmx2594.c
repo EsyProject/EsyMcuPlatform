@@ -37,6 +37,22 @@
 #define LMX2594_OUTA_POWER_MASK 0x3F00u
 #define LMX2594_OUTB_POWER_MASK 0x003Fu
 #define LMX2594_OUTA_MUX_VCO 0x0800u
+#define LMX2594_MASH_RESET_N 0x0020u
+#define LMX2594_VCO_ASSIST_MIN_HZ 11900000000ULL
+#define LMX2594_VCO_ASSIST_MAX_HZ 12100000000ULL
+#define LMX2594_VCO_SEL_FORCE 0x0400u
+#define LMX2594_VCO_AMPLITUDE_CAP_FORCE 0x4800u
+
+enum {
+  LMX2594_TUNE_OUTPUT = 7,
+  LMX2594_TUNE_CORE = 8,
+  LMX2594_TUNE_COUNT = 9,
+};
+
+/* Preserve N-first ordering and keep calibration triggering separate. */
+static const uint8_t k_tune_registers[LMX2594_TUNE_COUNT] = {
+    34u, 36u, 38u, 39u, 42u, 43u, 37u, 44u, 20u,
+};
 
 typedef struct {
   esy_freq_synth_t *owner;
@@ -45,6 +61,7 @@ typedef struct {
   esy_gpio_t *muxout;
   uint64_t requested_hz;
   uint64_t actual_hz;
+  uint32_t ref_clk_hz;
   uint32_t pfd_hz;
   uint32_t numerator;
   uint32_t denominator;
@@ -56,8 +73,14 @@ typedef struct {
   uint16_t reg44;
   uint16_t reg45;
   uint16_t reg46;
+  uint16_t frequency_regs[LMX2594_TUNE_COUNT];
+  uint16_t reg8;
+  uint16_t reg16;
+  uint16_t reg19;
+  uint16_t reg78;
   uint8_t divider_code;
   bool guard_pending;
+  bool full_assist;
 } lmx2594_ctx_t;
 
 typedef struct {
@@ -201,8 +224,42 @@ static uint16_t lmx2594_frequency_register(const lmx2594_ctx_t *ctx,
     case 42u: return (uint16_t)(plan->numerator >> 16u);
     case 43u: return (uint16_t)plan->numerator;
     case 44u: return (uint16_t)((ctx->reg44 & ~0x0007u) | plan->mash_order);
+    /* SNAS696C Table 6 note requires capcode start 1 in the VCO4 interval. */
+    case 78u: return plan->vco_start == 4u ? 0x0003u : k_register_defaults[78];
     default: return k_register_defaults[address];
   }
+}
+
+static bool lmx2594_assistance_supported(uint64_t vco_hz) {
+  return vco_hz < LMX2594_VCO_ASSIST_MIN_HZ ||
+         vco_hz > LMX2594_VCO_ASSIST_MAX_HZ;
+}
+
+static void lmx2594_restart_guard(lmx2594_ctx_t *ctx) {
+  ctx->last_calibration_us = esy_hal_system_time_32_us();
+  ctx->guard_pending = true;
+}
+
+static esy_err_t lmx2594_write_changed(lmx2594_ctx_t *ctx, uint8_t address,
+                                      uint16_t next, uint16_t *current) {
+  if (*current == next) return ESY_OK;
+  const esy_err_t err = lmx2594_write(ctx, address, next);
+  if (err == ESY_OK) *current = next;
+  return err;
+}
+
+static esy_err_t lmx2594_write_frequency_fields(lmx2594_ctx_t *ctx,
+                                               const lmx2594_plan_t *plan,
+                                               bool hold_mash) {
+  for (size_t i = 0u; i < LMX2594_TUNE_CORE; i++) {
+    uint16_t next = lmx2594_frequency_register(ctx, plan, k_tune_registers[i]);
+    if (hold_mash && i == LMX2594_TUNE_OUTPUT)
+      next &= (uint16_t)~LMX2594_MASH_RESET_N;
+    const esy_err_t err = lmx2594_write_changed(ctx, k_tune_registers[i], next,
+                                               &ctx->frequency_regs[i]);
+    if (err != ESY_OK) return err;
+  }
+  return ESY_OK;
 }
 
 static void lmx2594_commit_plan(lmx2594_ctx_t *ctx,
@@ -214,8 +271,7 @@ static void lmx2594_commit_plan(lmx2594_ctx_t *ctx,
   ctx->numerator = plan->numerator;
   ctx->denominator = plan->denominator;
   ctx->reg44 = lmx2594_frequency_register(ctx, plan, 44u);
-  ctx->last_calibration_us = esy_hal_system_time_32_us();
-  ctx->guard_pending = true;
+  lmx2594_restart_guard(ctx);
 }
 
 static esy_err_t lmx2594_set_frequency(void *context, uint64_t frequency_hz) {
@@ -223,20 +279,26 @@ static esy_err_t lmx2594_set_frequency(void *context, uint64_t frequency_hz) {
   lmx2594_plan_t plan;
   esy_err_t err = lmx2594_plan(ctx->pfd_hz, ctx->divider, frequency_hz, &plan);
   if (err != ESY_OK) return err;
-  /* Write N first, then fractional fields and calibration starting core. */
-  static const uint8_t k_tune_registers[] = {
-      34u, 36u, 38u, 39u, 42u, 43u, 37u, 44u, 20u,
-  };
-  for (size_t i = 0u; i < sizeof(k_tune_registers); i++) {
-    const uint8_t address = k_tune_registers[i];
-    err = lmx2594_write(ctx, address,
-                        lmx2594_frequency_register(ctx, &plan, address));
-    if (err != ESY_OK) break;
-  }
+  /* A normal tune must exit full assist even if the frequency is unchanged. */
+  err = lmx2594_write_changed(ctx, 8u, k_register_defaults[8], &ctx->reg8);
+  if (err == ESY_OK && ctx->full_assist)
+    err = lmx2594_write_changed(ctx, 20u,
+        lmx2594_frequency_register(ctx, &plan, 20u),
+        &ctx->frequency_regs[LMX2594_TUNE_CORE]);
+  if (err == ESY_OK) err = lmx2594_write_frequency_fields(ctx, &plan, false);
+  if (err == ESY_OK)
+    err = lmx2594_write_changed(ctx, 20u,
+        lmx2594_frequency_register(ctx, &plan, 20u),
+        &ctx->frequency_regs[LMX2594_TUNE_CORE]);
+  if (err == ESY_OK)
+    err = lmx2594_write_changed(ctx, 78u,
+        lmx2594_frequency_register(ctx, &plan, 78u), &ctx->reg78);
   if (err == ESY_OK)
     err = lmx2594_write(ctx, 0u, (uint16_t)(ctx->reg0 | LMX2594_FCAL_EN));
-  if (err == ESY_OK) lmx2594_commit_plan(ctx, &plan, frequency_hz);
-  else esy_freq_synth_runtime(ctx->owner)->faulted = true;
+  if (err == ESY_OK) {
+    ctx->full_assist = false;
+    lmx2594_commit_plan(ctx, &plan, frequency_hz);
+  } else esy_freq_synth_runtime(ctx->owner)->faulted = true;
   return err;
 }
 
@@ -257,7 +319,10 @@ static esy_err_t lmx2594_set_enable(void *context, esy_freq_synth_port_t port,
     if (err == ESY_OK) ctx->reg46 = reg46;
   }
   if (err == ESY_OK) err = lmx2594_write(ctx, 44u, next);
-  if (err == ESY_OK) ctx->reg44 = next;
+  if (err == ESY_OK) {
+    ctx->reg44 = next;
+    ctx->frequency_regs[LMX2594_TUNE_OUTPUT] = next;
+  }
   /* Power B down before changing its route, avoiding a live VCO transient. */
   if (err == ESY_OK && port == ESY_FREQ_SYNTH_PORT_AUX && !enabled) {
     err = lmx2594_write(ctx, 46u, 0x07FDu);
@@ -280,7 +345,10 @@ static esy_err_t lmx2594_set_power(void *context, esy_freq_synth_port_t port,
   const esy_err_t err = lmx2594_write(ctx,
       port == ESY_FREQ_SYNTH_PORT_MAIN ? 44u : 45u, next);
   if (err == ESY_OK) {
-    if (port == ESY_FREQ_SYNTH_PORT_MAIN) ctx->reg44 = next;
+    if (port == ESY_FREQ_SYNTH_PORT_MAIN) {
+      ctx->reg44 = next;
+      ctx->frequency_regs[LMX2594_TUNE_OUTPUT] = next;
+    }
     else ctx->reg45 = next;
   } else esy_freq_synth_runtime(ctx->owner)->faulted = true;
   return err;
@@ -372,6 +440,7 @@ esy_err_t esy_lmx2594_init(esy_freq_synth_t *synth,
   ctx->spi = config->spi;
   ctx->cs = config->cs_gpio;
   ctx->muxout = config->muxout_gpio;
+  ctx->ref_clk_hz = config->ref_clk_hz;
   ctx->pfd_hz = pfd_hz;
   ctx->divider = config->output_divider;
   ctx->divider_code = divider_code;
@@ -384,6 +453,10 @@ esy_err_t esy_lmx2594_init(esy_freq_synth_t *synth,
   ctx->reg45 = (uint16_t)(0xC0C0u | config->output_b_power |
                         (ctx->divider == 1u ? LMX2594_OUTA_MUX_VCO : 0u));
   ctx->reg46 = 0x07FDu;
+  ctx->reg8 = k_register_defaults[8];
+  ctx->reg16 = k_register_defaults[16];
+  ctx->reg19 = k_register_defaults[19];
+  ctx->reg78 = lmx2594_frequency_register(ctx, &plan, 78u);
   synth->ctx = ctx;
   esy_freq_synth_runtime(synth)->faulted = true;
   synth->ops = &k_lmx2594_ops;
@@ -419,6 +492,9 @@ esy_err_t esy_lmx2594_init(esy_freq_synth_t *synth,
     err = lmx2594_write(ctx, 0u, (uint16_t)(ctx->reg0 | LMX2594_FCAL_EN));
   }
   if (err == ESY_OK) {
+    for (size_t i = 0u; i < LMX2594_TUNE_COUNT; i++)
+      ctx->frequency_regs[i] =
+          lmx2594_frequency_register(ctx, &plan, k_tune_registers[i]);
     lmx2594_commit_plan(ctx, &plan, config->initial_freq_hz);
     if (config->initial_output_enabled)
       err = lmx2594_set_enable(ctx, ESY_FREQ_SYNTH_PORT_MAIN, true);
@@ -473,8 +549,7 @@ esy_err_t esy_lmx2594_read_register(esy_freq_synth_t *synth, uint8_t address,
     return restore;
   }
   /* Every R0 write restarts amplitude calibration, even with FCAL_EN=0. */
-  ctx->last_calibration_us = esy_hal_system_time_32_us();
-  ctx->guard_pending = true;
+  lmx2594_restart_guard(ctx);
   if (err == ESY_OK) *value = received;
   return err;
 }
@@ -518,4 +593,168 @@ esy_err_t esy_lmx2594_wait_for_lock(esy_freq_synth_t *synth,
     esy_hal_system_delay_us(remaining < LMX2594_LOCK_POLL_US
                                 ? remaining : LMX2594_LOCK_POLL_US);
   }
+}
+
+static esy_err_t lmx2594_acquire(lmx2594_ctx_t *ctx) {
+  esy_device_t *device = esy_freq_synth_runtime(ctx->owner)->device;
+  return device == NULL ? ESY_OK : esy_device_get(device);
+}
+
+static void lmx2594_release(lmx2594_ctx_t *ctx) {
+  esy_device_t *device = esy_freq_synth_runtime(ctx->owner)->device;
+  if (device != NULL) (void)esy_device_put(device);
+}
+
+/* A synchronous wait observes the always-running modulo-32 us counter every
+ * <=5 us plus bounded provider/scheduling latency, strictly below 2^31 us.
+ * Completion is local to this invocation and cannot be revived by a wrap. */
+static uint32_t lmx2594_remaining(uint32_t started, uint32_t timeout_us) {
+  const uint32_t elapsed = esy_hal_system_time_32_us() - started;
+  return elapsed < timeout_us ? timeout_us - elapsed : 0u;
+}
+
+esy_err_t esy_lmx2594_read_vco_calibration(
+    esy_freq_synth_t *synth, uint32_t timeout_us,
+    esy_lmx2594_vco_calibration_t *out) {
+  lmx2594_ctx_t *ctx;
+  if (out == NULL || timeout_us > INT32_MAX) return ESY_ERR_INVALID_ARG;
+  esy_err_t err = lmx2594_require(synth, &ctx);
+  if (err != ESY_OK) return err;
+  if (!lmx2594_assistance_supported(ctx->requested_hz * ctx->divider))
+    return ESY_ERR_NOT_SUPPORTED;
+  if (ctx->full_assist) return ESY_ERR_STATE;
+  err = lmx2594_acquire(ctx);
+  if (err != ESY_OK) return err;
+
+  esy_lmx2594_vco_calibration_t result = {0};
+  const uint32_t started = esy_hal_system_time_32_us();
+  err = esy_lmx2594_wait_for_lock(synth, timeout_us);
+  if (err != ESY_OK) goto release;
+  if (lmx2594_remaining(started, timeout_us) == 0u) {
+    err = ESY_ERR_TIMEOUT;
+    goto release;
+  }
+  err = lmx2594_write(ctx, 0u, (uint16_t)(ctx->reg0 & ~LMX2594_MUXOUT_LD));
+  if (err == ESY_OK) {
+    const uint32_t switched = esy_hal_system_time_32_us();
+    for (;;) {
+      const uint32_t elapsed = esy_hal_system_time_32_us() - switched;
+      if (elapsed >= LMX2594_LOCK_GUARD_US) break;
+      uint32_t remaining = lmx2594_remaining(started, timeout_us);
+      if (remaining == 0u) {
+        err = ESY_ERR_TIMEOUT;
+        break;
+      }
+      const uint32_t guard_remaining = LMX2594_LOCK_GUARD_US - elapsed;
+      if (remaining > guard_remaining) remaining = guard_remaining;
+      esy_hal_system_delay_us(remaining < LMX2594_LOCK_POLL_US
+                                  ? remaining : LMX2594_LOCK_POLL_US);
+    }
+  }
+  uint16_t r110 = 0u, r111 = 0u, r112 = 0u;
+  while (err == ESY_OK) {
+    if (lmx2594_remaining(started, timeout_us) == 0u) {
+      err = ESY_ERR_TIMEOUT;
+      break;
+    }
+    err = lmx2594_read(ctx, 110u, &r110);
+    if (err != ESY_OK || ((r110 >> 9u) & 3u) == 2u) break;
+    const uint32_t remaining = lmx2594_remaining(started, timeout_us);
+    if (remaining == 0u) {
+      err = ESY_ERR_TIMEOUT;
+      break;
+    }
+    esy_hal_system_delay_us(remaining < LMX2594_LOCK_POLL_US
+                                ? remaining : LMX2594_LOCK_POLL_US);
+  }
+  if (err == ESY_OK && lmx2594_remaining(started, timeout_us) == 0u)
+    err = ESY_ERR_TIMEOUT;
+  if (err == ESY_OK) err = lmx2594_read(ctx, 111u, &r111);
+  if (err == ESY_OK && lmx2594_remaining(started, timeout_us) == 0u)
+    err = ESY_ERR_TIMEOUT;
+  if (err == ESY_OK) err = lmx2594_read(ctx, 112u, &r112);
+  if (err == ESY_OK) {
+    result.frequency_hz = ctx->requested_hz;
+    result.ref_clk_hz = ctx->ref_clk_hz;
+    result.pfd_hz = ctx->pfd_hz;
+    result.output_divider = ctx->divider;
+    result.vco_core = (uint8_t)((r110 >> 5u) & 7u);
+    result.capctrl = (uint8_t)r111;
+    result.daciset = r112 & 0x01FFu;
+    if (result.vco_core == 0u) err = ESY_ERR_IO;
+    else if ((uint32_t)(esy_hal_system_time_32_us() - started) > timeout_us)
+      err = ESY_ERR_TIMEOUT;
+  }
+  /* Even a failed selection may have changed the chip. Restore unconditionally;
+   * every attempted R0 write is conservatively treated as an ACAL restart. */
+  const esy_err_t restore = lmx2594_write(ctx, 0u, ctx->reg0);
+  lmx2594_restart_guard(ctx);
+  if (restore != ESY_OK) {
+    esy_freq_synth_runtime(synth)->faulted = true;
+    err = ESY_ERR_STATE;
+  }
+  if (err == ESY_OK) *out = result;
+release:
+  lmx2594_release(ctx);
+  return err;
+}
+
+esy_err_t esy_lmx2594_set_frequency_fast(
+    esy_freq_synth_t *synth, uint64_t frequency_hz,
+    const esy_lmx2594_vco_calibration_t *calibration) {
+  lmx2594_ctx_t *ctx;
+  if (calibration == NULL) return ESY_ERR_INVALID_ARG;
+  esy_err_t err = lmx2594_require(synth, &ctx);
+  if (err != ESY_OK) return err;
+  lmx2594_plan_t plan;
+  err = lmx2594_plan(ctx->pfd_hz, ctx->divider, frequency_hz, &plan);
+  if (err != ESY_OK) return err;
+  if (!lmx2594_assistance_supported(plan.vco_hz)) return ESY_ERR_NOT_SUPPORTED;
+  if (calibration->frequency_hz != frequency_hz ||
+      calibration->ref_clk_hz != ctx->ref_clk_hz ||
+      calibration->pfd_hz != ctx->pfd_hz ||
+      calibration->output_divider != ctx->divider ||
+      calibration->vco_core < 1u || calibration->vco_core > 7u ||
+      calibration->daciset > 511u)
+    return ESY_ERR_INVALID_ARG;
+  err = lmx2594_acquire(ctx);
+  if (err != ESY_OK) return err;
+  const bool frequency_changed = frequency_hz != ctx->requested_hz;
+  if (frequency_changed) {
+    /* SNAS696C Table 28: R44[5]=0 resets/holds MASH and ignores fractions.
+     * SNAA336A section 3.1: each write takes effect immediately. Hold the
+     * modulator across partial N/NUM/DEN and forced-VCO updates so shrinking
+     * DEN cannot feed the previous NUM/state into an active fractional engine.
+     * This does not write R0 or restart frequency/amplitude calibration. */
+    err = lmx2594_write_changed(ctx, 44u,
+        (uint16_t)(ctx->reg44 & ~LMX2594_MASH_RESET_N),
+        &ctx->frequency_regs[LMX2594_TUNE_OUTPUT]);
+  }
+  if (err == ESY_OK)
+    err = lmx2594_write_frequency_fields(ctx, &plan, frequency_changed);
+  if (err == ESY_OK)
+    err = lmx2594_write_changed(ctx, 16u, calibration->daciset, &ctx->reg16);
+  if (err == ESY_OK)
+    err = lmx2594_write_changed(ctx, 19u,
+        (uint16_t)((k_register_defaults[19] & ~0x00FFu) | calibration->capctrl),
+        &ctx->reg19);
+  if (err == ESY_OK)
+    err = lmx2594_write_changed(ctx, 20u,
+        (uint16_t)(0xC048u | ((uint16_t)calibration->vco_core << 11u) |
+                   LMX2594_VCO_SEL_FORCE),
+        &ctx->frequency_regs[LMX2594_TUNE_CORE]);
+  if (err == ESY_OK)
+    err = lmx2594_write_changed(ctx, 8u,
+        (uint16_t)(k_register_defaults[8] | LMX2594_VCO_AMPLITUDE_CAP_FORCE),
+        &ctx->reg8);
+  if (err == ESY_OK && frequency_changed)
+    err = lmx2594_write_changed(ctx, 44u,
+        lmx2594_frequency_register(ctx, &plan, 44u),
+        &ctx->frequency_regs[LMX2594_TUNE_OUTPUT]);
+  if (err == ESY_OK) {
+    ctx->full_assist = true;
+    lmx2594_commit_plan(ctx, &plan, frequency_hz);
+  } else esy_freq_synth_runtime(synth)->faulted = true;
+  lmx2594_release(ctx);
+  return err;
 }
