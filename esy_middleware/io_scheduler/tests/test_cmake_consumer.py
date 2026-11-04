@@ -209,7 +209,7 @@ class IoSchedulerConsumerTests(unittest.TestCase):
         flags = dict(ENABLE_ESY_IO_SCHEDULER="ON", ENABLE_ESY_UART="OFF", ENABLE_ESY_SPI="OFF",
                      ENABLE_ESY_DMA="OFF", ENABLE_ESY_PWM="OFF", ENABLE_ESY_SYSTEM="ON", ESY_RTOS="FreeRTOS",
                      ENABLE_ESY_DMA_SCHEDULER="OFF", ENABLE_ESY_PWM_SCHEDULER="OFF",
-                     PROVIDE_DEPENDENCIES="ON", PROVIDE_OS="ON",
+                     PROVIDE_DEPENDENCIES="ON", PROVIDE_OS="ON", ENABLE_ESY_OS_QUEUE="ON",
                      REAL_SPI_HAL="OFF", USE_UMBRELLA="OFF", README_EXAMPLES="OFF",
                      ENABLE_ESY_COMMON_DS="ON", ENABLE_ESY_COMMON_PROTOCOL="OFF")
         flags.update(overrides or {})
@@ -339,6 +339,11 @@ class IoSchedulerConsumerTests(unittest.TestCase):
         self.check(("esy_uart_tx_scheduler", "esy_uart_tx_scheduler_os", "esy_pwm_scheduler_core"), dict(
             ENABLE_ESY_UART="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON",
             ENABLE_ESY_PWM="ON", ENABLE_ESY_PWM_SCHEDULER="ON", README_EXAMPLES="ON"))
+
+    def test_uart_core_without_os_queue_omits_worker(self):
+        self.check(("esy_uart_tx_scheduler",), dict(
+            ENABLE_ESY_UART="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON",
+            ENABLE_ESY_OS_QUEUE="OFF"))
 
     def test_dma_core_without_os_or_system(self):
         self.check(("esy_dma_scheduler_core",), dict(ENABLE_ESY_DMA="ON",

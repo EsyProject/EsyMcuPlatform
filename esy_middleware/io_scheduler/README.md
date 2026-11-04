@@ -36,11 +36,13 @@ Public headers are flat under `include/esy_middleware/io_scheduler/`:
 - `esy_spi_scheduler.h`: optional FreeRTOS worker configuration and creation.
 - `esy_uart_tx_scheduler.h`: owner-driven initialization, queued TX, processing,
   stop and deinitialization.
+- `esy_uart_tx_scheduler_os.h`: optional FreeRTOS worker with caller-owned task
+  and queue storage.
 - `esy_dma_scheduler_core.h`: owner-driven descriptor queue and controller retirement.
 - `esy_pwm_scheduler_core.h`: owner-driven waveform DMA queue and output retirement.
 
-The scheduler name describes ordered transfer execution. Only the explicit SPI
-OS adapter create operation creates a task. Serialization is per instance;
+The scheduler name describes ordered transfer execution. Explicit SPI and UART
+OS adapter create operations create tasks. Serialization is per instance;
 producers still obey the single-producer or serialized-owner contracts below.
 
 ## Integration
@@ -60,6 +62,7 @@ set(ENABLE_ESY_COMMON_DS ON)
 | `esy_spi_scheduler_core` | `ENABLE_ESY_SPI_SCHEDULER` | SPI, system and common data structures; no OS |
 | `esy_spi_scheduler` | Same gate and `ESY_RTOS=FreeRTOS` | SPI core and OS worker support |
 | `esy_uart_tx_scheduler` | `ENABLE_ESY_UART_TX_SCHEDULER` | UART and common data structures; no OS/system requirement |
+| `esy_uart_tx_scheduler_os` | Same gate, `ESY_RTOS=FreeRTOS`, SYSTEM and OS_QUEUE enabled | UART TX core, system, OS task and queue support |
 | `esy_dma_scheduler_core` | `ENABLE_ESY_DMA_SCHEDULER` | Generic DMA and common data structures; no OS/system requirement |
 | `esy_pwm_scheduler_core` | `ENABLE_ESY_PWM_SCHEDULER` | PWM and common data structures; no OS/system/generic DMA requirement |
 

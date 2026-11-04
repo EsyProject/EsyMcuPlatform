@@ -63,7 +63,7 @@ endif()
 if(ENABLE_ESY_UART_TX_SCHEDULER)
     esy_add_io_scheduler_core(esy_uart_tx_scheduler esy_uart_tx_scheduler.c
         ENABLE_ESY_UART)
-    if(ESY_RTOS STREQUAL "FreeRTOS" AND ENABLE_ESY_SYSTEM)
+    if(ESY_RTOS STREQUAL "FreeRTOS" AND ENABLE_ESY_SYSTEM AND ENABLE_ESY_OS_QUEUE)
         esy_add_io_scheduler_adapter(esy_uart_tx_scheduler_os
             esy_uart_tx_scheduler_os.c ENABLE_ESY_UART)
         target_link_libraries(esy_uart_tx_scheduler_os PUBLIC esy_uart_tx_scheduler)
