@@ -8,95 +8,112 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Purpose
 
-Verify ESP32 DMA-named transfer bounds and missing-direction handling, and Pico
-16-bit blocking full-duplex framing. Host HAL tests establish public descriptor
-validation and dispatch; SDK builds establish native API compatibility. Neither
-establishes buffer bounds or the bytes and clock edges observed on the wire.
+Verify ESP32 synchronous transfer bounds and public DMA rejection, Pico 16-bit
+blocking full-duplex framing, and automatic IRQ completion on supported native
+SPI and XIO DMA providers. Record buffer canaries, transferred data, callback
+ownership and the corresponding CS/SCLK edges.
 
 ## Integration and Equipment
 
 - Use one serialized owner, an SPI loopback fixture or a known slave, and a
   logic analyzer on CS, SCLK, MOSI and MISO. Supply a real board route and its
-  DMA metadata hook; ESP32's native driver owns its DMA allocation internally.
+  DMA metadata hook for supported public DMA paths. ESP32's synchronous native
+  driver owns its internal SDK DMA resources.
 - Enable SPI through the consumer feature import and retain the public blocking,
   write/read DMA and full-duplex DMA calls in the final firmware link. Use real
-  Pico SDK 2.1.1 or ESP-IDF 5.3.4 providers for the corresponding build evidence.
-- Allocate naturally aligned buffers with a canary on each side. ESP32 queued
-  DMA TX uses internal DMA-capable RAM; RX above four bytes additionally needs
-  four-byte address/length alignment. Short RX uses a DMA-capable handle word.
+  Pico SDK 2.1.1, ESP-IDF 5.3.4 or the selected STM32F4 providers.
+- Allocate naturally aligned buffers with a canary on each side. For ESP32
+  synchronous RX, lengths above four bytes must be multiples of four; short RX
+  uses the native transaction's inline word and an exact-length copy. SDK
+  copying/allocation for other buffer locations follows the native provider.
   Record board,
   firmware, SDK/toolchain, mode, frame width, requested speed and pin routing.
   Capture native error codes, callback order, canaries and wire traces.
-- Keep all buffer and callback storage alive through terminal callback return.
-  ESP32 queues accepted master DMA and requires owner processing to retire it. This
-  plan does not change Pico/STM32 DMA retirement; use the
-  [DMA/SPI plan](dma_spi_hil_plan.md) for that lifecycle.
+- Keep supported asynchronous buffers, handles and callback storage alive
+  through terminal callback return or successful task-context abort. Native
+  Pico/STM32F4 and Pico XIO DMA complete automatically from IRQ context. Keep
+  terminal callbacks bounded and nonblocking; they must not reenter lifecycle
+  or submit new HAL I/O. No HAL processing or polling call retires a transfer.
 
 ## ESP32 Procedure
 
-1. At 8-bit width, submit full-duplex buffers of 1, 2, 3, 4, 64 and 4092 bytes. Verify
-   loopback contents, unchanged canaries, exactly the requested wire length and
-   one owner-process successful terminal callback with matching TX/RX byte counts.
-   Delay processing until the final clock: submission must return without waiting
-   for wire completion, `is_busy` must stay true, and no callback runs before
-   owner processing. Deinit, PM suspend and another transfer remain BUSY. Process makes
-   at most one zero-wait native result query, and completion releases CS before
-   callback delivery. Repeat through the SPI scheduler and verify its held
-   device usage reference retires only at the terminal notification.
-2. Submit transmit-only and receive-only requests through both helper APIs and
-   full-duplex API calls with one configuration omitted. Verify the absent
-   endpoint uses the native SDK's missing-buffer mode, without a NULL-pointer
-   rejection or an incrementing dummy buffer. Confirm the requested wire length
-   and untouched canaries. With a terminal callback, an absent memory direction
-   reports zero transferred bytes; the present direction reports its byte count.
-3. Configure 16-bit frames and repeat with aligned 2-, 8-, 64- and 4092-byte
-   buffers and 16-bit DMA elements. Interpret data according to the selected
-   SDK bit order; the public uint16_t API does not guarantee wire byte order.
-4. Reject TX=64/RX=1 and TX=1/RX=64, zero length, an explicitly supplied NULL
-   memory endpoint, both configurations missing, and a byte count exceeding
-   SIZE_MAX/8. Reject incompatible element widths, 32-bit elements, circular
-   mode, an odd byte count at 16-bit width and a misaligned halfword endpoint.
-   Also reject ESP32 requests above 4094 bytes, RX lengths 5, 6 and 4094, and a
-   width that differs from the initialized frame format. RX up to four bytes
-   uses the SDK's inline word with an exact-length copy; larger RX must contain
-   whole four-byte DMA words. Repeat these RX bounds through blocking read and
-   transfer APIs at byte and halfword widths. Transmit-only permits 4094 bytes.
-   No rejected request may assert CS, clock data,
-   touch either buffer, retain a callback or invoke one later.
-5. Force a native queue rejection on the real target. With successful CS release,
-   expect a negative result, idle state and no callback. Fail CS release after
-   rejection: retain the busy handle, endpoints and callback until a retry
-   releases CS. Process then reports BUS_ERROR with zero transferred counts;
-   successful abort suppresses that notification. Force a native result-query
-   error after accepted submission: preserve busy ownership without clearing
-   its descriptor, endpoints or callback, and permit owner retry. Preserve
-   canaries and confirm the next valid transaction succeeds after retirement.
-   Repeat accepted and rejected calls while
-   registered with the device graph. Common public descriptor rejections must
-   not acquire a usage reference or resume a suspended device. Backend-specific
-   size/frame restrictions may be checked after resume; they must release the
-   acquired reference without a transfer or callback.
-6. For TX, submit a valid range in flash or non-DMA PSRAM; for long RX use
-   non-DMA memory or a byte/halfword-aligned address lacking four-byte alignment.
-   Also place short-RX handle storage outside DMA-capable internal memory.
-   Require INVALID_ARG before CS assertion or native queueing. Ordinary internal
-   TX needs only its element alignment; byte counts 1, 2, 3 and 4094 remain
-   valid. Use native heap tracing around repeated valid queued transfers and
-   their process retirement: no per-transfer bounce buffer may be allocated.
-   Keep separate evidence for blocking APIs, whose SDK buffer-copying behavior
-   is unchanged. Rejected memory must never trigger an automatic copying path.
-7. At a slow SCK, submit a valid transfer and immediately attempt abort. While
-   unfinished it returns BUSY without freeing its descriptor, CS, endpoints or
-   callback. The SDK continues the wire transfer. After the final clock, retry
-   abort until OK: no callback runs, CS is released, `is_busy` is false, deinit
-   is safe, and the next submission succeeds. Separately, call process after a
-   failed abort and require one normal callback: BUSY did not schedule a later
-   cancellation. Idle master abort is OK; slave DMA remains unsupported.
-8. Withhold processing beyond hardware completion and verify the descriptor and
-   canaries remain valid, CS remains owned and no callback runs. Establish a
-   consumer processing cadence from the slave's maximum CS-low/completion latency.
-   There is no library software timeout or forced master-stop guarantee; a
-   wedged native transfer retains resources for consumer system recovery.
+1. At 8-bit width, run blocking full-duplex transfers of 1, 2, 3, 4, 64 and
+   4092 bytes. Require matching loopback contents, unchanged canaries, exactly
+   the requested wire length and a returned byte count equal to the request.
+   The synchronous call returns after native completion and CS release; no
+   asynchronous callback or result-retirement step is involved.
+2. Exercise blocking write-only and read-only APIs separately. Verify that the
+   SDK's absent direction transfers no caller memory and that canaries remain
+   intact. The full-duplex blocking API still requires both TX and RX buffers;
+   a NULL endpoint is invalid. Transmit-only lengths 1, 2, 3 and 4094 bytes
+   remain valid, without an incrementing dummy buffer outside caller storage.
+3. Configure 16-bit frames and repeat blocking operations with aligned 2-, 4-,
+   8-, 64- and 4092-byte buffers. Supply halfword counts to the uint16_t APIs
+   and require halfword return counts. Interpret data according to the selected
+   SDK bit order; the public uint16_t API does not promise wire byte order.
+4. Reject zero-length or NULL-buffer blocking calls, byte requests above 4094
+   and halfword requests above 2047 with INVALID_ARG. For read/full-duplex,
+   reject RX lengths 5, 6 and 4094 bytes with NOT_SUPPORTED before a native
+   transaction or CS assertion. RX lengths 1..4 use the inline word and copy
+   exactly the requested bytes; longer RX accepts only multiples of four up to
+   4092. Repeat at halfword width, including accepted counts 1, 2 and 4 and a
+   rejected count of 3. Preserve both canaries for every accepted/rejected case.
+5. Repeat valid synchronous TX from flash or non-DMA-capable memory and valid
+   RX into writable memory with natural element alignment but no four-byte DMA
+   alignment. Record native return values and SDK heap/copy behavior. The SDK
+   may use temporary DMA-capable buffers; these calls carry no zero-allocation
+   promise. Short RX still copies only its declared byte range, and long RX
+   still requires a byte length divisible by four.
+6. Submit otherwise valid public write-DMA, read-DMA and full-duplex DMA
+   descriptors, including single-direction requests, with a callback and
+   canary-protected endpoints. Require NOT_SUPPORTED, no bus/CS activity, no
+   borrowed buffer/callback after return, idle state and no later callback.
+   Repeat registered and unregistered. A graph resume may precede a backend
+   rejection, but the temporary usage reference must be released. Confirm
+   DMA_TRANSFER is absent from capabilities and a following blocking transfer
+   and teardown succeed. SDK DMA used inside blocking calls does not imply
+   support for these public asynchronous entries.
+7. Force a synchronous native transmit failure and require a negative result
+   with no deferred callback/result descriptor. Observe CS and canaries, then
+   verify the next valid transaction and deinit follow the native error outcome.
+   For OS-backed queued application work, repeat through the SPI scheduler and
+   distinguish its owner-context result callback from a public HAL DMA callback.
+
+## Shared DMA Descriptor and Completion Procedure
+
+1. On supported Pico/STM32F4/XIO paths, reject unequal TX/RX byte lengths or
+   widths, zero length, a supplied NULL memory endpoint, both directions absent,
+   byte counts above SIZE_MAX/8, circular mode, 32-bit elements, incomplete
+   halfwords and misaligned halfword endpoints. Common descriptor errors reject
+   before board/backend activity or callback retention. Single-direction helpers
+   use fixed dummy/discard words for the absent direction; inspect both native
+   transfer counts and ensure dummy storage never increments beyond that word.
+2. Complete both DMA directions while the application owner task is preempted.
+   Require one terminal callback from IRQ context without a HAL progress call.
+   Successful master completion follows the final wire bit and CS release;
+   slave completion follows the final RX frame without a future CS/SCK edge.
+   Buffers and any device usage reference remain borrowed through callback
+   return. Record callback byte counts and verify immediate subsequent owner
+   teardown or PM suspend after successful retirement.
+3. Delay one direction's native IRQ and verify the other cannot prematurely
+   notify, release CS or return buffers. On IRQ delivery, native DMA retirement
+   and the bounded wire-tail check complete automatically. The tail budget uses
+   the programmed divider: one frame on Pico SPI, two on STM32F4, eight PIO
+   cycles on XIO, plus register synchronization, capped at 8192 inspections.
+   These are register/CPU iteration budgets, not OS timeouts or elapsed-time
+   guarantees. A master configuration exceeding the cap rejects DMA with
+   NOT_SUPPORTED before DMA claims or CS activity; blocking I/O remains valid.
+   XIO CS hold/inactive timing must also fit its 8192-core-cycle budget.
+4. Inject native DMA stop/retirement failure. Require busy state, preserved
+   endpoints/callback arguments and graph usage, with no early terminal callback.
+   Retry explicit task-context abort; only successful retirement permits reuse,
+   and successful cancellation suppresses the callback. No owner polling loop
+   or future IRQ is a prerequisite for this cleanup attempt.
+5. Exhaust the master wire-tail budget after DMA memory access has retired.
+   Require a terminal DMA_ERROR instead of success. Native Pico/STM32F4 disable
+   the SPI handle and require deinit/init before another operation. XIO follows
+   its SM reset/retirement path. Preserve canaries and ensure no later DMA access
+   or duplicate callback follows successful terminal cleanup.
 
 ## Pico Procedure
 
@@ -108,9 +125,9 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
 2. Repeat at slow and fast supported speeds and with a known SPI slave. Confirm
    the single-word transaction does not discard its immediate response or
    instead report the response to an extra 0xffff word. Inspect canaries.
-3. Reject the public DMA descriptor errors from ESP32 step 4 that are common to
-   all HAL backends. A rejection must occur before a DMA route is prepared or
-   CS changes. Continue accepted DMA retirement checks in the DMA/SPI plan.
+3. Run the shared DMA descriptor/completion procedure above. Rejections precede
+   route preparation and CS changes. Include full-duplex, TX-only and RX-only
+   accepted transfers and automatic IRQ terminal delivery.
 4. Build with `PARAM_ASSERTIONS_ENABLED_HARDWARE_SPI=1`. Initialize slave mode
    with speed_hz zero and nonzero in separate lifecycle cycles. Require success
    without an SDK assertion, a valid native CPSR divider, and the slave-enable
@@ -121,8 +138,9 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
 ## Pico XIO SPI Procedure
 
 1. Build and final-link a consumer with XIO SPI enabled, native SPI disabled and
-   generic DMA disabled. Retain calls to generic SPI blocking, transfer DMA,
-   process, abort and unregister APIs. No native SPI provider may be required.
+   generic DMA disabled. Retain generic SPI blocking, transfer DMA, abort and
+   unregister APIs and their IRQ callback closure. No native SPI provider may
+   be required.
 2. With a zero handle, valid SCK/MOSI/MISO and a selected SM, request slave mode
    with pin_cs=ESY_PIN_UNUSED in all four modes. Require NOT_SUPPORTED before
    board pin configuration, GPIO/PIO changes or program/SM claims. Hold MOSI high
@@ -166,12 +184,11 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
    received frame, canaries and exactly the requested clock count, with no
    extra dummy frame carried into the next transaction. The master must provide
    all requested clocks; this does not qualify truncated-frame recovery.
-8. Repeat delayed owner processing for finite slave DMA at 8-bit/8-bit and
+8. Preempt the application owner during finite slave DMA at 8-bit/8-bit and
    16-bit/16-bit widths, with both bit orders and all modes, through TX-only,
-   RX-only and full-duplex APIs. Withhold processing until TX and RX DMA remaining
-   counts are zero and the master has deasserted CS. One owner processing must retire
-   the completed transaction and deliver exactly one success callback without
-   requiring another CS assertion, SCK edge or TXSTALL. Absent memory directions
+   RX-only and full-duplex APIs. When both DMA directions complete, IRQ retirement
+   must deliver exactly one success callback without another CS assertion, SCK
+   edge, TXSTALL or owner task execution. Absent memory directions
    still require the matching dummy DMA endpoint to count every wire frame.
    Verify callback byte counts, released buffers/device usage, and immediate
    successful deinit or graph suspend after retirement. Retain master-side
@@ -211,11 +228,14 @@ complete public SDK query for a bus without master devices or a slave driver. SP
    failed resume: the registry must fault and retain the handle, binding and
    controller reservation for system recovery/reset. Ordinary registry teardown
    and unregister remain unavailable in the faulted state.
-5. Keep finite DMA active and then physically complete it while withholding owner
-   processing. Deinit remains BUSY in both states, preserving caller buffers, callback
-   arguments and pending terminal notification. Process or successfully abort before
-   retrying deinit. Observe no late callback, DMA access or board reset after a
-   successful teardown; follow the DMA/SPI plan for stream retirement details.
+5. On supported Pico/STM32F4/XIO DMA, keep a transfer active and require deinit
+   to return BUSY while preserving caller storage and callbacks. Preempt the
+   owner task and let normal IRQ delivery finish it: terminal retirement must
+   occur automatically. Separately delay a native terminal IRQ or fail native
+   stop; retained work remains BUSY until IRQ retirement or successful explicit
+   task abort. Observe no late callback, DMA access or board reset after successful
+   teardown. On ESP32, repeat lifecycle checks after synchronous returns and
+   rejected public DMA calls; no asynchronous request remains to retire.
 6. On ESP32, install an independent native master bus and add a native device
    before HAL init. HAL must
    return BUSY before its board configure hook and leave that native bus intact.
@@ -231,9 +251,12 @@ complete public SDK query for a bus without master devices or a slave driver. SP
 ## Pass Criteria and Limits
 
 Accepted transfers use only the provided memory ranges and deliver their
-declared framing and terminal byte counts. Rejected descriptors perform no
-board/backend dispatch through the public HAL. ESP32 backend-specific rejects
-perform no native transaction or CS change. Pico blocking 16-bit full duplex
+declared framing and byte counts. Common invalid descriptors rejected by HAL
+preflight perform no board/backend dispatch. ESP32 synchronous bounds checks
+and unsupported public DMA perform no native transaction or transfer CS change;
+registered-device resume may precede a backend check. Supported DMA paths deliver
+one IRQ terminal result after safe retirement, retaining storage after native
+stop failure until successful explicit abort. Pico blocking 16-bit full duplex
 produces one frame per requested halfword and preserves the corresponding RX.
 
 Record target canary checks, callback observations and wire traces separately

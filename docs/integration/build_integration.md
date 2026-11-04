@@ -125,11 +125,6 @@ compiler probes, so its toolchain work must remain safe to repeat in probe
 projects. Shared CPU/ABI data stays in `device_map.cmake`. An explicitly supplied
 `CMAKE_TOOLCHAIN_FILE` takes precedence and is not loaded by early import.
 
-When migrating an existing STM32F4 build that cached the former
-`cmake/ports/stm32f4/toolchain.cmake` path, configure a new build directory so
-CMake selects `pre_project.cmake`. Consumer-owned toolchains are unaffected by
-this internal path change.
-
 Use `ESY_BUILD_CONFIG_FILE` to select a different build override file. An
 explicitly empty value suppresses discovery of its conventional file. A missing
 conventional override is optional; an explicitly selected, nonempty override

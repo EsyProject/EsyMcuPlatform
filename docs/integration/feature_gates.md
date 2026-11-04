@@ -144,10 +144,12 @@ choices. Each enabled module still has to support the selected execution model.
 | `ENABLE_ESY_OTA` | `esy_middleware/ota` | Adds encoding-independent `esy_ota_core` for caller-owned BEGIN/WRITE/FINISH/STATUS/ABORT/ACTIVATE transactions. Depends only on common types, with no HAL, Flash, bootloader, protocol or OS target; optional storage providers remain consumer-owned. |
 | `ENABLE_ESY_WATCHDOG_MONITOR` | `esy_middleware/watchdog_monitor` | Adds `esy_watchdog_monitor_core`; requires `ENABLE_ESY_WATCHDOG` and `ENABLE_ESY_SYSTEM`. FreeRTOS additionally assembles the `esy_watchdog_monitor` worker adapter; `ESY_RTOS=None` uses the core directly for caller-driven supervision. |
 | `ENABLE_ESY_USB` | `esy_middleware/usb` | Adds `esy_usb` only when CDC and its backend are enabled; both child gates OFF assemble no USB target or protocol USB channel. |
-| `ENABLE_ESY_IO_SCHEDULER` | `esy_middleware/io_scheduler` | Adds the selected protocol-independent SPI and UART TX schedulers; an empty selection is valid. Consumers link the concrete targets they use. |
+| `ENABLE_ESY_IO_SCHEDULER` | `esy_middleware/io_scheduler` | Adds selected protocol-independent SPI, UART TX, generic DMA and PWM DMA schedulers; an empty selection is valid. Consumers link the concrete targets they use. |
 | `ENABLE_ESY_FREQ_SYNTH` | `esy_middleware/freq_synth` | Adds `esy_freq_synth`. Synthesizer gates choose sources; GPIO support additionally assembles `esy_freq_synth_device` for explicit device registration and GPIO PM integration. |
 | `ENABLE_ESY_WIFI_MANAGER` | `esy_middleware/wifi` | Adds `esy_wifi_manager`; requires `ENABLE_ESY_WIFI`. Pico W-class Wi-Fi requires `esy_wifi_provider`, supplied by integrated assembly or explicitly by direct consumers. |
 | `ENABLE_ESY_POWER_MANAGER` | `esy_middleware/power_manager` | Adds the OS-independent manager core and `esy_power_hal_backend`; with FreeRTOS also adds the separate tickless adapter target. Requires `ENABLE_ESY_LOW_POWER`. |
+| `ENABLE_ESY_CAN` | HAL/backend CAN | Selects STM32F4 bxCAN or classic ESP32 TWAI. ESP32 requires native `idf::driver`, explicit pins and RX capacity; generic DMA is independent. See the [CAN contract](../../esy_hal/docs/can.md). |
+| `ENABLE_ESY_LOW_POWER` | HAL/backend power and wakeup APIs | Requires system support. Classic ESP32 provides explicit task-context sleep through its native SDK and rejects generic atomic idle/tickless. Native providers are `esp_hw_support`, `esp_timer` and `esp_pm`; see the [ESP32 sleep contract](../../esy_hal/docs/esp32_low_power.md). |
 
 `esy_hal_backend` and `esy_hal` are always added after the board subtree, but
 their source files are selected by `ESY_TARGET_PLATFORM` and `ENABLE_ESY_*` gates.
@@ -181,7 +183,7 @@ The following gate families are consumed by current CMake assembly:
 | Gate family | Area | Purpose |
 | --- | --- | --- |
 | `ENABLE_ESY_SYSTEM`, `ENABLE_ESY_GPIO`, `ENABLE_ESY_DMA`, `ENABLE_ESY_UART`, `ENABLE_ESY_TIMER`, `ENABLE_ESY_I2C`, `ENABLE_ESY_PWM`, `ENABLE_ESY_MULTICORE`, `ENABLE_ESY_WATCHDOG`, `ENABLE_ESY_ADC`, `ENABLE_ESY_SPI`, `ENABLE_ESY_TIMER_CAPTURE`, `ENABLE_ESY_FLASH`, `ENABLE_ESY_BOOTLOADER`, `ENABLE_ESY_LOW_POWER`, `ENABLE_ESY_USB_DEV` | `esy_hal_backend`, `esy_hal` | Select hardware sources; bootloader additionally assembles its middleware target through the same gate. |
-| `ENABLE_ESY_WIFI` | Wi-Fi HAL/backend | Requires a Pico W-class platform and `esy_wifi_provider` with polling CYW43/lwIP and consumer network configuration requirements. The public HAL supplies borrowed network execution callbacks for owner injection; no separate network hardware adapter gate is needed. No native RTOS path is assumed. |
+| `ENABLE_ESY_WIFI` | Wi-Fi HAL/backend | Selects Pico W-class polling CYW43/lwIP through `esy_wifi_provider`, or classic ESP32 station support through native SDK targets and `ENABLE_ESY_SYSTEM`. The public HAL supplies borrowed network execution hooks; no separate network hardware adapter gate is needed. ESP32 networking is driven by native SDK tasks, without an Esy OS target dependency. |
 | `ENABLE_ESY_PROTO_BIN_UART_CHANNEL` | ProtoBin UART channel | Requires `ENABLE_ESY_PROTO_BIN`, UART/DMA, `ENABLE_ESY_IO_SCHEDULER` and `ENABLE_ESY_UART_TX_SCHEDULER`; reuses the owner-driven TX scheduler without an OS dependency. Hardware support alone never enables the channel. |
 | `ENABLE_ESY_PROTO_BIN_USB_CHANNEL` | ProtoBin USB channel | Requires `ENABLE_ESY_PROTO_BIN` and an assembled USB CDC provider target. USB availability alone never enables the channel. |
 | `ENABLE_ESY_PROTO_BIN_TCP_CHANNEL` | ProtoBin TCP channel | Requires `ENABLE_ESY_PROTO_BIN` and `ENABLE_ESY_NETWORK`. The channel borrows a connection extension; its consumer selects and owns the endpoint/provider. |
@@ -209,8 +211,10 @@ The following gate families are consumed by current CMake assembly:
 | `ENABLE_ESY_NUMERICS_QUANTIZE` | Numerics middleware | Selects optional normalization and signed 16-bit quantization source code. |
 | `ENABLE_ESY_TOUCH_XPT2046` | Touch middleware | Selects the XPT2046 touch controller implementation. |
 | `ENABLE_ESY_LCD_ILI9488` | LCD middleware | Selects the ILI9488 LCD implementation. |
-| `ENABLE_ESY_SPI_SCHEDULER` | I/O scheduler middleware | Explicit ON selects `esy_spi_scheduler_core`; FreeRTOS additionally assembles the `esy_spi_scheduler` worker adapter. This gate is independent of HAL `ENABLE_ESY_SPI`. |
-| `ENABLE_ESY_UART_TX_SCHEDULER` | I/O scheduler middleware | Selects owner-driven UART TX scheduling without an OS task; UART RX remains HAL-owned. Protocol consumers select this dependency explicitly. |
+| `ENABLE_ESY_SPI_SCHEDULER` | I/O scheduler middleware | Selects `esy_spi_scheduler_core`; requires SPI, system and common data structures. FreeRTOS additionally assembles the `esy_spi_scheduler` worker adapter. The consumer explicitly enables this gate and its HAL prerequisites. |
+| `ENABLE_ESY_UART_TX_SCHEDULER` | I/O scheduler middleware | Selects caller-driven `esy_uart_tx_scheduler`; requires UART/common data structures. With FreeRTOS, system and OS queue support, also assembles `esy_uart_tx_scheduler_os`; otherwise only the core is built. UART RX remains HAL-owned. Protocol consumers select this dependency explicitly. |
+| `ENABLE_ESY_DMA_SCHEDULER` | I/O scheduler middleware | Selects `esy_dma_scheduler_core`; requires generic DMA and common data structures, without OS/system. Borrows an initialized, quiescent DMA controller. |
+| `ENABLE_ESY_PWM_SCHEDULER` | I/O scheduler middleware | Selects `esy_pwm_scheduler_core`; requires PWM and common data structures, without OS/system/generic DMA. Borrows an initialized, quiescent PWM handle. |
 | `ENABLE_ESY_PROTO_MODBUS_UART_CHANNEL` | Protocol middleware | Selects caller-driven `esy_proto_modbus_uart_channel`; requires the Modbus family, UART/DMA/system and an explicitly enabled UART TX scheduler; no OS dependency. |
 | `ENABLE_ESY_PROTO_MODBUS_UART_WORKER` | Protocol middleware | Selects `esy_proto_modbus_uart_worker`; requires the UART channel, FreeRTOS and OS task support. Only explicit worker creation starts a task. |
 | `ENABLE_ESY_PROTO_MODBUS_TCP_CHANNEL` | Protocol middleware | Selects caller-driven `esy_proto_modbus_tcp_channel`; requires the Modbus family and `esy_network`. Master/slave instances borrow established peer sessions; no UART, OS worker or native stack is selected. |
@@ -223,8 +227,11 @@ The following gate families are consumed by current CMake assembly:
 fails during CMake configuration with the gate and selected platform in the
 diagnostic. Leaving a gate OFF or undefined adds none of its implementation
 sources. This restriction does not enable prerequisites or supply SDK providers.
-`ENABLE_ESY_ADC` similarly requires `STM32F4`; the backend assembly rejects any
-other platform in direct backend consumers as well as full library consumers.
+`ENABLE_ESY_ADC` supports `STM32F4` and classic `ESP32`; the backend assembly
+rejects other platforms in direct backend consumers and full library consumers.
+ESP32 selects its ADC1 oneshot source with native `idf::esp_adc`; no Esy OS target
+is required by HAL/backend. It accepts the documented
+DEFAULT sample-time profile, with no DMA, scan or external-trigger capability.
 
 `ENABLE_ESY_DMA` selects the generic `esy_hal_dma_*` controller facade. UART,
 SPI, I2C, PWM, ADC and XIO do not require this gate. Their native DMA paths,
@@ -349,7 +356,7 @@ or key-storage implementation.
 
 ### Wi-Fi providers and lifecycle
 
-Wi-Fi uses `esy_wifi_provider`. On Pico W/Pico 2 W, early-helper opt-in enables
+Pico W/Pico 2 W Wi-Fi uses `esy_wifi_provider`. Early-helper opt-in enables
 library assembly to create a missing provider from the SDK's polling CYW43/lwIP
 target and `esy_project_options`, including the selected native target for FreeRTOS builds.
 The helper supplies `esy_network_lwip_provider` only when `ENABLE_ESY_NETWORK`
@@ -359,12 +366,25 @@ project import. Default targets are created at the library assembly boundary.
 Consumers still supply lwipopts and any required native RTOS configuration
 through configured include paths.
 
-Direct consumers without the optional integration helpers define their providers
+Direct Pico consumers without the optional integration helpers define their providers
 before adding the library, linking the polling SDK target and a
 network-configuration target. No consumer target name or native port path is fixed
 by the library. Disabled Wi-Fi
 has no dependency on its provider, and a disabled network module does not
 assemble a TCP provider through the helper.
+
+Classic ESP32 Wi-Fi instead requires `ENABLE_ESY_SYSTEM` and native
+`idf::esp_wifi`, `idf::esp_netif`, `idf::esp_event`, `idf::esp_timer` and
+`idf::lwip` targets. The consumer initializes esp-netif and the default event loop
+before starting the station. The backend borrows that shared bootstrap, owns its
+Wi-Fi driver/default STA netif, disables Wi-Fi NVS and stores credentials in RAM.
+Native SDK tasks advance networking; no Esy OS target or `esy_wifi_provider` is
+required. The default raw lwIP provider additionally requires
+`CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and `CONFIG_LWIP_CHECK_THREAD_SAFETY=y`.
+Without both, station control remains available but the HAL network-runtime
+query returns `NOT_SUPPORTED`. An explicitly supplied network provider retains
+its own integration contract. Keep the native stack alive while endpoints borrow
+its hooks, and quiesce those endpoints before station stop/deinit.
 
 The manager owns copies of credentials, permits one initialized instance,
 and exposes stop/deinit. First-use binding storage requires `{0}`. See the
@@ -373,19 +393,30 @@ requests/queries, PM integration, errors and teardown order.
 
 ### I/O scheduler targets
 
-`ENABLE_ESY_IO_SCHEDULER` groups protocol-independent SPI and UART TX schedulers in
-`esy_middleware/io_scheduler`.
-SPI requires its transport, DMA, system and common data structures. Its optional
-worker additionally requires FreeRTOS. UART TX requires UART/DMA/common data
-structures without an OS or system dependency. Neither scheduler selects or
-links a protocol. HAL support alone selects no scheduler.
+`ENABLE_ESY_IO_SCHEDULER` groups protocol-independent SPI, UART TX, generic DMA
+and PWM DMA schedulers in `esy_middleware/io_scheduler`.
+SPI requires its transport, system and common data structures. Its optional
+worker additionally requires FreeRTOS. UART TX requires UART/common data
+structures without an OS or system dependency. The DMA and PWM cores require
+their corresponding HAL feature and common data structures, without OS/system.
+SPI/UART/PWM scheduling does not require the generic DMA facade. No scheduler
+selects or links a protocol. HAL support alone selects no scheduler.
 
 `ENABLE_ESY_SPI_SCHEDULER` selects `esy_spi_scheduler_core`; FreeRTOS also builds
 `esy_spi_scheduler`. `ENABLE_ESY_UART_TX_SCHEDULER` selects
-`esy_uart_tx_scheduler`. Consumers explicitly link the target for their execution
-model. Direct Pico/STM32 DMA users must call `esy_hal_spi_poll()` from their
-serialized owner; the SPI scheduler does so internally. Retain storage until
-quiesce/drain and destruction have completed. See the
+`esy_uart_tx_scheduler`; FreeRTOS with `ENABLE_ESY_SYSTEM` and
+`ENABLE_ESY_OS_QUEUE` also builds the optional `esy_uart_tx_scheduler_os` worker.
+Otherwise this gate retains the caller-driven core without an OS worker.
+`ENABLE_ESY_DMA_SCHEDULER` and
+`ENABLE_ESY_PWM_SCHEDULER` select `esy_dma_scheduler_core` and
+`esy_pwm_scheduler_core`. Consumers explicitly link the target for their execution
+model. Each core offers caller-driven processing with finite active wait hints;
+no DMA/PWM worker is created. Supported HAL DMA completes automatically in IRQ
+context. Middleware processing schedules queued work and delivers owner-context
+callbacks; it does not retire HAL DMA. SPI/UART TX cores use synchronous HAL
+fallbacks when native DMA is unavailable; generic DMA/PWM cores retain the
+underlying HAL DMA support requirement. Optional OS adapters own their worker
+resources. Retain storage until quiesce/drain and destruction have completed. See the
 [I/O contracts](../../esy_middleware/io_scheduler/README.md).
 
 This module only schedules peripheral I/O; network connections, Wi-Fi station

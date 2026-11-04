@@ -91,9 +91,10 @@ providers. HAL wrapper forwarding tests do not replace these target checks.
    requests is a failure. Record any preload delay between CCR writes and pins.
 4. For finite DMA, inspect IRQ entry/exit and confirm CCxDE stops on the
    terminal event while PWM output continues to latch and hold the final duty.
-   The IRQ performs bounded native retirement and delivers ISR-safe completion/
-   half/error callbacks. The registered usage reference remains held through user
-   callback return. No task process call is required; a failed native stop retains
+   The IRQ performs bounded native retirement and delivers terminal completion
+   or error. Half notifications, when requested, are nonterminal IRQ callbacks.
+   The registered usage reference remains held through user callback return.
+   No HAL progress call is required; a failed native stop retains
    storage for explicit task-side abort. Repeated IRQ dispatch never duplicates
    finite completion. Circular progress retains its source and callback context.
    PWM output remains enabled and vetoes runtime idle until explicitly disabled.
@@ -101,11 +102,14 @@ providers. HAL wrapper forwarding tests do not replace these target checks.
    the last compare becomes effective at its next preload update and then holds.
    Disable output explicitly only after the application is ready to stop it.
 5. Run circular DMA for multiple cycles. Both `loop=true` and descriptor
-   `circular=true` must select native circular mode. Process regularly and observe
-   repeated half/full callbacks on the owner without releasing the DMA borrow
-   or PM reference. Slow processing may coalesce repeated notifications; it must
-   not alter native waveform repetition. The application remains responsible
-   for DMA-safe buffer updates; coalesced callbacks are not a per-cycle counter.
+   `circular=true` must select native circular mode. Observe repeated full-cycle
+   callbacks directly from DMA IRQs without releasing the source, callback
+   context or PM reference. Request a half callback and observe its IRQ delivery;
+   repeat with NULL and verify no half wrapper or native half interrupt is
+   installed. Pause foreground work while leaving IRQs enabled: waveform and
+   callbacks continue without a HAL progress call. The application remains
+   responsible for DMA-safe buffer updates and interrupt-latency budgets;
+   repeated hardware flags while IRQs are masked are not a per-cycle counter.
 6. Abort finite and circular runs at several positions. Verify the request is
    disabled before DMA retirement, output is disabled, prior CCDS is restored,
    no pending callback is delivered after success, and restart uses the new
@@ -116,23 +120,28 @@ providers. HAL wrapper forwarding tests do not replace these target checks.
    error. Test partial setup/start failure and abort failure: do not clear the
    handle, reset board pins, drop its device reference or reuse buffer/route
    until a retry successfully retires the driver.
-8. Invoke controls/abort/process/deinit from a DMA user callback and verify reentry
-   is rejected. Keep the handle and callback argument alive until callback
-   return. Repeat normal completion, error and abort followed by graph deinit,
-   typed unbind, hardware deinit and reinit; confirm there is no stale callback.
+8. Keep DMA user callbacks bounded and nonblocking; they must not reenter PWM
+   controls, abort or lifecycle. Retain the handle and callback argument through
+   callback return, and verify the active borrow excludes owner-side teardown
+   while a callback is running. Repeat normal completion, error and abort
+   followed by graph deinit, typed unbind, hardware deinit and reinit; confirm
+   there is no stale callback.
 9. Use a second PWM handle mapped to the same physical DMA resource with a
    different request selector. Submission must reject that alias while the
-   first still owns it. Separately verify that an unsupported timer (for
-   example TIM9 without CC DMA) returns NOT_SUPPORTED rather than starting a
-   stream that can never receive timer requests.
-10. Publish finite, circular half/full and error events without a second callback.
-    Confirm IRQ publication alone does not invoke user transfer callbacks. Regular
-    IRQs deliver finite terminal completion once and retain circular ownership.
-    Repeated IRQ dispatch does not duplicate a finite completion.
-11. Fail retirement and cancellation, then retry without another IRQ. Buffers,
-    handles and callback arguments remain owned until successful retirement or
-    explicit abort; successful cancellation suppresses pending terminal callbacks.
-    Refill timing must meet the interrupt and waveform budgets.
+   first still owns it. On TIM9, verify DMA_OUTPUT is absent from capabilities
+   and DMA submission returns NOT_SUPPORTED without starting a stream. Ordinary
+   PWM, polarity and wrap IRQ remain available. TRGO configuration on a timer
+   without native master output returns NOT_SUPPORTED before register changes.
+10. Deliver finite, circular full/optional-half and error IRQs with foreground
+    work paused. User callbacks run in those IRQs. Terminal completion/error
+    follows native retirement and notifies once; half and circular-cycle
+    callbacks retain ownership. Re-dispatch cleared IRQ flags and verify no
+    duplicate callback or source release.
+11. Exhaust the bounded ISR stop budget and inject owner abort failure. Buffers,
+    handles, callback arguments and graph usage stay retained without terminal
+    notification. Recover through explicit owner abort without another IRQ;
+    successful cancellation suppresses pending terminal callbacks. Refill timing
+    must meet the interrupt and waveform budgets.
 
 ## Wrap IRQ Lifecycle Procedure
 

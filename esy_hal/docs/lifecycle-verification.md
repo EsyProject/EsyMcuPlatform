@@ -41,7 +41,7 @@ returns NOT_SUPPORTED through the SDK's non-required clock-selection path.
 | Contract | Verification coverage |
 | --- | --- |
 | XIO UART embeds its shared adapter and dispatches DMA through the generic wrapper. | Registered XIO generic DMA regression under ASan. |
-| XIO SPI user callbacks run outside ISR after both DMA channels and PIO retire; abort retires without a callback. | HAL dispatch tests, Pico XIO cross-compilation and physical-retirement scenarios below. |
+| XIO SPI user callbacks run in IRQ context after both DMA channels and the bounded PIO tail retire; abort retires without a callback. | HAL dispatch tests, Pico XIO cross-compilation and physical-retirement scenarios below. |
 | XIO UART direction slots are initialized before assembly. | TX-only/RX-only and retry regression. |
 | Configuration defaults initialize every byte, including null callbacks. | Different nonzero storage patterns produce identical defaults. |
 | UART source assembly follows the enabled directions. | Real-target TX-only and RX-only consumer links detect disabled HAL backend symbol references. |
@@ -89,10 +89,10 @@ The actual consuming firmware must also build with its own features and board.
 
 - Pico XIO SPI: exercise TX-first/RX-first completion, master/slave and trigger
   mode, 8/16/32-bit DMA widths, DMA bus error, missing external clock and abort.
-  Assert no callback while either channel accesses buffers; ISR never waits on
-  the wire; poll reports BUSY until wire retirement; terminal counts are bytes.
+  Assert no callback while either channel accesses buffers; the IRQ retires the
+  wire tail within its fixed register-read budget; terminal counts are bytes.
   Verify CS hold/release and the first transaction following abort on a logic
-  analyzer. Caller must poll or abort stalled transfers; no timeout is invented.
+  analyzer. Abort stalled or cleanup-retained transfers before reclaiming storage.
 - Pico logical timers: execute more than eight successive one-shot alarms,
   check inactive status after each callback and exercise nested start/cancel
   before and after startup returns on the owner core.

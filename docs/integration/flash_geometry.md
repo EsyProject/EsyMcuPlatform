@@ -90,10 +90,9 @@ The configured-capacity and ordinary byte-write semantics follow the
 capacities. `meta_size[slot]` is the independently erasable capacity of the
 metadata region at `meta_addr[slot]`, not the serialized metadata record length.
 The entries may differ on nonuniform Flash geometry; initialize every entry,
-even when both capacities are equal. This replaces the former scalar
-`meta_size` and changes the public struct's source and binary layout. Rebuild
-all providers and consumers together; do not mix objects built against the old
-and new headers. The persistent metadata format and record length are unchanged.
+even when both capacities are equal. Providers and consumers must use the same
+public layout definition. The persistent metadata format has an independent
+record length.
 Board ports must not supply duplicate `flash_write_size` or
 `flash_erase_size` fields. Bootloader and OTA obtain geometry from public HAL and
 validate their assigned regions against the actual address range and sector map.

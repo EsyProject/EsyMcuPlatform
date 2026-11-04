@@ -262,7 +262,7 @@ The [classic ESP32 native consumer](../esy_hal/tests/native/esp32/README.md)
 builds production sources against the pinned ESP-IDF v5.3.4 commit and its
 recommended Xtensa compiler. Its `core`, `peripherals`, `managed`, `radio` and
 `power` profiles cover feature isolation, optional OS wrappers, ADC1, TWAI CAN,
-UART RX streams, queued SPI DMA, managed boot/OTA/fault capture, explicit sleep
+public DMA/stream rejection, SPI/UART scheduler workers, managed boot/OTA/fault capture, explicit sleep
 and native Wi-Fi/raw TCP assembly. After sourcing
 the SDK's `export.sh`, run:
 

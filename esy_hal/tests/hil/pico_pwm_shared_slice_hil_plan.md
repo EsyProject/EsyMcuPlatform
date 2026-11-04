@@ -21,9 +21,11 @@ procedures below cover waveforms, IRQ retirement and DMA quiescence.
 - One task on one core serializes all public PWM calls across every handle.
   No other driver may configure the slices, output GPIO overrides or that core's
   PWM wrap IRQ. Keep clk_sys unchanged while any slice owner remains alive.
-- Start handles with `{0}`. Callbacks must not call PWM APIs. Retain DMA samples,
-  callback arguments and handles until a terminal callback returns or successful
-  abort/deinit certifies retirement. An IRQ or an idle DMA engine is insufficient.
+- Start handles with `{0}`. DMA IRQs automatically retire finite/error transfers
+  and deliver bounded, nonblocking callbacks; no HAL progress call is required.
+  Callbacks must not call PWM APIs. Retain samples, callback arguments and handles
+  through terminal callback return or successful owner abort/deinit. The raw
+  hardware idle flag alone does not establish callback/storage retirement.
 - Record board, GPIO-to-slice/channel mapping, firmware revision, SDK/toolchain,
   clk_sys, requested/measured frequency and duty, polarity and return status.
   Capture both outputs with a logic analyzer; divider quantization is expected.
@@ -78,9 +80,10 @@ Dormant compile/link probes are not hardware execution or return-value evidence.
 8. With both A/B handles initialized, DMA output on either must return BUSY even
    when both pins are disabled. Neither waveform, compare nor peer callback may
    change. Remove B, start finite aligned 16-bit samples on disabled A, and verify
-   a new B init returns BUSY through the DMA callback and until terminal IRQ retirement
-   retires the dispatcher and invokes the terminal callback.
-9. After finite completion and process, verify A remains enabled at its final sample.
+   a new B init returns BUSY while DMA or its terminal callback owns the slice.
+   The DMA IRQ retires native access and invokes completion automatically;
+   the backend publishes the slice as available only after callback return.
+9. After finite callback return, verify A remains enabled at its final sample.
    Disable it, join B at the same frequency, and verify ordinary shared operation.
    Repeat a sole-owner DMA transfer with explicit abort and DMA bus-error fault
    injection: output must become inactive; no peer can be admitted before safe
@@ -92,14 +95,18 @@ Dormant compile/link probes are not hardware execution or return-value evidence.
     live timing. Each rejection preserves existing owners and permits a valid
     retry on the zero handle. Invalid logical indices and generic zero-frequency
     or out-of-range-duty arguments must fail before any board configure call.
-11. Publish finite, circular half/full and error events without a second callback.
-    Confirm IRQ publication alone does not invoke user transfer callbacks. Regular
-    IRQs deliver finite terminal completion once and retain circular ownership.
-    Repeated IRQ dispatch does not duplicate a finite completion.
-12. Fail retirement and cancellation, then retry without another IRQ. Buffers,
-    handles and callback arguments remain owned until successful retirement or
-    explicit abort; successful cancellation suppresses pending terminal callbacks.
-    Refill timing must meet the interrupt and waveform budgets.
+11. Reject `loop=true`, descriptor `circular=true` and a non-NULL half callback
+    with NOT_SUPPORTED before DMA claims or output start. A NULL half callback
+    must stay NULL through the HAL wrapper; retry with a finite descriptor and
+    verify normal completion. Pause foreground work with IRQs enabled: finite
+    completion/error callbacks still run from the DMA IRQ after bounded native
+    retirement. Re-dispatch cleared flags and verify no duplicate notification.
+12. Exhaust the bounded ISR stop budget and inject owner abort failure. Samples,
+    handles, callback arguments and graph usage remain owned without terminal
+    notification. Retry explicit owner abort without another IRQ; successful
+    cancellation retires access and suppresses pending terminal callbacks.
+    Deinit must preserve its handle on cached native reservation cleanup failure
+    and succeed on retry before the storage can be reused.
 
 ## Evidence and Limits
 

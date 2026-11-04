@@ -121,8 +121,8 @@ observations provide different evidence and must be reported separately.
    and the optional bit set; ordinary master mode has count one and no optional
    bit. Confirm adjacent GPIOs are untouched, each trigger produces exactly the
    configured SCK edges, and SCK returns to its configured idle level while
-   waiting for the next trigger. Completion polling must recognize the relocated
-   trigger wait entry and release the DMA request exactly once.
+   waiting for the next trigger. Native completion IRQ handling must recognize
+   the relocated trigger wait entry and release the DMA request exactly once.
    Capture non-stalled intra-frame SCK periods at several requested rates:
    ordinary master loops use four PIO cycles per bit and triggered loops use
    five. Both must produce the requested SCK within divider quantization, rather
@@ -144,7 +144,10 @@ observations provide different evidence and must be reported separately.
 7. Initialize direct backend XIO SPI and UART TX/RX with complete `{0}` handles.
    Repeat each init while idle and during finite DMA: require STATE with the
    same program offset, SM/native claims, buffers and callbacks, and no duplicate
-   IRQ registration. Finish owner poll/abort, deinit, then reuse the same slots.
+   IRQ registration. Let native IRQ completion or successful abort retire the
+   transfer, then deinit and reuse the same slots. Failed native stop must retain
+   borrowed storage for task-side abort. UART TX DMA completion retires source
+   access; wait separately for physical FIFO/PIO wire drain before deinit.
    UART direction deinit must preserve its peer. Fail first init through a busy
    native SM and exhausted instruction memory; temporary claims must retire and
    a later legal init must work. Keep an active-DMA handle alive when deinit
@@ -218,6 +221,26 @@ observations provide different evidence and must be reported separately.
    Repeat handover under IRQ stress and prove both completion counters remain
    exact. Pico backend release from ISR must return NOT_SUPPORTED without
    metadata, SDK-claim or callback changes; retire it later from its task owner.
+6. Complete a finite DMA request so its logical claim retires while the SDK
+   reservation remains cached. On one core, deinit that idle controller; on the
+   peer core, prepare the same channel through an independent controller. Use
+   a debugger or target trace barrier at native unclaim to force overlap after
+   release's final owner check. The contender must return BUSY while release
+   holds assembly, then succeed on retry with both logical and SDK ownership
+   intact. Also force prepare to win first: old-controller deinit must return
+   BUSY without clearing the accepted new claim. Complete/start/abort the new
+   request and verify exact callbacks, buffers and native claim bits. Keep each
+   individual controller's lifecycle serialized throughout the test.
+7. Force IRQ setup to reject a newly claimed channel through the wrong first
+   assembly core or a conflicting same-core DMA IRQ priority. While the DMA
+   owner is between claim and rollback, attempt built-in Wi-Fi lazy allocation
+   or XIO assembly from the peer core. The peer must return BUSY without
+   waiting, and the rejected prepare must release its logical and native claim.
+   Restore the legal IRQ configuration and require an immediate successful
+   prepare/start without controller deinit or an extra abort. Repeat through
+   native UART DMA and XIO UART DMA: a rejected first request followed by
+   deinit/reinit must leave no hidden channel claim. Record both error codes,
+   SDK claim bits, owner-core progress and the next request's completion count.
 
 ## Evidence and Limits
 

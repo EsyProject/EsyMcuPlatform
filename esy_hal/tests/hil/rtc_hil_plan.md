@@ -17,7 +17,7 @@ provider.
    `{0}`, select an explicit UTC epoch and attach one facade under its owner.
 2. Compare calendar progression over an external reference interval, including
    the intended maximum idle/Flash-operation interval. Record clock resolution,
-   observed drift, maximum read latency and owner polling latency.
+   observed drift, maximum read latency and owner processing latency.
 3. Exercise each supported low-power state. If time accounting must include
    sleep, demonstrate the supplied counter continues and calendar progression
    matches elapsed reference time. Otherwise record that software UTC freezes.

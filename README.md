@@ -82,7 +82,7 @@ for recorded cross-build and host-check results.
 | `PICO`, `PICO_W` | Pico / Pico W, RP2040 | Pico SDK backend; onboard Wi-Fi on W targets. |
 | `PICO2`, `PICO2_W` | Pico 2 / Pico 2 W, RP2350 Arm | Pico SDK backend using `rp2350-arm-s`; onboard Wi-Fi on W targets. |
 | `STM32F407ZG`, other recognized STM32F4 models | Concrete chip model | Per-feature coverage; Flash layouts cover STM32F405/407/415/417 with 512 KiB or 1 MiB single-bank Flash. |
-| `ESP32` | Classic ESP32 | Partial backend; check peripheral coverage before selecting it. Other ESP32-series targets are outside the selection contract. |
+| `ESP32` | Classic ESP32 | ESP-IDF 5.3.4 backend with Wi-Fi station, ADC1 oneshot, TWAI Classical CAN, explicit sleep and synchronous I/O with optional scheduler callbacks. See the per-feature HAL contracts. Other ESP32-series targets are outside the selection contract. |
 
 Check the [backend capability matrix](esy_hal_backend/README.md#platform-capability-matrix)
 and [Flash/boot/OTA limits](docs/integration/flash_geometry.md) for your target.
@@ -180,7 +180,7 @@ for a custom build. Application hardware and RTOS calls use `esy_hal` and
 | Need | Start here |
 | --- | --- |
 | Hardware access | [Public HAL](esy_hal/README.md) |
-| CAN frames, acceptance filters and bus-off recovery | [CAN HAL](esy_hal/docs/can.md), with a caller-driven STM32F4 Classical CAN backend |
+| CAN frames, acceptance filters and bus-off handling | [CAN HAL](esy_hal/docs/can.md), with caller-driven STM32F4 bxCAN and classic ESP32 TWAI backends |
 | Tasks, queues, synchronization, and SMP integration | [OS wrappers](esy_middleware/os/README.md) |
 | Local one-to-many event delivery between tasks | [Event bus](esy_middleware/event_bus/README.md), with independent static subscriber queues and task/ISR publishing |
 | Rings, pools, and fixed-capacity containers | [Data structures](esy_common/ds/README.md) |

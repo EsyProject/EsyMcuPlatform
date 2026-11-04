@@ -142,11 +142,14 @@ classic ESP32**; different releases and targets require a fresh check.
 | --- | --- |
 | [UART initialization](../../esy_hal_backend/src/esp32/esy_hb_uart.c) | `uart_driver_install()` allocates driver state, RX/TX ring buffers and synchronization resources. This backend disables the optional UART event queue, which does not remove those other allocations. See the [SDK UART implementation](https://github.com/espressif/esp-idf/blob/v5.3.4/components/esp_driver_uart/src/uart.c). |
 | [I2C initialization](../../esy_hal_backend/src/esp32/esy_hb_i2c.c) | `i2c_new_master_bus()` and `i2c_master_bus_add_device()` allocate native bus/device resources. This backend creates one addressless device during initialization and reuses it across target addresses. See the [SDK I2C implementation](https://github.com/espressif/esp-idf/blob/v5.3.4/components/esp_driver_i2c/i2c_master.c). |
+| [ADC1 initialization/deinitialization](../../esy_hal_backend/src/esp32/esy_hb_adc.c) | `adc_oneshot_new_unit()` allocates one SDK-owned native unit; `adc_oneshot_del_unit()` releases it. Sampling reuses the initialized unit. Failed channel setup retains it for HAL cleanup, and failed deletion retains the owner for retry. See the [SDK ADC oneshot implementation](https://github.com/espressif/esp-idf/blob/v5.3.4/components/esp_adc/adc_oneshot.c). |
+| [TWAI CAN initialization/deinitialization](../../esy_hal_backend/src/esp32/esy_hb_can.c) | `twai_driver_install_v2()` creates native driver, RX queue and IRQ resources; uninstall releases them. TX software queuing is disabled. Send/receive reuse the installed driver, and the wrapper keeps fixed filter storage. Failed cleanup retains the handle and exclusive ownership. |
 | [HAL timer start/cancel](../../esy_hal_backend/src/esp32/esy_hb_timer.c) | Starting a timer calls `esp_timer_create()`, which allocates an SDK timer object. Cancellation or one-shot retirement deletes it. Creation is a timer control operation and can occur after application startup. See the [SDK timer implementation](https://github.com/espressif/esp-idf/blob/v5.3.4/components/esp_timer/src/esp_timer.c). |
-| [SPI initialization and transfer](../../esy_hal_backend/src/esp32/esy_hb_spi.c) | Native bus/device initialization allocates SDK resources. During `spi_device_transmit()`, `setup_priv_desc()` can also allocate temporary DMA buffers when the supplied TX/RX memory fails the SDK's DMA capability or alignment requirements. See the [SDK SPI implementation](https://github.com/espressif/esp-idf/blob/v5.3.4/components/esp_driver_spi/src/gpspi/spi_master.c). |
+| [MCPWM capture init/suspend/deinit](../../esy_hal_backend/src/esp32/esy_hb_timer_capture.c) | The first channel in each group creates one SDK capture timer; each handle creates a channel and callback binding. Three logical slots share each group timer. Native creation/deletion and IRQ/PM-lock resources belong to serialized lifecycle operations, including PM transitions. The ISR only reads latched ticks and publishes/calls back. Failed cleanup retains handles, group reservations and caller storage for retry; only the final channel releases the shared timer. |
+| [SPI initialization and transfer](../../esy_hal_backend/src/esp32/esy_hb_spi.c) | Native bus/device initialization allocates SDK resources. Blocking `spi_device_transmit()` may allocate temporary DMA buffers when caller memory fails SDK capability/alignment requirements. This internal DMA belongs to the synchronous SDK operation; public DMA calls return `NOT_SUPPORTED` without retaining buffers. See the [SDK SPI implementation](https://github.com/espressif/esp-idf/blob/v5.3.4/components/esp_driver_spi/src/gpspi/spi_master.c). |
 
 Most listed driver allocations occur during initialization or explicit control
-operations. SPI's temporary-buffer path is a transfer-time exception; therefore
+operations. Blocking SPI's temporary-buffer path is a transfer-time exception; therefore
 the ESP32 backend cannot promise that every data transfer avoids the SDK heap.
 Suitable DMA-capable, aligned buffers can avoid that conditional path. The
 selected target, native driver configuration and transaction sizes determine
@@ -206,3 +209,32 @@ follows SDK/library calls nor proves a complete firmware image is allocation-fre
 Use the actual feature configuration, provider sources, linked image and target
 allocation tracing to verify the intended policy. Source checks and host tests
 do not replace native memory and timing measurements.
+
+
+## Asynchronous completion ownership
+
+Supported native DMA completes automatically from IRQ. Descriptors are copied;
+transfer buffers and callback contexts remain borrowed through terminal return
+or successful abort. Half/circular callbacks retain ownership. On Pico the
+logical claim retires in IRQ while SDK reservations are cached for task-side
+release/reuse. Failed hardware stop or lifecycle cleanup retains resources.
+No HAL/backend process function, OS object or worker participates.
+
+Queued task-context results belong to the optional I/O schedulers. Their caller-
+owned static resources include request slots and, for OS adapters, stack/task
+and queue storage. ESP32 public DMA is unsupported; SPI and UART TX schedulers
+use supported synchronous HAL fallbacks. DMA/PWM scheduler cores require native
+DMA support and do not emulate it. Pico UART TX DMA source retirement is independent
+of physical UART FIFO/shifter drain. See
+[native DMA and scheduled I/O](../../esy_hal/docs/async_io_events.md).
+
+ESP32 system runtime checks use an immutable, system-lifetime injected binding.
+The OS adapter installs it from its own initialization; a native SDK consumer
+supplies an equivalent binding. CPU IRQ tokens remain native backend operations.
+The binding allocates nothing and cannot be replaced after publication.
+
+The default UART backend storage is 480 bytes, 32 bytes more per handle than
+the previous default. It accommodates both XIO directions' copied notification
+bindings and atomic event state. All common, HAL, backend and consumer objects
+must be rebuilt together; global storage overrides must remain consistent across
+translation units and satisfy the backend capacity assertions.

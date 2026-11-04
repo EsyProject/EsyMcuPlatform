@@ -51,14 +51,16 @@ resource owned by HAL. Shared DMA IRQ handlers acknowledge only their own
 configured channels, leaving native-provider pending flags intact.
 
 The Wi-Fi port also supplies `esy_hb_wifi_get_network_runtime()`: a side-effect-free
-descriptor query available before native initialization. Its three private SDK
-wrappers provide network polling and paired core-region entry/exit, with a NULL
-context. They do not initialize Wi-Fi or run station connection, deadline or
-retry bookkeeping. All calls share the native provider's serialized non-ISR
-owner; core-region hooks do not make borrower handles safe for multiple tasks.
-Quiesce and detach every network borrower before native deinit or replacement.
-Calls outside initialized native lifetime are defensive no-ops, not a supported
-extension of borrower lifetime. Public types contain no SDK, lwIP or middleware
+descriptor query available before native initialization. Pico supplies network
+polling and paired core-region hooks with a NULL context. Its hooks are defensive
+no-ops outside native lifetime, which does not extend borrower lifetime. ESP32
+supplies no-op progress because native tasks drive networking; paired hooks use
+the nonrecursive TCP/IP core lock and require both native core-locking and
+thread-safety options. The consumer keeps that native TCP/IP stack initialized.
+Call endpoints from their app owner without an outer core lock, never from native
+TCP/DNS callbacks. Neither port's hooks run station connection/deadline bookkeeping
+or permit concurrent app callers. Quiesce and detach every network borrower before
+native deinit or replacement. Public types contain no SDK, lwIP or middleware
 configuration types. See the [network runtime HIL plan](../esy_hal/tests/hil/pico_wifi_runtime_hil_plan.md)
 for native progress, state-separation and teardown acceptance.
 
@@ -93,21 +95,21 @@ port-owned `src/<platform>/esy_hb_boot.c` CPU handoff.
 | System | Implemented | Implemented | Implemented | Tick, delay, IRQ control, CPU queries and reset semantics are platform-specific. SDK random bytes are available on Pico/ESP32; STM32F4 fails closed. |
 | Boot | Direct image handoff | Direct image handoff | Managed ESP-IDF OTA partitions | Activation commits the next partition without reset; explicit handoff restarts. Rollback must be enabled and Flash encryption is unsupported by this update path. |
 | GPIO | Implemented | Implemented | Implemented | IRQ and wakeup behavior depend on board routing and wake-source configuration. |
-| DMA | Implemented | Implemented | Unsupported generic DMA facade | ESP32 DMA API returns `ESY_ERR_NOT_SUPPORTED` for operations with status returns. |
-| UART | Owner-polled DMA; continuous RX stream | Finite TX/RX DMA with owner polling; continuous RX stream | Implemented | Cancellation works independently of PM registration. ESP32 finite RX advances only from owner polling; no platform task or event queue is created. |
+| DMA | Implemented | Implemented | Unsupported public DMA | ESP32 DMA API returns `ESY_ERR_NOT_SUPPORTED` for operations with status returns. |
+| UART | Automatic TX/RX DMA; IRQ RX stream | Automatic finite DMA; IRQ RX stream | Synchronous I/O | DMA IRQ completion is distinct from UART TX/TC IRQ. Pico TX callback retires source storage; busy covers physical drain. |
 | SPI | Implemented | Implemented | Implemented with bounded transfer lengths | DMA remaining queries are unsupported on STM32F4/ESP32. ESP32 RX above four bytes requires a multiple of four. |
 | I2C | Blocking/combined transfers; DMA unsupported | Blocking/transfer APIs; DMA unsupported | Master blocking/combined transfers | Pico/STM32F4 DMA submissions fail before bus activity. ESP32 requires board-completed SDA/SCL pins; slave mode and runtime speed changes are unsupported. Bus recovery depends on board wiring and external devices. |
-| CAN | Configure-time rejection | Classical bxCAN on STM32F405/407/415/417; caller-driven TX/RX, mask filters and manual bus-off recovery | Configure-time rejection | One selected CAN1/CAN2 handle owns their shared domain. FD/BRS and simultaneous controllers are unsupported. See the [CAN contract](../esy_hal/docs/can.md). |
+| CAN | Configure-time rejection | Classical bxCAN on STM32F405/407/415/417 | Classical TWAI with SDK RX queue and owner-driven TX/RX | ESP32 uses exact bounded software filters and bus-off stop/deinit/init recovery. STM32F4 uses hardware filters and explicit bus-off recovery. FD/BRS are unsupported. See the [CAN contract](../esy_hal/docs/can.md). |
 | Timer | Implemented | Implemented | Implemented | ESP32 SDK-task callbacks support cancel/start replacement; failed cleanup reserves its native slot for retry. |
-| Timer Capture | GPIO timestamp capture | 1 MHz hardware capture | GPIO timestamp capture | STM32F4 uses a 32-bit counter on TIM2/TIM5 and a 16-bit counter on other supported timers; consecutive edges must be less than one wrap apart. |
+| Timer Capture | Unsupported | 1 MHz hardware capture | MCPWM hardware capture | ESP32 captures a 32-bit APB tick counter and converts to microseconds. STM32F4 uses 32-bit TIM2/TIM5 or a supported 16-bit timer. Consecutive edges must be less than one native counter wrap apart. |
 | PWM | A/B sharing with per-slice ownership | Implemented | Implemented | Pico A/B and ESP32 channel pairs require a common requested frequency. Complementary/dead-time entry points are unsupported on these ports. |
 | Watchdog | Implemented | Implemented | Implemented | Reset behavior follows the native watchdog and reset-domain configuration. |
-| ADC | Configure-time rejection | Implemented | Configure-time rejection | `ENABLE_ESY_ADC` requires STM32F4. |
+| ADC | Configure-time rejection | Implemented | ADC1 synchronous oneshot | ESP32 uses a fixed 12-bit/12 dB raw profile with DEFAULT sampling time; DMA, scan and external triggers are unsupported. |
 | Flash | Implemented; custom hook supported | STM32F405/407/415/417 single-bank layouts; custom hook unsupported | Implemented; custom hook unsupported | Geometry comes from the selected hardware/SDK. Board smoke tests should cover erase/write/read. Non-NULL hook registration fails explicitly on unsupported ports. |
-| Low Power | CPU idle plus caller-selected hardware alarm | Resumable Sleep/Stop plus explicit Standby; wakeup alarm not provided | Configure-time rejection | Automatic idle excludes reset-class shutdown. |
+| Low Power | CPU idle plus caller-selected hardware alarm | Resumable Sleep/Stop plus explicit Standby; wakeup alarm not provided | Explicit task-context Light-sleep and reset-class Deep-sleep | ESP32 generic atomic idle/tickless is unsupported; manual entry requires system quiescence and does not settle OS tick deadlines. See the [ESP32 sleep contract](../esy_hal/docs/esp32_low_power.md). |
 | Multicore | Implemented | Configure-time rejection | Configure-time rejection | Pico-only; `ENABLE_ESY_MULTICORE` requires a Pico platform. |
 | USB Device | Shared-stack event binding | Configure-time rejection | Configure-time rejection | Pico-only; connect/disconnect, suspend/resume and SOF events. Generic endpoint/address/EP0 operations return `NOT_SUPPORTED`; no SETUP/endpoint-completion events. |
-| Wi-Fi | Pico W/Pico 2 W only | Configure-time rejection | Configure-time rejection | Single station backend; consumer-owned polling provider. |
+| Wi-Fi | Pico W/Pico 2 W only | Configure-time rejection | ESP-IDF station and DHCP | One station backend; Pico uses polling, ESP32 uses SDK-driven networking with one application owner. |
 | XIO | Implemented | Configure-time rejection | Configure-time rejection | Pico PIO extension; `ENABLE_ESY_XIO` requires a Pico platform. |
 
 ### Public Capability Masks
@@ -123,13 +125,13 @@ The following entries use each peripheral's public constant suffixes:
 
 | Query | Pico | STM32F4 | ESP32 |
 |---|---|---|---|
-| ADC | Unavailable | DMA, SCAN, EXTERNAL_TRIGGER, CIRCULAR_DMA | Unavailable |
-| CAN | Unavailable | LOOPBACK, LISTEN_ONLY, FILTER, RECOVERY | Unavailable |
-| I2C master | MASTER_TRANSFER, REPEATED_START | MASTER_TRANSFER | MASTER_TRANSFER, REPEATED_START, DMA_TRANSFER, RECOVERY |
-| SPI | DMA_TRANSFER, TRANSFER16, DMA_REMAINING | DMA_TRANSFER, TRANSFER16 | DMA_TRANSFER, TRANSFER16 (master only) |
-| UART | TX_DMA, RX_DMA, RX_STREAM, DMA_REMAINING | TX_DMA, RX_DMA, RX_STREAM | TX_DMA, RX_DMA |
-| PWM | DMA_OUTPUT, WRAP_IRQ, POLARITY | DMA_OUTPUT, WRAP_IRQ, POLARITY | Zero |
-| Timer capture | EDGE_CALLBACK, INTERVAL | EDGE_CALLBACK, INTERVAL, HARDWARE_LATCH | EDGE_CALLBACK, INTERVAL |
+| ADC | Unavailable | DMA, SCAN, EXTERNAL_TRIGGER, CIRCULAR_DMA | Zero |
+| CAN | Unavailable | LOOPBACK, LISTEN_ONLY, FILTER, RECOVERY | LISTEN_ONLY, FILTER |
+| I2C master | MASTER_TRANSFER, REPEATED_START | MASTER_TRANSFER | MASTER_TRANSFER, REPEATED_START, RECOVERY |
+| SPI | DMA_TRANSFER, TRANSFER16, DMA_REMAINING | DMA_TRANSFER, TRANSFER16 | TRANSFER16 (master only) |
+| UART | TX_DMA, RX_DMA, RX_STREAM, DMA_REMAINING | TX_DMA, RX_DMA, RX_STREAM | None |
+| PWM | DMA_OUTPUT, WRAP_IRQ, POLARITY | DMA_OUTPUT, WRAP_IRQ, POLARITY | POLARITY |
+| Timer capture | Unavailable | EDGE_CALLBACK, INTERVAL, HARDWARE_LATCH | EDGE_CALLBACK, INTERVAL, HARDWARE_LATCH |
 
 Pico I2C slave handles report zero: callback support is not implied by controller
 initialization. STM32F4 and ESP32 reject slave initialization before claiming or
@@ -176,19 +178,45 @@ ESP32 I2C supports repeated START. Its recovery operation resets the native bus;
 it does not
 promise physical SCL pulses to release an external device. SPI `TRANSFER16`
 names the blocking uint16_t-buffer APIs and does not specify wire byte order.
-DMA bits name the corresponding transfer APIs, not native DMA or asynchronous
-completion: ESP32 SPI/I2C transfers and UART TX may complete synchronously.
-ESP32 UART finite RX uses bounded owner polling rather than the unsupported
-generic DMA facade. Every poll reads at most 1024 bytes and delivers at most one
-terminal callback. Poll regularly to avoid filling the SDK RX ring; sender
-backpressure and the polling interval are consumer responsibilities. Native
-parity/frame/overflow event notifications are not exposed by this ESP32 path;
-the error callback reports SDK read failures. Use protocol validation, deadlines
-and sender flow control rather than assuming event-level diagnostics or
-lossless reception without adequate owner progress.
-STM32F4/ESP32 remaining-count queries and ESP32 continuous RX streaming
-are not advertised. Capture `HARDWARE_LATCH` distinguishes a native timer latch
-from a GPIO ISR timestamp; neither mask establishes measured timing accuracy.
+DMA bits identify supported native DMA transfer entry points. ESP32 public
+SPI/UART/I2C DMA operations reject without retaining buffers or invoking a
+callback. ESP32 UART's empty backend DMA abort succeeds on an owned handle so
+the HAL can retire rejected submissions and release temporary device references;
+it leaves synchronous FIFO traffic untouched. Public HAL abort returns STATE
+after a rejected submission because no tracked DMA request remains.
+SPI may use SDK-internal DMA within a synchronous call. Pico UART TX/RX
+DMA and RX stream delivery use their native IRQs. UART TC and DMA TC are distinct.
+STM32F4 remaining-count queries follow their existing provider capability masks.
+Capture uses native hardware latches on supported ports. Pico rejects capture
+initialization before board setup; GPIO interrupts remain independently usable.
+No software GPIO timestamp substitutes for a native capture provider.
+
+### Native capability validation
+
+Capabilities describe the initialized hardware instance. A DMA capability
+requires native asynchronous DMA; a blocking copy cannot advertise it.
+Unsupported configuration is rejected before hardware changes:
+
+- STM32F4 TIM9 supports ordinary PWM, polarity and wrap IRQ, but neither PWM
+  DMA nor TRGO. The DMA bit is absent and TRGO returns `NOT_SUPPORTED`.
+- On STM32F405/407/415/417, ADC temperature, VREFINT and VBAT channels belong
+  to ADC1 only. ADC2/3 reject those channels in both single and scan requests.
+- STM32F4 master SPI rejects frequencies below its input clock divided by 256;
+  accepted dividers do not exceed the requested frequency.
+- Pico DMA rejects non-NULL half-transfer callbacks. Unrequested half events
+  remain NULL through HAL and scheduler wrappers; finite completion/error
+  delivery remains supported. PWM scheduler terminal-only requests use
+  `on_progress = NULL`.
+- ESP32 GPIO wake accepts explicit `HIGH_LEVEL` or `LOW_LEVEL` only. Edge wake
+  requests return `NOT_SUPPORTED`; they are never replaced with level wake.
+  Input-only GPIO34..39 reject internal pull-up/down requests.
+- ESP32 periodic logical timers reject intervals below 50 microseconds rather
+  than allowing the pinned SDK to clamp the period. Non-default clock sources
+  are unsupported; rejection retains no timer or HAL wake deadline.
+- ESP32 watchdog counts use the selected RTC slow clock's nominal frequency,
+  rounded up to whole ticks. Zero-frequency or overflowing requests fail before
+  native configuration. Keep the clock source fixed until deinit; nominal
+  duration does not certify an oscillator-independent lower bound.
 
 ## Integration
 
@@ -200,7 +228,9 @@ configuration, before unresolved HAL backend symbols can reach final linking.
 This applies to direct backend assembly and full library assembly. Disabled or
 undefined gates add no corresponding sources; XIO child gates remain inactive
 when `ENABLE_ESY_XIO` is disabled or undefined.
-The same assembly boundary rejects `ENABLE_ESY_ADC` outside STM32F4.
+The same assembly boundary accepts `ENABLE_ESY_ADC` on STM32F4 and classic
+ESP32, and rejects it on Pico. ESP32 ADC requires the native `idf::esp_adc` target; it does not require the generic DMA facade
+or an Esy OS/middleware target.
 `ENABLE_ESY_DMA` selects the generic HAL DMA controller facade. Peripheral gates
 independently assemble the native DMA arbiter, backend queries and IRQ vectors
 required by those implementations. A peripheral can therefore use blocking I/O
@@ -214,6 +244,11 @@ ESP32 PWM privately links the native `idf::esp_driver_ledc` and
 `idf::esp_driver_gpio` components. Consumers include
 these components in native SDK discovery; disabling PWM adds neither source nor
 provider dependency.
+ESP32 CAN privately links native `idf::driver` (the ESP-IDF 5.3.4 TWAI provider). Its portable config explicitly supplies TX/RX pins and
+native RX queue capacity; no product board routing is inferred. ESP32 explicit
+sleep requires system support, `idf::esp_hw_support`,
+`idf::esp_timer` and `idf::esp_pm`. Disabling either gate omits its sources and
+native dependencies. The sleep provider does not enable generic atomic tickless.
 ESP32 I2C uses `driver/i2c_master.h` from the native `idf::esp_driver_i2c`
 component, `idf::esp_driver_gpio` for pin validation and `idf::esp_timer` for
 the total transaction deadline. Consumers include all three components in SDK
@@ -229,8 +264,8 @@ allocation occurs. Master frequency must be nonzero and at most 1 MHz, subject
 to the board, peer and native controller's lower limits. Runtime `set_speed`
 returns `ESY_ERR_NOT_SUPPORTED`; deinitialize and initialize to select a new
 frequency. Slave mode and cancellation are unsupported. Separate native phases
-receive only the remaining total transaction budget. Native execution and any
-synchronous completion callback contribute to the caller's execution time.
+receive only the remaining total transaction budget. Native execution contributes
+to the caller's execution time; no I/O completion callback is installed or invoked.
 
 Pico SPI initialization always supplies a valid SDK divider, including slave
 mode with `speed_hz=0`. Slave initialization derives that divider from the
@@ -290,9 +325,12 @@ Generic Pico XIO mappings and pin helpers accept only chip GPIOs within 0..31;
 ranges cannot wrap. Masked writes preserve outputs outside the range and require
 a stopped, exclusively owned SM. Direct XIO SPI/UART handles require complete
 `{0}` initialization. Repeated init returns `STATE` without disturbing PIO/DMA;
-failed first init releases temporary PIO resources and permits retry. Poll or
-abort active DMA before deinit. Successful SPI cleanup clears its context, and
-UART direction cleanup preserves the other direction.
+failed first init releases temporary PIO resources and permits retry. Let native
+terminal IRQ completion retire active DMA or abort it successfully before deinit;
+failed stop retains the borrow for task-side abort. UART TX source retirement
+does not establish physical wire idle: observe its FIFO/PIO drain separately.
+Successful SPI cleanup clears its context, and UART direction cleanup preserves
+the other direction.
 
 Pico XIO state-machine initialization validates the exact clock-divider ratio
 before touching native configuration. The supported range is 1 through 65536,
@@ -304,6 +342,11 @@ All translation units must agree on the resulting object layouts, including
 embedded storage controlled by `ESY_UART_PRIV_BYTES` and `ESY_SPI_PRIV_BYTES`.
 Rebuild all consumers after changing these sizes; backend assertions reject
 insufficient storage.
+The default UART backend reserve includes both XIO directions' notification and
+atomic event state. Its increase adds 32 bytes to each default UART handle;
+rebuild common, HAL, backend, middleware and consumer objects together. XIO splits
+that reserve into aligned direction slots and checks each context's capacity at
+compile time.
 
 An active or cleanup-retained RX stream excludes blocking RX and ordinary RX
 DMA. Pico/STM32 direct blocking receivers also return `BUSY` before reading
@@ -337,6 +380,12 @@ ESP32 GPIO electrical initialization returns `BUSY` while an IRQ/wake binding
 exists, before `gpio_config` can replace its trigger. This includes HAL temporary
 state, configured-state restore and GPIO PM profile selection. Detach first;
 rejected transitions preserve the native IRQ/wake state and callback argument.
+Pico and ESP32 ordinary IRQs support native edge and level triggers; STM32F4
+EXTI rejects level triggers. ESP32 Light-sleep wake supports levels only.
+An already asserted level can wake immediately or prevent sleep, and a level
+IRQ handler must promptly clear the external condition to avoid repeated IRQs.
+GPIO34..39 on classic ESP32 have no internal pulls: pull requests fail before
+GPIO setup or IRQ service allocation rather than relying on SDK return status.
 
 ESP32 PWM maps channels 0/1, 2/3, 4/5 and 6/7 to four shared low-speed LEDC
 timers. One externally serialized owner coordinates all channels. A timer tracks
@@ -346,6 +395,13 @@ SDK reconfiguration. The final channel stops before timer pause/deconfigure.
 Failed cleanup retains the handle and claim for retry, blocking new timer
 claimants while final cleanup is pending. Native SDK users must not share these
 resources outside this ownership model.
+Runtime polarity changes reconnect only the selected channel's GPIO-matrix
+inversion. A stopped channel stays stopped; its physical idle level follows
+`start_low`. Suspend stops that channel while preserving its enable intent,
+duty and timer claim. Resume restores the waveform only if it was enabled
+before suspend. Neither operation pauses the shared timer or changes a peer.
+Data/enable operations reject suspended channels; failed resume remains
+suspended for retry. These channel transitions do not enter system sleep.
 
 Interrupt save/restore tokens preserve the entry mask, including nested calls
 and already-masked entry. On ESP32 the backend uses the SDK's interrupt-level
@@ -356,19 +412,20 @@ protects short local ISR/task handoffs, not objects accessed by another core.
 The [ESP32 IRQ HIL plan](../esy_hal/tests/hil/esp32_irq_hil_plan.md) covers nested
 restoration and interrupts pending until the outer mask is restored.
 
-ESP32 UART idle suspension retains its SDK driver and RX/TX ring buffers.
-It gates RX data interrupts. Active RX/callbacks and undrained TX reject suspend
-with BUSY; suspended data operations reject with STATE. Resume reuses the driver
-and failures retain it for retry. This transition retains SDK clocks and does
-not implement system sleep. One owner serializes all data/lifecycle calls;
-finite RX and callbacks advance only from owner poll, without UART reentry.
-The backend creates no event queue or task. Blocking operations use hardware
-polling and do not yield the scheduler; choose finite RX with regular owner
-polling when other work must run. Quiesce the sender before suspend.
-UART assembly privately links idf::esp_driver_uart. ESP32 system assembly uses
-the independent esy_os_context native-port target (ESY_RTOS=FreeRTOS) for ISR and
-local-IRQ tokens; this target has no HAL dependency. The platform root assembles
-it, while direct backend consumers must explicitly supply that OS-port target.
+ESP32 UART idle suspension retains the SDK driver and RX ring, gating RX
+interrupts while preserving configuration. Undrained TX rejects suspend with
+BUSY. Synchronous calls are externally serialized; send_timeout has a finite
+64-bit native microsecond deadline and leaves no caller-buffer borrow after
+return. Already copied FIFO bytes may continue after timeout. Native public DMA
+and stream callbacks are unsupported. The backend creates no task/event queue
+and has no OS abstraction dependency. Callback scheduling belongs to middleware.
+UART assembly privately links `idf::esp_driver_uart` and `idf::esp_hw_support`.
+HAL/backend neither include nor link an OS or middleware target. ESP32 CPU IRQ
+tokens use native Xtensa instructions. The system integration owner supplies
+exact runtime checks through `esy_hal_system_set_context_callbacks()`; the OS
+adapter installs its binding during its own initialization. Before a binding is
+available, IRQ queries conservatively classify masked CPU contexts as ISR and
+explicit sleep rejects entry. Native drivers may still use their SDK kernel internally.
 This system-only path does not require `idf::app_update`. That native component
 is required and privately linked only when `ENABLE_ESY_BOOTLOADER` selects the
 boot backend, including image activation and handoff.
@@ -379,8 +436,10 @@ The backend does not enable, disable or reconfigure these sources, and makes no
 cryptographic or collision-free-identity promise.
 ESP32 SPI accepts only complete 8-bit or 16-bit frames; other widths are rejected
 before controller claims, board routing or native calls.
+Runtime speed changes remain unsupported and preserve the current native and
+saved configuration on failure.
 The [ESP32 UART lifecycle HIL plan](../esy_hal/tests/hil/esp32_uart_lifecycle_hil_plan.md)
-covers driver retention, owner-poll progress, repeated resume and busy rejection.
+covers driver retention, synchronous I/O, repeated resume and busy rejection.
 
 STM32F4 system initialization enables and verifies DWT CYCCNT without resetting
 its value or changing other trace settings. It propagates vendor HAL init failure
@@ -458,15 +517,11 @@ callbacks must be bounded and must not reenter those operations. Abort disables
 channel IRQs, retires peer-core dispatch, and detaches callbacks before success.
 STM32 abort failure retains ownership while the stream remains enabled.
 
-Direct generic HAL DMA defers user notifications to its serialized owner poll.
-Backend IRQ callbacks publish events and retain their bounded ISR contract;
-peripheral adapters retain their own documented retirement flow. STM32F4 IRQ
-dispatch handles the supported single-buffer normal/circular modes without an
-ISR wait for stream disable. FE/DME/TE errors take priority over TC/HT and request
-stream disable before reporting the error event. The owner must still confirm
-retirement through task-side abort before releasing a buffer. Native ADC callback
-signatures and completion state remain supported; double-buffer mode is outside
-this backend's configuration contract.
+Direct generic HAL DMA callbacks run automatically in IRQ context. Native
+terminal retirement is bounded; failed stop retains the claim and storage for
+explicit task-side abort. Half/circular callbacks retain ownership. Pico ISR
+retirement caches SDK channel reservations to avoid native allocation locks in
+interrupt context; task release/deinit flushes them. No HAL process hook exists.
 
 Generic DMA routing has an explicit physical identity query. STM32F4 resolves
 the controller/stream from `dreq`; the `channel` field selects the peripheral
@@ -565,17 +620,38 @@ Consumers provide the SDK ADC/ADC extension sources and the ADC/DMA IRQ provider
 See the [ADC DMA HIL plan](../esy_hal/tests/hil/adc_dma_hil_plan.md) for scan,
 circular, error, abort and graph-lifecycle acceptance checks.
 One task/startup owner serializes lifecycle across every ADC handle and PM
-transition. The read-only `esy_hb_adc_check_available()` preflight checks physical
+transition. The read-only `esy_hb_adc_validate_config()` rejects unsupported
+sample-time requests and invalid controller/channel values before HAL board setup.
+The read-only `esy_hb_adc_check_available()` preflight checks physical
 ownership before HAL board setup; native init rechecks it before changing its
 slot. The query is not a reservation against unsynchronized lifecycle callers.
+
+Classic ESP32 binds one exclusive ADC1 handle at physical index 1 and channel
+0..7. It accepts only `ESY_ADC_SAMPLETIME_DEFAULT`, using the native oneshot
+provider with 12-bit results and 12 dB attenuation. Results are uncalibrated raw
+counts in 0..4095; no voltage-conversion accuracy is implied. Explicit sampling
+cycle requests return `NOT_SUPPORTED`; DEFAULT resolves to the previous
+15-cycle profile on STM32F4 without renumbering the existing cycle enums or
+changing configuration layouts. The generic default initializer now returns
+DEFAULT. Software trigger with edge NONE is accepted; DMA, scan, continuous
+mode and external triggers return `NOT_SUPPORTED`, and the capability mask is
+zero. A synchronous read makes one native attempt; contention/conversion timeout
+returns `TIMEOUT` without exposing an invalid result or adding retries.
+The backend owns one SDK unit from init until successful deinit. Native
+creation/deletion may allocate or block internally; the sampling path creates
+no native unit. A channel-configuration failure retains the acquired unit for
+HAL cleanup, and a deletion error retains its claim for retry while refusing
+new samples. Independent native ADC users must not share this controller or pin.
 
 Native SPI claims its physical controller before HAL board setup. Each handle
 keeps that reservation through PM suspension, failed initialization cleanup and
 native teardown errors. Native deinit returns status and retains the context
 and claim; HAL resets board routing before the backend release operation.
 Do not reclaim handle storage or callback arguments before successful cleanup.
-Active or partially retired DMA must finish through poll/abort first. Destructive
-PM cleanup errors fault the graph and retain resources for system recovery/reset.
+Supported active DMA retires through its native terminal IRQ or successful abort.
+A failed native stop retains buffers/callback storage for explicit task-side
+abort. Destructive PM cleanup errors fault the graph and retain resources for
+system recovery/reset.
 ESP32 SPI explicitly requires native `idf::esp_driver_spi` and
 `idf::esp_driver_gpio` targets. External native SDK users must not own or change
 a controller selected for this HAL, before initialization or during its lifetime.
@@ -584,33 +660,32 @@ STM32F4 supports only 8-bit and 16-bit frames and rejects other valid
 widths with `NOT_SUPPORTED` before board setup instead of rounding them.
 Consumers check the status-returning SPI deinit API before reusing storage.
 
-Built-in Pico/STM32 SPI ISR callbacks only publish atomic terminal events. The
-owner must call `esy_hb_spi_poll()` (normally through HAL) until terminal
-completion; it retires both DMA channels, pending callbacks and physical SPI
-before releasing CS or reporting the result. Busy remains true during cleanup.
-ESP32 retains its synchronous completion behavior. Every SPI backend supplies
-the required poll hook; synchronous providers return immediately when idle.
-STM32 SPI retains only the streams it prepared. Partial-start cleanup failures
-keep the transaction busy and its buffers borrowed for poll/abort retry; task
-abort releases CS and callbacks only after both streams and wire activity retire.
-Circular and asymmetric DMA descriptors are rejected before starting I/O.
+Built-in Pico/STM32 SPI combines both DMA directions and the native physical
+tail in the interrupt path. It retires callback storage, releases CS and reports
+one terminal result without a process/poll call. The tail has a fixed maximum register-inspection
+budget derived from native clock dividers; configurations exceeding it reject DMA; a failed stop retains the transaction for explicit abort.
+ESP32 public SPI DMA is unsupported; its synchronous implementation may use
+SDK-internal DMA. Middleware handles queued task-context result callbacks.
 
-The public SPI DMA boundary requires nonzero byte lengths, aligned complete
-8-bit or 16-bit elements and equal lengths/widths when both directions are
-provided. It rejects circular and 32-bit-element requests. Missing directions
-use internal null-memory dummy descriptors, not caller-supplied invalid
-endpoints. ESP32 recognizes these dummies and reports zero bytes for the absent
-direction. Its synchronous native transactions accept at most 4094 TX bytes.
-For all ESP32 byte/halfword blocking and DMA entry points, RX of one through
-four bytes uses SDK inline storage and exact-length copy-back; larger RX must
-be a multiple of four, at most 4092 bytes. Other RX lengths return
-`NOT_SUPPORTED` before native I/O/CS assertion. This avoids native DMA word
-writes beyond the caller's declared buffer without imposing hidden scratch
-storage or assuming extra caller padding. Pico 16-bit full-duplex uses the
-native simultaneous write/read primitive, with exactly the requested number
-of halfword frames. See the [SPI buffer HIL plan](../esy_hal/tests/hil/spi_buffer_contract_hil_plan.md).
+On supported Pico/STM32 SPI DMA paths, descriptors require nonzero byte lengths,
+aligned complete 8-bit or 16-bit elements and equal lengths/widths when both
+directions are provided. Circular and 32-bit-element requests are rejected.
+Missing directions use internal null-memory dummy descriptors, not caller-supplied
+invalid endpoints. ESP32 rejects public SPI DMA without starting native I/O,
+retaining buffers or invoking completion callbacks.
 
-PWM DMA also uses owner-driven poll retirement on Pico/STM32F4. STM32F4 selects
+ESP32 blocking native transactions accept at most 4094 TX bytes. RX of one through
+four bytes uses SDK inline storage and exact-length copy-back; larger RX must be
+a multiple of four, at most 4092 bytes. Other RX lengths return `NOT_SUPPORTED`
+before native I/O/CS assertion. This avoids SDK-internal DMA word writes beyond
+the caller's declared buffer without imposing hidden scratch storage or assuming
+extra caller padding. The synchronous SDK operation may allocate temporary DMA
+buffers for unsuitable caller memory; device/bus creation remains native SDK
+lifecycle allocation. Pico 16-bit full-duplex uses the native simultaneous
+write/read primitive, with exactly the requested number of halfword frames. See
+the [SPI buffer HIL plan](../esy_hal/tests/hil/spi_buffer_contract_hil_plan.md).
+
+PWM DMA retires automatically from native IRQs on Pico/STM32F4. STM32F4 selects
 the configured channel's CCx DMA request and routes it to timer update events,
 so a zero compare does not stall transfer requests. The backend restores its
 previous CCDS selection after DMA retirement. Finite completion leaves PWM
@@ -618,7 +693,7 @@ running at its final compare after the next hardware preload update; it is not
 an end-of-period notification. The owner explicitly disables output before idle
 suspension or another DMA submission. Error and explicit abort stop output.
 STM32F4 supports circular DMA; Pico rejects circular mode. Both keep callback
-storage borrowed until successful task retirement. PWM deinit returns status and
+storage borrowed until successful terminal IRQ retirement or task abort. PWM deinit returns status and
 preserves ownership on failure. See the
 [PWM HIL plan](../esy_hal/tests/hil/stm32_pwm_hil_plan.md) for request, retirement,
 clock and waveform verification.
@@ -628,7 +703,7 @@ accepted frequency, running outputs, polarity and wrap handlers. Only the first
 owner initializes the slice. Same-frequency A/B handles coexist; a second
 physical channel claim or conflicting frequency is rejected. Per-GPIO output
 override keeps a disabled/suspended channel quiet while the peer runs; final
-owner release permits new timing. DMA requires a sole owner until poll/abort
+owner release permits new timing. DMA requires a sole owner until terminal IRQ completion or successful abort
 retires its borrow. All Pico PWM calls share one serialized task/core owner;
 wrap callbacks cannot reenter control or lifecycle. Logical-slot preflight runs
 before HAL board setup on every port. Different logical indices must use
@@ -649,35 +724,20 @@ All RX-stream UART IRQs installed on one Pico core must share their configured
 priority. The first successful stream start reserves that core's UART priority
 until reset; a conflicting start returns `BUSY` before borrowing caller storage
 or changing native configuration. Native code must not change these priorities.
-STM32 RX errors stop new peripheral DMA requests in ISR; the owner performs DMA
-retirement. Only successful stop releases caller storage, and failed stop must
+STM32 RX errors stop new peripheral DMA requests and retire supported access in ISR;
+a failed native stop retains storage for task-side abort. Only successful stop releases caller storage, and failed stop must
 be retried before deinit/reuse.
 
-UART exposes dedicated backend abort, poll and direction-busy operations. Abort
-retires the peripheral source and pending native callbacks, including port
-activity state; generic DMA abort alone is not a UART cancellation. STM32
-ordinary DMA is finite-only and rejects circular requests before starting.
-It enables DMAT/DMAR for accepted TX/RX, publishes half/done/error events in IRQ,
-and delivers notifications from owner polling after native retirement. Successful
-TX also waits for TC. Errors take priority over completion; failed cleanup
-remains busy and retains buffers/callbacks for retry. Dedicated RX streaming
-keeps its circular implementation. USART3 mappings are compiled only on devices
-that provide the peripheral; other physical indices are rejected normally.
-Pico ordinary and Pico XIO DMA are finite-only. They also publish IRQ events and
-retire native DMA before owner polling delivers notifications. Circular ordinary
-DMA is rejected before starting. Pico XIO TX completion certifies source
-retirement while queued PIO bytes may still transmit. Physical TX busy remains
-set until FIFO empty is followed by a fresh TXSTALL at the program's blocking
-PULL, after the complete final stop-bit delay; old FIFO-starvation flags are
-cleared before this check. Blocking XIO TX waits for that drain. PM and deinit
-preserve an undrained direction. Serialize busy checks, transfers and lifecycle
-on one task/core and keep the PIO clock/SM running until idle before shutdown.
-ESP32 RX abort retains atomic request ownership and rejects reentry during
-a poll/callback. No background task accesses caller buffers.
-Native busy state covers accesses after the HAL callback returns. UART handle
-tracking and optional graph usage remain borrowed through callback return;
-registration is not a prerequisite for cancellation. Direct Pico/STM32/XIO DMA
-consumers drive owner polling. See the [UART DMA HIL plan](../esy_hal/tests/hil/uart_dma_hil_plan.md).
+UART exposes native abort and direction-busy operations. STM32 finite RX
+completes in DMA IRQ; TX retires DMA source access and finishes in UART TC IRQ.
+Pico native TX/RX DMA completes automatically from DMA IRQ. TX certifies source
+retirement; physical UART busy remains separately observable. Ordinary
+native DMA rejects circular requests, which use the separate RX stream API.
+Pico XIO DMA callbacks retire source storage automatically; TX busy also covers
+queued PIO bytes and its final stop-bit drain. No UART process function exists.
+Callbacks are ISR-safe and cannot reenter lifecycle. Retained errors require
+explicit task-side abort before buffers or handles are reused. ESP32 exposes
+synchronous operations and no DMA/stream callbacks.
 
 The Pico XIO SPI backend implements three-wire write-then-read as one atomic
 operation. It releases the shared data output after the final transmit sampling
@@ -773,27 +833,47 @@ cannot be undone by an older callback. Native stop/delete failure disables user
 notifications and preserves the native handle, reserving the slot for cancel or
 deinit retry. `is_active()` reports retained cleanup as active; init after deinit
 returns `ESY_ERR_BUSY` until all native handles retire. Eight occupied slots
-return `ESY_ERR_NO_MEM`. See the
+return `ESY_ERR_NO_MEM`. Periodic intervals below 50 microseconds and non-default
+clock sources return `NOT_SUPPORTED` before allocation; the requested period is
+never silently clamped. The minimum is not a callback-latency guarantee. See the
 [ESP32 timer HIL plan](../esy_hal/tests/hil/esp32_timer_lifecycle_hil_plan.md).
 
-Timer Capture claims its index and physical GPIO/timer before board setup;
+Supported Timer Capture providers claim their index and physical GPIO/timer before board setup;
 conflicting initialization cannot reset the current owner's pin. Board hooks
 must validate and preserve the configured resource identity, returning false
 without changes for unsupported mappings. Suspend retires native IRQs and resets
 board routing while preserving the reservation. Final status-returning deinit
-releases it only after successful cleanup. Pico/ESP32 lifecycle stays on its
-claim core and the GPIO dispatch core; cross-core cleanup returns `STATE`.
-The private GPIO IRQ helper is assembled even when public GPIO is disabled.
-ESP32 Capture requires native `idf::esp_driver_gpio` and `idf::esp_timer` targets.
+releases it only after successful cleanup. Pico has no native capture provider
+and returns `NOT_SUPPORTED` before board configuration.
+ESP32 uses native `idf::esp_driver_mcpwm` and `idf::esp_driver_gpio` targets;
+it does not borrow the GPIO IRQ service or ESP Timer. Six logical reservations
+map to MCPWM groups as `inner.tim_id = phys_index / 3` and
+`inner.channel = phys_index % 3`; the SDK chooses the physical channel within
+the group. Three reservations share one timer. Each group's lifecycle is
+externally serialized on one core, with matching IRQ priorities; conflicting
+claims fail before native setup. Cleanup is staged, retaining claims, callbacks
+and native objects after failure for a same-owner retry. The final channel
+stops and releases the shared timer. `CONFIG_MCPWM_ISR_IRAM_SAFE` is unsupported
+because generic callbacks/storage have no cache-disabled placement contract.
+Its lifecycle requires an ordinary schedulable context, checked through the
+startup-installed system execution callbacks. `esy_os_init()` installs those
+callbacks for its OS adapter; native-SDK-only startup supplies them through
+`esy_hal_system_set_context_callbacks()`. Missing or nonblocking context returns
+`STATE` before allocation; the backend has no OS API or target dependency.
 Destructive PM cleanup failure faults the device graph, retaining reservations
 and storage for system recovery/reset; the faulted registry cannot be unbound
 locally. Unregistered cleanup failures permit ordinary deinit retry.
-Their ISR owns timestamp history and atomically publishes 32-bit microsecond
+The ESP32 capture ISR owns timestamp history and atomically publishes 32-bit microsecond
 values and intervals. Queries never combine two independently changing history
 samples; separate timestamp and interval queries need not describe one edge.
 Both queries initially return zero; the first edge still has zero interval.
-Consecutive edges must be less than 2^32 microseconds apart. Init/resume resets
-history.
+It computes intervals by subtracting raw 32-bit ticks before conversion to
+microseconds. At an 80 MHz APB clock the native counter wraps every
+53.6870912 seconds; edges must be strictly less than one native wrap apart.
+Converted timestamps wrap with that native domain, not every 2^32 microseconds;
+use the interval query rather than subtracting converted timestamps across wrap.
+The native timer may already run for another channel when initialized/resumed;
+history resets, but the shared counter does not.
 
 STM32F4 timer capture owns one complete timer and its IRQ lifecycle per handle.
 The board supplies the timer clock and GPIO setup through HAL MSP hooks and
@@ -824,7 +904,7 @@ or control operation and does not make that operation hard-real-time or ISR-safe
 | --- | --- |
 | ESP32 I2C bus/device | Init creates one bus and addressless device; deinit removes the device before the bus. Failed deletion retains the native owner for retry. Transfers create neither. |
 | ESP32 UART driver | Init installs the native driver and its buffers; successful deinit retires I/O before deleting it. Failed cleanup retains the handle/reservation. |
-| ESP32 SPI bus/device | Init creates the native bus/device (or slave driver); deinit removes resources only after pending I/O has retired. SDK failure retains remaining ownership. |
+| ESP32 SPI bus/device | Init creates the native master bus/device; deinit removes resources only after pending I/O has retired. SDK failure retains remaining ownership. |
 | ESP32 logical timer | Start creates a native `esp_timer`; cancel/deinit retire it. A one-shot's SDK task callback also performs native retirement before invoking user code. This is a provider lifecycle-completion hook; failed deletion keeps the native handle for later cancel/deinit retry. |
 
 Use task-context lifecycle calls as documented by each API, serialize their owner,

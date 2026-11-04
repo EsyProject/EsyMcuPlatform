@@ -25,9 +25,8 @@ facade fakes do not establish physical DMA bounds, stream requests or wire timin
   CCM. Use a loopback fixture or known SPI slave and a logic analyzer on SCLK,
   CS and data. Start with software-controlled CS inactive.
 - Serialize prepare/start/abort and peripheral lifecycle on one task/startup
-  owner. Generic public DMA callbacks are delivered automatically by IRQ;
-  backend/peripheral IRQ callbacks only publish internal state. Drive generic DMA
-  no HAL process/poll entry is needed for successful completion.
+  owner. Supported generic and peripheral DMA callbacks are delivered
+  automatically by IRQ; no HAL process/poll entry is needed for completion.
   Keep clocks fixed and keep buffers, handles and callback arguments alive while
   busy, including after a submission or cleanup failure that still reports busy.
 
@@ -38,7 +37,7 @@ registers, canaries, wire traces, callback order and optional graph usage counts
 ## Target Build Checks
 
 Compile DMA, SPI and ADC with the real ARM toolchain and SDK headers, with
-warnings as errors. Link a consumer that retains the transfer, abort and process
+warnings as errors. Link a consumer that retains the transfer and abort
 APIs and the real DMA vectors. Check ADC separately because it uses the same
 generic prepare but passes a sample count to its native ADC start operation.
 Use at least one ADC1-only and one multi-ADC device when claiming both.
@@ -47,8 +46,9 @@ Use at least one ADC1-only and one multi-ADC device when claiming both.
 
 Run these checks on RP2040 and RP2350 with the real SDK DMA backend. Use one
 serialized task/startup owner, a reserved idle channel and aligned SRAM buffers
-with canaries. Native IRQ callbacks only record completion/error; keep the
-owner token, descriptor, buffers and callback storage alive until abort succeeds.
+with canaries. The backend fixture callbacks record completion/error; keep the
+owner token, descriptor, buffers and callback storage alive until fixture abort
+retires its explicitly retained native claim.
 Do not use a backend host fake to establish these register semantics.
 
 1. Prepare a finite memory copy without triggering it. Record `CHx_DBG_TCR`,
@@ -112,7 +112,7 @@ Do not use a backend host fake to establish these register semantics.
    changed endpoints and count without reading or writing outside their buffers.
 5. Run SPI full-duplex loopback at 8-bit and 16-bit widths with equal byte lengths.
    Confirm requested data, NDTR and canaries. Delay delivery of either DMA IRQ:
-   SPI process must not release CS, report terminal success or release a graph lease
+   SPI must not release CS, report terminal success or release a graph lease
    until both terminal events and physical BSY clearance have been observed.
    Confirm one terminal result, exact byte counts and no late callback/write.
 6. Run SPI transmit-only and receive-only buffers of at least 64 bytes at both
@@ -129,9 +129,10 @@ Do not use a backend host fake to establish these register semantics.
    request; the other owner continues undisturbed.
 8. Inject first/second prepare and start failure on target. Rejection with busy
    false must retain no callbacks/buffers. If hardware cleanup fails, preserve the
-   original request and graph lease, observe busy, and continue process or retry
-   abort. Process must deliver one terminal error only after all owned streams and
-   wire activity retire. No result may report success for an injected DMA error.
+   original request and graph lease, observe busy, and retry explicit task abort.
+   A terminal IRQ result is delivered only after all owned streams and wire
+   activity retire. Successful abort cancels silently. No result may report
+   success for an injected DMA error.
 9. Abort during finite SPI DMA and during an error-retirement retry. Verify that
    new DMA requests stop, both owned stream callbacks retire, and successful
    cancellation produces no ordinary completion or later buffer access. If a
@@ -144,30 +145,32 @@ Do not use a backend host fake to establish these register semantics.
     matching sample count, including the maximum supported buffer length.
 
 11. Run generic public DMA both registered with the device graph and unregistered.
-    Mask task processing after physical completion: no user callback may execute,
-    busy stays true, prepare/deinit/controls must reject reuse, and a registered
-    route retains its usage reference. Process from its serialized owner; verify
-    native abort detaches pending IRQ/callback access before notification, exactly
-    one terminal callback runs in that task, and the usage reference stays held
-    inside the callback and drops after it returns. Repeat without user callbacks.
+    Leave the task owner inactive after submission while allowing IRQ delivery.
+    Verify exactly one terminal callback runs in IRQ context after native
+    retirement, with the usage reference held inside the callback and released
+    after return. Reentrant lifecycle/control operations must reject reuse.
+    The next task observation must see the retired state without a progress call.
+    Repeat without user callbacks.
 12. Inject FE, DME and TE separately, then each error with TC and HT pending in
     the same stream IRQ snapshot. The STM32F4 single-buffer dispatcher must report
     error only, mask stream interrupts, clear pending flags and request EN clear.
-    Measure IRQ duration: it must never wait for EN to clear. Stall or fail the
-    task-side abort and verify process returns failure without notifying/releasing
-    storage or a graph lease; retry process or abort to retire safely. A later IRQ
+    Measure IRQ duration: EN-clear inspection must stay within its fixed budget.
+    Fail bounded IRQ retirement and verify no unsafe notification or release of
+    storage or a graph lease. Retry explicit task abort to retire safely. A later IRQ
     must not enter the vendor TE busy-wait or produce duplicate error/success.
 13. Repeat finite and circular native ADC completion/half/error through the
     shared DMA owner: HAL_ADC_Start_DMA replaces native DMA callback pointers.
     Verify native ADC Parent/State/Lock and error codes still transition correctly,
-    DMA processing/abort can stop conversions and retire the same handle, and no
+    DMA IRQ retirement/task abort can stop conversions and retire the same handle, and no
     ADC callback runs after successful task abort. The backend configures only
     single-buffer DMA; do not install native double-buffer or M1 callbacks.
-14. For generic circular DMA, delay application consumption across multiple HT/TC events.
-    Expect at most one half and one cycle notification per process call, rather than an
-    exact event count. The request/lease stays live until error retirement or
-    successful abort; clients needing lossless sample accounting need their own
-    buffer/protocol arrangement. A terminal error suppresses co-pending success.
+14. For generic circular DMA, delay task consumption across multiple HT/TC IRQs.
+    Requested half and cycle callbacks execute in IRQ context and retain the
+    request/lease until error retirement or successful abort. Account for native
+    pending-flag coalescing when IRQ delivery itself is delayed; clients needing
+    lossless sample accounting need their own buffer/protocol arrangement.
+    A terminal error suppresses co-pending success. Pico rejects requested half
+    callbacks and circular mode before claiming hardware.
 15. For every address/count control, test a valid prepared idle resource and
     invalid route, missing prepare, active/pending request, misalignment and native
     counter overflow. Failure must preserve registers and public prepared/started
@@ -184,7 +187,7 @@ Do not use a backend host fake to establish these register semantics.
     Repeat with different STM32 request selectors aliasing the same stream.
 17. Repeat the conflict with generic DMA versus enabled SPI, UART TX/RX/stream,
     PWM and ADC providers, and between two native providers. Attempt the conflict
-    while the first owner is prepared, active, terminal-but-unpolled and retrying
+    while the first owner is prepared, active, in its terminal callback and retrying
     failed cleanup. No second provider may replace callbacks, clear pending IRQs,
     stop another owner's transfer or release its claim. After successful abort,
     every provider must permit a new owner. STM32 I2C DMA is unsupported and must
@@ -219,9 +222,9 @@ fixed dummy word. Logical route masks address the intended exclusive streams.
 Successful SPI completion follows both stream and wire retirement; successful
 abort leaves no asynchronous access, and failed cleanup preserves ownership.
 Generic DMA terminal callbacks follow hardware/callback retirement and registered
-leases outlive the user terminal callback. Process visits a bounded route count,
-but provider abort, peer-core callback exclusion and user callback execution
-contribute to its duration; it has no promised wall-clock bound.
+leases outlive the user terminal callback. IRQ retirement uses fixed native
+inspection budgets; user ISR callbacks must remain bounded. Explicit task abort
+and lifecycle cleanup follow their provider execution contracts.
 
 Measure real IRQ delivery, canaries and CS/SCLK timing on the selected board.
 Slave wire idle can depend on the external master; a failed abort does not
@@ -229,14 +232,14 @@ permit storage reuse.
 
 ## Generic DMA Completion Ownership
 
-1. Submit a finite transfer and publish DMA completion without running process.
-   Confirm that no user callback runs and storage remains borrowed. Process from
-   the serialized owner and confirm exactly one terminal callback after retirement.
-2. On STM32F4, publish half/circular events repeatedly before process. Confirm
-   coalescing, continued storage ownership and explicit abort for cancellation.
+1. Submit a finite transfer and allow DMA IRQ completion while its task owner
+   remains inactive. Confirm exactly one ISR callback after retirement and safe
+   storage reuse after callback return, without any progress call.
+2. On STM32F4, deliver repeated half/circular IRQ events. Confirm bounded ISR
+   callbacks, continued storage ownership and explicit abort for cancellation.
 3. Combine error and completion, then fail native retirement. Confirm error
-   priority, no early callback, retained storage and successful later process or
-   explicit abort without requiring another IRQ.
+   priority, no early callback, retained storage and successful explicit abort
+   without requiring another IRQ.
 4. After completion or successful abort, inject a late IRQ and confirm it cannot
    access released callback context. Include peer-core dispatch retirement.
 
@@ -244,12 +247,13 @@ permit storage reuse.
 
 - Delay one DMA direction, physical wire idle and native result readiness
   independently. CS and buffers remain borrowed until safe terminal retirement.
-- Complete before the first processing turn. Repeated process calls deliver one
-  terminal callback, without a separate wake callback or event capability.
+- Complete while the task owner remains inactive. Native IRQ retirement delivers
+  one terminal callback, without a separate wake callback or progress entry.
 - While the SPI worker owns an active transfer, confirm finite relative waits;
   idle waits resume only for queued work or control requests.
-- On ESP32, publish `post_cb` before result-queue readiness. A first BUSY result
-  retains descriptor/CS/buffers; a later process retires once without another IRQ.
+- On ESP32, public DMA submission returns `NOT_SUPPORTED` without retaining
+  storage or invoking callbacks. The SPI scheduler uses synchronous HAL I/O and
+  delivers its result from the caller owner or optional OS worker.
 - Inject errors, partial-start cleanup failure and stop/destroy attempts. Failed
   cleanup retains callback context and scheduler storage until successful retirement.
 - Caller-driven schedulers use their existing process and next-wait APIs without
