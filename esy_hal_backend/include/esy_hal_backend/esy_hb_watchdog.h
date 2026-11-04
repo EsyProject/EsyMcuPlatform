@@ -48,7 +48,11 @@ extern "C" {
  * @retval <0     Other platform-specific failure
  *
  * @note Supported nominal ranges are 1..8000 ms (Pico), 1..8190 ms
- *       (STM32F4), and 1..UINT32_MAX/150 ms (ESP32). Out-of-range values
+ *       (STM32F4). ESP32 converts milliseconds using the selected RTC slow
+ *       clock's nominal frequency and rounds up to whole ticks; zero frequency
+ *       is NOT_SUPPORTED and counts beyond UINT32_MAX are INVALID_ARG before
+ *       hardware changes. Keep that clock source fixed until deinit. Values
+ *       outside the selected clock's representable range
  *       are rejected rather than silently clamped. These are programming
  *       ranges, not certified timing bounds. Reinitializing a live ESP32
  *       watchdog returns ESY_ERR_STATE; serialize ownership on every port.

@@ -58,7 +58,8 @@ or a consumer-local native-call interceptor for the failure cases below; do not
 modify vendor sources.
 
 1. Attach an ordinary GPIO IRQ, then attempt wake enable on the occupied pin.
-   Expect `ESY_ERR_BUSY` without replacing the callback or changing wake state.
+   Request HIGH_LEVEL or LOW_LEVEL and expect `ESY_ERR_BUSY` without replacing
+   the callback or changing wake state.
    Repeat rejected requests from the other core, with an invalid pin and with
    both-edge mode; the existing registration and wake state must remain intact.
 2. Inject failure of `esp_sleep_enable_gpio_wakeup()`. Separately fail each
@@ -74,7 +75,10 @@ modify vendor sources.
 4. Repeat steps 2 and 3 with failure of per-pin `gpio_wakeup_enable()`, and with
    cleanup failure after an otherwise successful enable. A request rejected
    before borrowing resources must still permit successful ordinary deinit.
-5. Exercise successful rising/high-level and falling/low-level wake cycles.
+5. Exercise explicit HIGH_LEVEL and LOW_LEVEL wake cycles. RISING, FALLING and
+   BOTH requests must return `NOT_SUPPORTED` without installing a handler or
+   changing wake state. An already asserted level may wake immediately or
+   prevent entry; do not require a new edge for a level request.
    Enable a second wake pin, detach the first, and verify the second remains a
    wake source. The shared GPIO wake class belongs to system sleep policy; pin
    cleanup must not disable that class for its peers.

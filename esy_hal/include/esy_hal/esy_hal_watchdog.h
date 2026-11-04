@@ -36,6 +36,10 @@ extern "C" {
  * control. ESP32 ignores it; its watchdog debug behavior is platform-defined.
  *
  * Successful initialization starts the watchdog immediately on every port.
+ * ESP32 uses the selected RTC slow clock's nominal frequency, rounding up to
+ * whole ticks. Unrepresentable durations are rejected before hardware changes;
+ * keep the RTC clock source fixed until deinit. Oscillator tolerance means the
+ * requested nominal duration is not a guaranteed minimum timeout.
  * A failed hardware initialization may require system recovery; do not assume
  * an irreversible peripheral can be disabled after a hardware failure.
  *

@@ -206,6 +206,8 @@ static esy_err_t gpio_attach_irq(const esy_gpio_irq_config_t *config,
     case ESY_GPIO_IRQ_RISING: init.Mode = GPIO_MODE_IT_RISING; break;
     case ESY_GPIO_IRQ_FALLING: init.Mode = GPIO_MODE_IT_FALLING; break;
     case ESY_GPIO_IRQ_BOTH: init.Mode = GPIO_MODE_IT_RISING_FALLING; break;
+    case ESY_GPIO_IRQ_HIGH_LEVEL:
+    case ESY_GPIO_IRQ_LOW_LEVEL: return ESY_ERR_NOT_SUPPORTED;
     default: return ESY_ERR_INVALID_ARG;
   }
   switch (config->pull) {

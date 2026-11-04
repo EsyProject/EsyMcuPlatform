@@ -51,7 +51,11 @@ extern "C" {
 /** @brief Fill a GPIO configuration with safe defaults. */
 void esy_hal_gpio_default_cfg(esy_gpio_config_t *config);
 
-/** @brief Initialize a caller-owned GPIO handle and apply its active state. */
+/**
+ * @brief Initialize a caller-owned GPIO handle and apply its active state.
+ * @retval ESY_ERR_NOT_SUPPORTED ESP32 input-only GPIO34..39 cannot provide
+ * internal pull-up/down; those requests fail before changing pin state.
+ */
 esy_err_t esy_hal_gpio_init(esy_gpio_t *gpio,
                                  const esy_gpio_config_t *config);
 
@@ -102,6 +106,7 @@ esy_err_t esy_hal_gpio_read(const esy_gpio_t *gpio, bool *out_value);
 /**
  * @brief Apply an explicit electrical state to an initialized GPIO.
  *
+ * ESP32 input-only pads reject internal pull-up/down with NOT_SUPPORTED.
  * ESP32 preserves attached IRQ/wake configuration by rejecting state changes
  * with BUSY. Deinitialize an ordinary IRQ handle, or successfully disable a
  * wake source, before reconfiguration. GPIO PM state selection has the same
@@ -145,6 +150,14 @@ esy_err_t esy_hal_gpio_attach_irq(esy_gpio_t *gpio,
 
 /**
  * @brief Configure an IRQ-capable GPIO as a low-power wake source.
+ *
+ * The requested trigger is exact: ports must not substitute a level for an
+ * edge. ESP32 Light-sleep accepts HIGH_LEVEL or LOW_LEVEL only and rejects
+ * edge modes with ESY_ERR_NOT_SUPPORTED before retaining resources. An already
+ * asserted level can wake immediately or prevent sleep. Pico CPU idle accepts
+ * native edge and level modes; STM32F4 EXTI accepts edge modes only. This API
+ * does not establish reset-class or Deep-sleep wake support. A level handler
+ * must clear the external condition promptly to avoid repeated interrupts.
  *
  * A backend setup/rollback failure may retain wake/IRQ ownership and the
  * callback argument even when this function returns an error. Keep both handle

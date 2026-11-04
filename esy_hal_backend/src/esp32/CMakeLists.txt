@@ -81,6 +81,10 @@ if(ENABLE_ESY_GPIO)
 endif()
 
 if(ENABLE_ESY_TIMER)
+    if(NOT TARGET idf::esp_timer)
+        message(FATAL_ERROR "ESP32 timer requires native idf::esp_timer")
+    endif()
+    list(APPEND MODULE_DEPS idf::esp_timer)
     list(APPEND MODULE_SRCS esy_hb_timer.c)
 endif()
 
@@ -96,6 +100,13 @@ if(ENABLE_ESY_TIMER_CAPTURE)
 endif()
 
 if(ENABLE_ESY_WATCHDOG)
+    foreach(esy_watchdog_provider IN ITEMS esp_hw_support hal esp_system)
+        if(NOT TARGET idf::${esy_watchdog_provider})
+            message(FATAL_ERROR
+                "ESP32 watchdog requires native idf::${esy_watchdog_provider}")
+        endif()
+        list(APPEND MODULE_DEPS idf::${esy_watchdog_provider})
+    endforeach()
     list(APPEND MODULE_SRCS esy_hb_watchdog.c)
 endif()
 

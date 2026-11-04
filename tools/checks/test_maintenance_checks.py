@@ -17,15 +17,22 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MaintenanceChecks(unittest.TestCase):
+    def backend_contract_fixture(self, root):
+        checks = root / 'tools/checks'
+        checks.mkdir(parents=True)
+        checker = checks / 'check_esy_hal_backend_contracts.sh'
+        shutil.copyfile(ROOT / 'tools/checks' / checker.name, checker)
+        for relative in ('esy_hal_backend', 'esy_hal', 'esy_common/defs'):
+            shutil.copytree(ROOT / relative, root / relative,
+                            ignore=shutil.ignore_patterns('build'))
+        return checker
+
     def test_backend_api_closure_reaches_nested_xio_sources(self):
         with tempfile.TemporaryDirectory(prefix='nested backend closure ') as directory:
             root = Path(directory)
-            checks = root / 'tools/checks'
-            checks.mkdir(parents=True)
-            checker = checks / 'check_esy_hal_backend_contracts.sh'
-            shutil.copyfile(ROOT / 'tools/checks' / checker.name, checker)
-            shutil.copytree(ROOT / 'esy_hal_backend', root / 'esy_hal_backend',
-                            ignore=shutil.ignore_patterns('build'))
+            checker = self.backend_contract_fixture(root)
+            result = subprocess.run(['bash', str(checker)], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             source = root / 'esy_hal_backend/src/pico/xio/uart_rx/esy_hb_xio_uart_rx.c'
             source.write_text(source.read_text().replace(
                 'esy_hb_xio_uart_rx_get_pin(', 'removed_uart_rx_get_pin('))
@@ -34,6 +41,22 @@ class MaintenanceChecks(unittest.TestCase):
             self.assertIn('pico/xio/uart_rx/esy_hb_xio_uart_rx.c misses public API',
                           result.stderr)
             self.assertIn('esy_hb_xio_uart_rx_get_pin', result.stderr)
+
+    def test_backend_contract_rejects_mutation_on_unsupported_spi_speed_change(self):
+        with tempfile.TemporaryDirectory(prefix='SPI speed contract ') as directory:
+            root = Path(directory)
+            checker = self.backend_contract_fixture(root)
+            result = subprocess.run(['bash', str(checker)], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            source = root / 'esy_hal_backend/src/esp32/esy_hb_spi.c'
+            text = source.read_text()
+            start = text.index('esy_err_t esy_hb_spi_set_speed(')
+            result_position = text.index('return ESY_ERR_NOT_SUPPORTED;', start)
+            source.write_text(text[:result_position] + 'c->speed_hz = speed_hz;\n    ' +
+                              text[result_position:])
+            result = subprocess.run(['bash', str(checker)], capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('unsupported SPI speed changes must preserve', result.stderr)
 
     def allocation_fixture(self, root):
         for directory in ('esy_common', 'esy_hal', 'esy_hal_backend', 'esy_middleware'):

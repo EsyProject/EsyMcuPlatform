@@ -47,7 +47,9 @@ typedef enum {
   ESY_GPIO_IRQ_NONE,    /**< No interrupt */
   ESY_GPIO_IRQ_RISING,  /**< Rising edge trigger */
   ESY_GPIO_IRQ_FALLING, /**< Falling edge trigger */
-  ESY_GPIO_IRQ_BOTH     /**< Both rising and falling edge trigger */
+  ESY_GPIO_IRQ_BOTH,    /**< Both rising and falling edge trigger */
+  ESY_GPIO_IRQ_HIGH_LEVEL, /**< Asserted while the input is high. */
+  ESY_GPIO_IRQ_LOW_LEVEL   /**< Asserted while the input is low. */
 } esy_gpio_irq_mode_t;
 
 /** @brief One GPIO electrical state. */

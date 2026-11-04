@@ -69,6 +69,8 @@ extern "C" {
  * Configures the pin as input, output, or input with pull-up/pull-down.
  * ESP32 rejects an attached IRQ or wake-source binding with BUSY before any
  * electrical/interrupt change. Detach through the same lifecycle owner first.
+ * Classic ESP32 input-only GPIO34..39 reject internal pull-up/down with
+ * NOT_SUPPORTED before GPIO setup; the same restriction applies to IRQ pulls.
  *
  * @param[in] pin   GPIO pin number (platform-defined)
  * @param[in] mode  GPIO mode (see @ref esy_gpio_mode_t)
@@ -111,6 +113,9 @@ extern bool esy_hb_gpio_read(uint8_t pin);
  *
  * Configures the interrupt trigger mode, callback handler, and priority
  * according to the provided configuration.
+ * Pico and ESP32 accept native edge and level modes. STM32F4 EXTI rejects
+ * HIGH_LEVEL and LOW_LEVEL with NOT_SUPPORTED. Level conditions remain active
+ * until the external source deasserts; handlers must clear that condition.
  *
  * @param[in] config Pointer to GPIO interrupt configuration
  * @retval ESY_OK    Success
@@ -139,6 +144,10 @@ extern void esy_hb_gpio_disable_irq(uint8_t pin);
  *
  * When enabled, an interrupt on this pin can wake the system
  * from a low-power or sleep state.
+ * ESP32 supports Light-sleep level wake only: HIGH_LEVEL and LOW_LEVEL are
+ * accepted, while edge requests return NOT_SUPPORTED without retaining state.
+ * Pico CPU idle accepts native edge/level conditions; STM32F4 EXTI accepts
+ * edges only. No backend may silently replace one trigger with another.
  *
  * @param[in] config Pointer to GPIO interrupt configuration
  * @param[out] out_cleanup_required Required ownership result, set even on error.

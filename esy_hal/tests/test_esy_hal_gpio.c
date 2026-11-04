@@ -176,6 +176,36 @@ void test_gpio_rejects_invalid_lifecycle_and_non_output_write(void) {
                           esy_hal_gpio_init(&s_gpio, &config));
 }
 
+void test_gpio_level_wakeup_preserves_the_requested_trigger(void) {
+  esy_gpio_config_t config = output_config();
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_init(&s_gpio, &config));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_enable_wakeup(
+      &s_gpio, ESY_GPIO_IRQ_HIGH_LEVEL, gpio_irq_handler, NULL));
+  TEST_ASSERT_EQUAL(ESY_GPIO_IRQ_HIGH_LEVEL,
+                    platform_test_state()->last_gpio_irq_mode);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_disable_wakeup(&s_gpio));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_enable_wakeup(
+      &s_gpio, ESY_GPIO_IRQ_LOW_LEVEL, gpio_irq_handler, NULL));
+  TEST_ASSERT_EQUAL(ESY_GPIO_IRQ_LOW_LEVEL,
+                    platform_test_state()->last_gpio_irq_mode);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_deinit(&s_gpio));
+}
+
+void test_gpio_unsupported_wakeup_does_not_acquire_ownership(void) {
+  esy_gpio_config_t config = output_config();
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_init(&s_gpio, &config));
+  platform_test_set_gpio_wakeup_results(ESY_ERR_NOT_SUPPORTED, ESY_OK, false);
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_gpio_enable_wakeup(
+      &s_gpio, ESY_GPIO_IRQ_RISING, gpio_irq_handler, NULL));
+  TEST_ASSERT_EQUAL(ESY_GPIO_IRQ_RISING,
+                    platform_test_state()->last_gpio_irq_mode);
+  TEST_ASSERT_FALSE(esy_hal_gpio_runtime(&s_gpio)->wake_source);
+  platform_test_set_gpio_wakeup_results(ESY_OK, ESY_OK, false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_enable_wakeup(
+      &s_gpio, ESY_GPIO_IRQ_HIGH_LEVEL, gpio_irq_handler, NULL));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_deinit(&s_gpio));
+}
+
 void test_failed_wakeup_enable_keeps_cleanup_ownership_until_deinit_succeeds(void) {
   esy_gpio_config_t config = output_config();
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_gpio_init(&s_gpio, &config));

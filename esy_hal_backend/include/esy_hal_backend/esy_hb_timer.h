@@ -81,6 +81,9 @@ extern void esy_hb_timer_deinit(void);
  *       timer callbacks from reusing HAL callback state before delivery. A
  *       mismatch returns ESY_ERR_BUSY. Non-default clock sources are unsupported.
  *       Failed starts do not alter existing timers. IDs are reused after release.
+ *       ESP32 uses the SDK timer task and the default clock source only.
+ *       Periodic intervals below 50 microseconds return NOT_SUPPORTED before
+ *       allocating a native timer; the requested period is never clamped.
  */
 extern int32_t esy_hb_timer_start(
     const esy_timer_task_config_t *task_config);

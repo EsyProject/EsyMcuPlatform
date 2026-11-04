@@ -37,7 +37,13 @@ static void gpio_isr_handler(void* arg) {
 }
 
 esy_err_t esy_hb_gpio_init(uint8_t pin, esy_gpio_mode_t mode) {
-  if (pin >= MAX_GPIO_PINS) return ESY_ERR_INVALID_ARG;
+  const int native_pin = pin;
+  if (pin >= MAX_GPIO_PINS || !GPIO_IS_VALID_GPIO(native_pin))
+    return ESY_ERR_INVALID_ARG;
+  if ((mode == ESY_GPIO_MODE_INPUT_PULLUP ||
+       mode == ESY_GPIO_MODE_INPUT_PULLDOWN) &&
+      !GPIO_IS_VALID_OUTPUT_GPIO(native_pin))
+    return ESY_ERR_NOT_SUPPORTED;
   /* gpio_config also replaces the interrupt type. Keep an attached IRQ/wake
    * owner's native configuration intact until its serialized detach. */
   if (s_ctx.handlers[pin] != NULL) return ESY_ERR_BUSY;
@@ -114,6 +120,12 @@ esy_err_t esy_hb_gpio_attach_irq(const esy_gpio_irq_config_t* config) {
     case ESY_GPIO_IRQ_BOTH:
       intr_type = GPIO_INTR_ANYEDGE;
       break;
+    case ESY_GPIO_IRQ_HIGH_LEVEL:
+      intr_type = GPIO_INTR_HIGH_LEVEL;
+      break;
+    case ESY_GPIO_IRQ_LOW_LEVEL:
+      intr_type = GPIO_INTR_LOW_LEVEL;
+      break;
     default:
       return ESY_ERR_INVALID_ARG;
   }
@@ -132,6 +144,10 @@ esy_err_t esy_hb_gpio_attach_irq(const esy_gpio_irq_config_t* config) {
     default:
       return ESY_ERR_INVALID_ARG;
   }
+  /* Classic ESP32 input-only pads have no internal pull resistors. The SDK
+   * pull-mode helper can return OK after ignoring a lower-level rejection. */
+  if (config->pull != ESY_GPIO_PULL_NONE &&
+      !GPIO_IS_VALID_OUTPUT_GPIO(config->pin)) return ESY_ERR_NOT_SUPPORTED;
 
   int core = atomic_load_explicit(&s_ctx.isr_core, memory_order_acquire);
   if (core == -1) {
@@ -201,8 +217,8 @@ esy_err_t esy_hb_gpio_enable_wakeup(const esy_gpio_irq_config_t* config,
   *out_cleanup_required = false;
   if (!config || config->pin >= MAX_GPIO_PINS ||
       !GPIO_IS_VALID_GPIO(config->pin)) return ESY_ERR_INVALID_ARG;
-  if (config->irq_mode != ESY_GPIO_IRQ_RISING &&
-      config->irq_mode != ESY_GPIO_IRQ_FALLING)
+  if (config->irq_mode != ESY_GPIO_IRQ_HIGH_LEVEL &&
+      config->irq_mode != ESY_GPIO_IRQ_LOW_LEVEL)
     return ESY_ERR_NOT_SUPPORTED;
 
   /* The IRQ lifecycle owns this pin. Claim it before changing wake state so
@@ -216,7 +232,7 @@ esy_err_t esy_hb_gpio_enable_wakeup(const esy_gpio_irq_config_t* config,
    * operation can then fail after the pin becomes a live wake source. */
   if (esp_sleep_enable_gpio_wakeup() == ESP_OK &&
       gpio_wakeup_enable(config->pin,
-          config->irq_mode == ESY_GPIO_IRQ_RISING
+          config->irq_mode == ESY_GPIO_IRQ_HIGH_LEVEL
               ? GPIO_INTR_HIGH_LEVEL : GPIO_INTR_LOW_LEVEL) == ESP_OK)
     return ESY_OK;
   ret = esy_hb_gpio_disable_wakeup(config->pin);
@@ -225,7 +241,8 @@ esy_err_t esy_hb_gpio_enable_wakeup(const esy_gpio_irq_config_t* config,
 }
 
 esy_err_t esy_hb_gpio_disable_wakeup(uint8_t pin) {
-  if (pin >= MAX_GPIO_PINS || !GPIO_IS_VALID_GPIO(pin))
+  const gpio_num_t native_pin = (gpio_num_t)pin;
+  if (pin >= MAX_GPIO_PINS || !GPIO_IS_VALID_GPIO(native_pin))
     return ESY_ERR_INVALID_ARG;
   if (!s_ctx.wake_owned[pin]) return ESY_OK;
   if (!on_isr_core()) return ESY_ERR_STATE;

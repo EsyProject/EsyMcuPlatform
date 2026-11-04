@@ -409,6 +409,52 @@ require('defined(DBGMCU_APB1_FZ_DBG_IWDG_STOP)' in watchdog and
         'defined(DBGMCU_APB1_FZ_IWDG_STOP)' not in watchdog,
         'STM32F4 watchdog must apply both supported debug-freeze policies')
 
+esp32_gpio = (root / 'src/esp32/esy_hb_gpio.c').read_text()
+wake = body(esp32_gpio, 'esy_hb_gpio_enable_wakeup')
+require('ESY_GPIO_IRQ_HIGH_LEVEL' in wake and 'ESY_GPIO_IRQ_LOW_LEVEL' in wake and
+        'ESY_GPIO_IRQ_RISING' not in wake and 'ESY_GPIO_IRQ_FALLING' not in wake and
+        wake.index('ESY_ERR_NOT_SUPPORTED') < wake.index('esy_hb_gpio_attach_irq('),
+        'ESP32 wake must reject edges before ownership and accept explicit native levels only')
+attach = body(esp32_gpio, 'esy_hb_gpio_attach_irq')
+require('case ESY_GPIO_IRQ_HIGH_LEVEL:' in attach and
+        'case ESY_GPIO_IRQ_LOW_LEVEL:' in attach,
+        'ESP32 GPIO level IRQ modes must map to native hardware triggers')
+require('config->pull != ESY_GPIO_PULL_NONE' in attach and
+        '!GPIO_IS_VALID_OUTPUT_GPIO(config->pin)' in attach and
+        attach.index('!GPIO_IS_VALID_OUTPUT_GPIO(config->pin)') <
+        attach.index('gpio_install_isr_service('),
+        'ESP32 input-only pull IRQ requests must reject before native service allocation')
+gpio_init = body(esp32_gpio, 'esy_hb_gpio_init')
+require('!GPIO_IS_VALID_OUTPUT_GPIO(native_pin)' in gpio_init and
+        gpio_init.index('!GPIO_IS_VALID_OUTPUT_GPIO(native_pin)') <
+        gpio_init.index('gpio_config('),
+        'ESP32 input-only pull initialization must reject before native GPIO setup')
+pico_gpio = (root / 'src/pico/esy_hb_gpio.c').read_text()
+for operation in ('esy_hb_gpio_deinit', 'esy_hb_gpio_disable_irq'):
+    cleanup = body(pico_gpio, operation)
+    require('GPIO_IRQ_LEVEL_HIGH' in cleanup and 'GPIO_IRQ_LEVEL_LOW' in cleanup,
+            f'{operation}: Pico cleanup must also retire native level interrupts')
+
+esp32_timer = (root / 'src/esp32/esy_hb_timer.c').read_text()
+start = body(esp32_timer, 'esy_hb_timer_start')
+period_guard = re.search(r'if\s*\(task_config->repeat\s*&&\s*'
+                         r'timeout_us\s*<\s*k_minimum_period_us\)\s*'
+                         r'return ESY_ERR_NOT_SUPPORTED;', start)
+require('k_minimum_period_us = 50u' in esp32_timer and period_guard is not None and
+        period_guard.start() < start.index('esp_timer_create('),
+        'ESP32 periodic requests below the pinned SDK minimum must reject before allocation')
+require('task_config->inner.source != ESY_TIMER_SOURCE_DEFAULT' in start,
+        'ESP32 logical timers must not silently substitute a requested clock source')
+
+esp32_watchdog = (root / 'src/esp32/esy_hb_watchdog.c').read_text()
+wdt_init = body(esp32_watchdog, 'esy_hb_watchdog_init')
+require('rtc_clk_slow_freq_get_hz()' in wdt_init and
+        '(uint64_t)timeout_ms * slow_clock_hz' in wdt_init and
+        'rtc_cycles_64 > UINT32_MAX' in wdt_init and
+        wdt_init.index('rtc_cycles_64 > UINT32_MAX') < wdt_init.index('wdt_hal_init(') and
+        'k_watchdog_cycles_per_ms' not in esp32_watchdog,
+        'ESP32 watchdog must validate selected slow-clock counts before native changes')
+
 pico_dma_source = (root / 'src/pico/esy_hb_dma.c').read_text()
 pico_dma_prepare = body(pico_dma_source, 'esy_hb_dma_prepare')
 half_guard = re.search(r'if\s*\([^)]*dma_config->half_callback\s*!=\s*NULL\)\s*'

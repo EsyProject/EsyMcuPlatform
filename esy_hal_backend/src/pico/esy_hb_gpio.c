@@ -41,6 +41,10 @@ static uint32_t irq_events_from_mode(esy_gpio_irq_mode_t mode) {
       return GPIO_IRQ_EDGE_FALL;
     case ESY_GPIO_IRQ_BOTH:
       return GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
+    case ESY_GPIO_IRQ_HIGH_LEVEL:
+      return GPIO_IRQ_LEVEL_HIGH;
+    case ESY_GPIO_IRQ_LOW_LEVEL:
+      return GPIO_IRQ_LEVEL_LOW;
     default:
       return 0u;
   }
@@ -80,7 +84,8 @@ void esy_hb_gpio_deinit(uint8_t pin) {
       atomic_load_explicit(&s_ctx.irq_core_token, memory_order_acquire) !=
           get_core_num() + 1u) return;
 
-  gpio_set_irq_enabled(pin, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, false);
+  gpio_set_irq_enabled(pin, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL |
+                            GPIO_IRQ_LEVEL_HIGH | GPIO_IRQ_LEVEL_LOW, false);
   s_ctx.handlers[pin] = NULL;
   s_ctx.args[pin] = NULL;
   s_ctx.irq_events[pin] = 0u;
@@ -149,7 +154,8 @@ void esy_hb_gpio_disable_irq(uint8_t pin) {
   if (pin < MAX_GPIO_PINS &&
       atomic_load_explicit(&s_ctx.irq_core_token, memory_order_acquire) ==
           get_core_num() + 1u) {
-    gpio_set_irq_enabled(pin, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, false);
+    gpio_set_irq_enabled(pin, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL |
+                              GPIO_IRQ_LEVEL_HIGH | GPIO_IRQ_LEVEL_LOW, false);
     s_ctx.handlers[pin] = NULL;
     s_ctx.args[pin] = NULL;
     s_ctx.irq_events[pin] = 0u;

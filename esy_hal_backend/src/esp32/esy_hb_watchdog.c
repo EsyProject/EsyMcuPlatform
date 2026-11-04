@@ -12,6 +12,7 @@
 
 #include "hal/wdt_hal.h"
 #include "esp_system.h"
+#include "soc/rtc.h"
 
 typedef struct {
   bool initialized;
@@ -23,12 +24,13 @@ static esy_hb_watchdog_ctx_t s_ctx = {
     .rtc_wdt_ctx = {.inst = WDT_RWDT, .rwdt_dev = &RTCCNTL},
 };
 
-static const uint32_t k_watchdog_cycles_per_ms = 150u;
+static const uint32_t k_ms_per_second = 1000u;
+static const uint32_t k_default_timeout_ms = 1000u;
 
 esy_err_t esy_hb_watchdog_init(uint32_t timeout_ms, bool pause_on_debug) {
     (void)pause_on_debug;
 
-    if (timeout_ms == 0 || timeout_ms > UINT32_MAX / k_watchdog_cycles_per_ms) {
+    if (timeout_ms == 0u) {
         return ESY_ERR_INVALID_ARG;
     }
 
@@ -36,12 +38,20 @@ esy_err_t esy_hb_watchdog_init(uint32_t timeout_ms, bool pause_on_debug) {
         return ESY_ERR_STATE;
     }
 
-    wdt_hal_write_protect_disable(&s_ctx.rtc_wdt_ctx);
-    wdt_hal_disable(&s_ctx.rtc_wdt_ctx);
+    const uint32_t slow_clock_hz = rtc_clk_slow_freq_get_hz();
+    if (slow_clock_hz == 0u) return ESY_ERR_NOT_SUPPORTED;
+    /* The owner keeps this clock source fixed until deinit. Round upward so
+     * conversion to whole native ticks does not shorten the nominal request.
+     * Oscillator tolerance remains outside a guaranteed timeout contract. */
+    const uint64_t rtc_cycles_64 =
+        ((uint64_t)timeout_ms * slow_clock_hz + k_ms_per_second - 1u) /
+        k_ms_per_second;
+    if (rtc_cycles_64 == 0u || rtc_cycles_64 > UINT32_MAX)
+        return ESY_ERR_INVALID_ARG;
 
-    uint64_t rtc_cycles_64 = (uint64_t)timeout_ms * k_watchdog_cycles_per_ms;
-    uint32_t rtc_cycles = (rtc_cycles_64 > UINT32_MAX) ? UINT32_MAX : (uint32_t)rtc_cycles_64;
-    wdt_hal_config_stage(&s_ctx.rtc_wdt_ctx, WDT_STAGE0, rtc_cycles,
+    wdt_hal_init(&s_ctx.rtc_wdt_ctx, WDT_RWDT, 0u, false);
+    wdt_hal_write_protect_disable(&s_ctx.rtc_wdt_ctx);
+    wdt_hal_config_stage(&s_ctx.rtc_wdt_ctx, WDT_STAGE0, (uint32_t)rtc_cycles_64,
                          WDT_STAGE_ACTION_RESET_SYSTEM);
     wdt_hal_write_protect_enable(&s_ctx.rtc_wdt_ctx);
 
@@ -77,9 +87,9 @@ void esy_hb_watchdog_feed(void) {
 }
 
 void esy_hb_watchdog_enable(void) {
-    if (!s_ctx.initialized) {
-        esy_hb_watchdog_init(1000, false);
-    }
+    if (!s_ctx.initialized &&
+        esy_hb_watchdog_init(k_default_timeout_ms, false) != ESY_OK)
+        return;
 
     wdt_hal_write_protect_disable(&s_ctx.rtc_wdt_ctx);
     wdt_hal_enable(&s_ctx.rtc_wdt_ctx);

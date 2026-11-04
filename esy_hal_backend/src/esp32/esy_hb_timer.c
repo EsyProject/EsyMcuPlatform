@@ -12,6 +12,9 @@
 
 #define MAX_TIMER_TASKS 8u
 
+/* The pinned ESP-IDF provider clamps shorter periodic requests to 50 us. */
+static const uint64_t k_minimum_period_us = 50u;
+
 typedef struct {
   esy_timer_task_config_t task;
   esp_timer_handle_t timer_handle;
@@ -80,6 +83,14 @@ int32_t esy_hb_timer_start(const esy_timer_task_config_t *task_config) {
   }
   if (!s_ctx.initialized) return ESY_ERR_STATE;
 
+  const uint64_t timeout_us = task_config->mode == ESY_TIMER_MODE_MS
+      ? (uint64_t)(uint32_t)task_config->interval * 1000u
+      : (uint32_t)task_config->interval;
+  if (task_config->repeat && timeout_us < k_minimum_period_us)
+    return ESY_ERR_NOT_SUPPORTED;
+  if (task_config->inner.source != ESY_TIMER_SOURCE_DEFAULT)
+    return ESY_ERR_NOT_SUPPORTED;
+
   for (uint32_t i = 0u; i < MAX_TIMER_TASKS; ++i) {
     if (!s_ctx.slot[i].active && s_ctx.slot[i].timer_handle == NULL) {
       s_ctx.slot[i].task = *task_config;
@@ -95,13 +106,6 @@ int32_t esy_hb_timer_start(const esy_timer_task_config_t *task_config) {
       if (ret != ESP_OK) {
         s_ctx.slot[i].active = false;
         return ESY_ERR_FAIL;
-      }
-
-      uint64_t timeout_us;
-      if (task_config->mode == ESY_TIMER_MODE_MS) {
-        timeout_us = (uint64_t)(uint32_t)task_config->interval * 1000u;
-      } else {
-        timeout_us = (uint32_t)task_config->interval;
       }
 
       if (task_config->repeat) {

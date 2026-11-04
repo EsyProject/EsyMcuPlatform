@@ -56,6 +56,8 @@ cat > "${contract_source}" <<'EOF'
 #include "esy_common/defs/image/esy_image_defs.h"
 #include "esy_common/defs/diagnostics/esy_coredump_defs.h"
 #include "esy_common/defs/diagnostics/esy_diagnostics_defs.h"
+#include "esy_common/defs/peripheral/esy_adc_defs.h"
+#include "esy_common/defs/peripheral/esy_gpio_defs.h"
 
 #if defined(ESY_LCD_PRIV_BYTES) || defined(ESY_TOUCH_PRIV_BYTES)
 #error "Middleware runtime storage must not be defined by common value headers"
@@ -73,6 +75,12 @@ typedef void (*esy_touch_spi_get_write_buffer)(void);
 #else
 #define CONTRACT_ASSERT _Static_assert
 #endif
+CONTRACT_ASSERT(ESY_GPIO_IRQ_NONE == 0, "GPIO NONE trigger value changed");
+CONTRACT_ASSERT(ESY_GPIO_IRQ_RISING == 1, "GPIO rising trigger value changed");
+CONTRACT_ASSERT(ESY_GPIO_IRQ_FALLING == 2, "GPIO falling trigger value changed");
+CONTRACT_ASSERT(ESY_GPIO_IRQ_BOTH == 3, "GPIO both-edge trigger value changed");
+CONTRACT_ASSERT(ESY_GPIO_IRQ_HIGH_LEVEL == 4, "GPIO high-level trigger value changed");
+CONTRACT_ASSERT(ESY_GPIO_IRQ_LOW_LEVEL == 5, "GPIO low-level trigger value changed");
 CONTRACT_ASSERT(ESY_COLOR_FORMAT_RGB565 == 0, "RGB565 value changed");
 CONTRACT_ASSERT(ESY_COLOR_FORMAT_RGB666 == 1, "RGB666 value changed");
 CONTRACT_ASSERT(ESY_LCD_DIR_L2R_U2D == 0, "Default orientation value changed");
@@ -98,6 +106,15 @@ CONTRACT_ASSERT(ESY_DIAGNOSTICS_HEALTH_WARNING == 2, "Warning health value chang
 CONTRACT_ASSERT(ESY_DIAGNOSTICS_HEALTH_ERROR == 3, "Error health value changed");
 CONTRACT_ASSERT(ESY_DIAGNOSTICS_CAP_READ == 1u, "Diagnostic read bit changed");
 CONTRACT_ASSERT(ESY_DIAGNOSTICS_CAP_RUN == 2u, "Diagnostic run bit changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_3CYCLES == 0, "ADC 3-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_15CYCLES == 1, "ADC 15-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_28CYCLES == 2, "ADC 28-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_56CYCLES == 3, "ADC 56-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_84CYCLES == 4, "ADC 84-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_112CYCLES == 5, "ADC 112-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_144CYCLES == 6, "ADC 144-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_480CYCLES == 7, "ADC 480-cycle value changed");
+CONTRACT_ASSERT(ESY_ADC_SAMPLETIME_DEFAULT == 8, "ADC native profile value changed");
 
 int main(void) {
   esy_touch_data_t sample = {false, 12u, 34u};

@@ -98,7 +98,11 @@ extern void esy_hal_timer_default_task_cfg(
  * A conflicting priority returns ESY_ERR_BUSY without altering active timers.
  * A failed start, including exhausted capacity, leaves existing timers intact.
  * ESP32 callbacks execute in the SDK timer task. Serialize timer management
- * with that task on the owner core, including callback dispatch. One-shot native
+ * with that task on the owner core. The pinned ESP-IDF provider requires
+ * periodic intervals of at least 50 microseconds; shorter periodic requests
+ * return ESY_ERR_NOT_SUPPORTED without starting a timer. Only the default
+ * clock source is supported. This minimum is not a callback-latency guarantee.
+ * Serialize callback dispatch as well. One-shot native
  * retirement occurs before user delivery; periodic callbacks may cancel their
  * own timer and start a replacement without the old dispatcher changing it.
  * The time base (milliseconds or microseconds) is selected via fields

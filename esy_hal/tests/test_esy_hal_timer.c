@@ -48,6 +48,37 @@ void test_esy_hal_timer_start_validates_and_fills_inner_metadata(void) {
   esy_hal_timer_deinit();
 }
 
+void test_timer_provider_rejection_retires_deadline_and_preserves_retry(void) {
+  esy_timer_task_config_t config = {
+      .interval = 1, .callback = timer_callback, .repeat = true,
+      .mode = ESY_TIMER_MODE_US,
+  };
+  uint32_t interval_us = 123u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_timer_init());
+  platform_test_set_time_us(UINT32_MAX - 24u);
+  platform_test_set_timer_start_behavior(ESY_ERR_NOT_SUPPORTED, false);
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_timer_start(&config));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+                    esy_hal_timer_get_next_wake_interval_us(&interval_us));
+  platform_test_set_timer_start_behavior(2, false);
+  config.interval = 50;
+  TEST_ASSERT_EQUAL(2, esy_hal_timer_start(&config));
+  TEST_ASSERT_EQUAL(ESY_OK,
+                    esy_hal_timer_get_next_wake_interval_us(&interval_us));
+  TEST_ASSERT_EQUAL_UINT32(50u, interval_us);
+  esy_hal_timer_cancel(2);
+  platform_test_set_time_us(UINT32_MAX);
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+                    esy_hal_timer_get_next_wake_interval_us(&interval_us));
+  platform_test_set_time_us(0u);
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+                    esy_hal_timer_get_next_wake_interval_us(&interval_us));
+  platform_test_set_time_us(UINT32_MAX - 24u);
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+                    esy_hal_timer_get_next_wake_interval_us(&interval_us));
+  esy_hal_timer_deinit();
+}
+
 void test_esy_hal_timer_cancel_checks_bounds_and_active_state(void) {
   esy_hal_timer_cancel(-1);
   esy_hal_timer_cancel(5);
