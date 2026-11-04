@@ -4,19 +4,6 @@
 
 # esy_hal_backend/src/esp32/CMakeLists.txt
 
-foreach(esy_unavailable_feature IN ITEMS ENABLE_ESY_ADC)
-    if(${esy_unavailable_feature})
-        message(FATAL_ERROR
-            "${esy_unavailable_feature} has no backend for ESY_TARGET_PLATFORM=${ESY_TARGET_PLATFORM}; supported platform is STM32F4")
-    endif()
-endforeach()
-foreach(esy_pico_only_feature IN ITEMS ENABLE_ESY_MULTICORE ENABLE_ESY_USB_DEV ENABLE_ESY_XIO)
-    if(${esy_pico_only_feature})
-        message(FATAL_ERROR
-            "${esy_pico_only_feature} has no backend for ESY_TARGET_PLATFORM=${ESY_TARGET_PLATFORM}; supported platforms are PICO, PICO_W, PICO2 and PICO2_W")
-    endif()
-endforeach()
-
 # ---- Platform dependencies ----
 set(MODULE_DEPS
     esy_board
@@ -202,6 +189,14 @@ if(ENABLE_ESY_CAN)
     endif()
     list(APPEND MODULE_DEPS idf::driver)
     list(APPEND MODULE_SRCS esy_hb_can.c)
+endif()
+
+if(ENABLE_ESY_ADC)
+    if(NOT TARGET idf::esp_adc)
+        message(FATAL_ERROR "ESP32 ADC requires the native idf::esp_adc component")
+    endif()
+    list(APPEND MODULE_DEPS idf::esp_adc)
+    list(APPEND MODULE_SRCS esy_hb_adc.c)
 endif()
 
 target_sources(esy_hal_backend PRIVATE ${MODULE_SRCS})

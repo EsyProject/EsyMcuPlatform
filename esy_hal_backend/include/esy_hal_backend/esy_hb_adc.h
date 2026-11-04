@@ -6,7 +6,7 @@
 
 /**
  * @file esy_hb_adc.h
- * @brief ADC HAL backend interface (handle-based API; no internal dynamic allocation).
+ * @brief ADC HAL backend interface with caller-owned handle storage.
  *
  * Design constraints:
  * - The caller provides storage for @ref esy_adc_t; the HAL backend must NOT allocate
@@ -28,6 +28,10 @@
  * - STM32F4 links the ADC provider to the generic DMA owner's existing stream
  *   handle. Board MSP code supplies ADC clocks/GPIO, not a second DMA handle.
  *   Reserve each physical ADC and assigned DMA stream for this one owner.
+ * - ESP32 adapts the native ADC1 oneshot provider. Init creates one SDK-owned
+ *   unit and deinit releases it; the SDK can allocate and block internally.
+ *   No unit is created or destroyed by the sampling path. Failed cleanup keeps
+ *   its native unit and exclusive claim until a successful deinit retry.
  */
 
 #ifndef ESY_HB_ADC_H
@@ -47,10 +51,28 @@ extern "C" {
 /** @{ */
 
 /**
+ * @brief Validate configuration without changing hardware or ownership.
+ *
+ * The HAL checks the requested configuration before board pin setup; init
+ * repeats validation after board routing has been supplied. This query neither
+ * reserves a controller nor initializes its native provider. On verified
+ * STM32F405/407/415/417 devices, internal channels 16..18 require ADC1; selecting
+ * them on ADC2/ADC3 returns NOT_SUPPORTED. The same instance/channel validation
+ * precedes every scan and DMA sequence before native state is changed.
+ * Other STM32F4 channel maps remain subject to their selected provider contract.
+ *
+ * @param[in] config Requested controller, channel and sample-time configuration.
+ * @return ESY_OK, INVALID_ARG for invalid values, or NOT_SUPPORTED for a valid
+ * request outside the selected backend's profile.
+ */
+extern esy_err_t esy_hb_adc_validate_config(const esy_adc_config_t *config);
+
+/**
  * @brief Check physical-controller availability before board configuration.
  *
  * This read-only task/startup query returns BUSY for an existing owner and
- * INVALID_ARG for an unavailable index. One owner must serialize all ADC
+ * INVALID_ARG for an invalid index, or NOT_SUPPORTED for a known controller
+ * outside the selected backend's profile. One owner must serialize all ADC
  * lifecycle operations, including this check through the following init;
  * the query does not reserve hardware. No state or board routing is changed.
  *
@@ -63,7 +85,8 @@ extern esy_err_t esy_hb_adc_check_available(uint8_t phys_index);
  * @brief Initialize an ADC controller/channel.
  *
  * The HAL backend configures and binds the underlying ADC hardware according to
- * @p config. No heap allocation is performed.
+ * @p config. The backend does not allocate handle storage. A native provider
+ * may allocate its own resources during this lifecycle operation.
  * Initialize caller-owned handle storage with {0} before first use. A live
  * handle must not be copied, moved or cleared. Repeated init returns STATE
  * without changing its resources. Failed init may retain partial native state;
@@ -200,7 +223,7 @@ extern esy_err_t esy_hb_adc_set_trigger_source(esy_adc_t *adc,
  *
  * Uses @ref esy_adc_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  adc       ADC handle

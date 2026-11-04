@@ -204,7 +204,9 @@ static esy_err_t adc_hardware_init(esy_adc_t *adc,
                                    const esy_adc_config_t *cfg) {
   esy_hal_adc_runtime_t *runtime = esy_hal_adc_runtime(adc);
   esy_adc_config_t local = *cfg;
-  esy_err_t ret = esy_hb_adc_check_available(local.phys_index);
+  esy_err_t ret = esy_hb_adc_validate_config(&local);
+  if (ret != ESY_OK) return ret;
+  ret = esy_hb_adc_check_available(local.phys_index);
   if (ret != ESY_OK) return ret;
   esy_board_adc_configure_pin(local.phys_index, &local.inner);
   adc->ops = &k_adc_ops;
@@ -273,7 +275,7 @@ static const esy_device_ops_t k_adc_device_ops = {
 extern void esy_hal_adc_default_cfg(esy_adc_config_t *cfg) {
   if (!cfg) return;
   memset(cfg, 0, sizeof(*cfg));
-  cfg->sample_time = ESY_ADC_SAMPLETIME_15CYCLES;
+  cfg->sample_time = ESY_ADC_SAMPLETIME_DEFAULT;
 }
 
 /* ================= lifecycle ================= */

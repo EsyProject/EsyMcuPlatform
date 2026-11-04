@@ -33,11 +33,37 @@ void test_esy_hal_adc_default_cfg_fills_sample_time_default(void) {
   esy_hal_adc_default_cfg(NULL);
   esy_hal_adc_default_cfg(&cfg);
 
-  TEST_ASSERT_EQUAL_INT(ESY_ADC_SAMPLETIME_15CYCLES, cfg.sample_time);
+  TEST_ASSERT_EQUAL_INT(ESY_ADC_SAMPLETIME_DEFAULT, cfg.sample_time);
 
   cfg.sample_time = ESY_ADC_SAMPLETIME_84CYCLES;
   esy_hal_adc_default_cfg(&cfg);
-  TEST_ASSERT_EQUAL_INT(ESY_ADC_SAMPLETIME_15CYCLES, cfg.sample_time);
+  TEST_ASSERT_EQUAL_INT(ESY_ADC_SAMPLETIME_DEFAULT, cfg.sample_time);
+}
+
+void test_adc_configuration_rejection_precedes_board_setup_and_ownership(void) {
+  esy_adc_t adc = {0};
+  esy_adc_config_t config = {.phys_index = TEST_ADC_INDEX,
+      .sample_time = ESY_ADC_SAMPLETIME_DEFAULT};
+  const platform_test_state_t *state = platform_test_state();
+  platform_test_set_adc_validation_result(ESY_ERR_NOT_SUPPORTED);
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_adc_init(&adc, &config));
+  TEST_ASSERT_EQUAL_UINT32(0u, state->adc_available_calls);
+  TEST_ASSERT_EQUAL_UINT32(0u, state->board_configure_order);
+  TEST_ASSERT_EQUAL_UINT32(0u, state->driver_init_calls);
+  TEST_ASSERT_NULL(adc.ctx);
+  TEST_ASSERT_NULL(adc.ops);
+
+  platform_test_set_adc_validation_result(ESY_OK);
+  config.sample_time = (esy_adc_sample_time_t)-1;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_adc_init(&adc, &config));
+  TEST_ASSERT_EQUAL_UINT32(0u, state->board_configure_order);
+  TEST_ASSERT_EQUAL_UINT32(0u, state->driver_init_calls);
+  config.sample_time = ESY_ADC_SAMPLETIME_DEFAULT;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_adc_init(&adc, &config));
+  TEST_ASSERT_TRUE(state->adc_validate_order < state->adc_available_order);
+  TEST_ASSERT_TRUE(state->adc_available_order < state->board_configure_order);
+  TEST_ASSERT_EQUAL(1234, esy_hal_adc_sample_once(&adc));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_adc_deinit(&adc));
 }
 
 void test_esy_hal_adc_contracts_are_enforced(void) {
@@ -96,6 +122,7 @@ void test_esy_hal_adc_contracts_are_enforced(void) {
 
   init_adc(&adc);
   const platform_test_state_t *state = platform_test_state();
+  TEST_ASSERT_TRUE(state->adc_validate_order < state->adc_available_order);
   TEST_ASSERT_TRUE(state->adc_available_order < state->board_configure_order);
   TEST_ASSERT_TRUE(state->board_configure_order < state->driver_init_order);
   TEST_ASSERT_NOT_NULL(adc.ops->sample_once);

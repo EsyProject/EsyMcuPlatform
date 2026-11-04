@@ -75,8 +75,21 @@ static stm32f4_adc_slot_t *adc_for_native(const ADC_HandleTypeDef *hadc) {
   return NULL;
 }
 
+/* RM0090 internal measurements are wired only to ADC1 on these verified
+ * devices. Keep other STM32F4 channel maps under their own provider contract. */
+static esy_err_t validate_channel(ADC_TypeDef *instance, uint8_t channel) {
+  if (instance == NULL || !IS_ADC_CHANNEL(channel)) return ESY_ERR_INVALID_ARG;
+#if defined(STM32F405xx) || defined(STM32F407xx) || \
+    defined(STM32F415xx) || defined(STM32F417xx)
+  if (instance != ADC1 && channel >= ADC_CHANNEL_16)
+    return ESY_ERR_NOT_SUPPORTED;
+#endif
+  return ESY_OK;
+}
+
 static uint32_t sample_time_to_hal(esy_adc_sample_time_t time) {
   switch (time) {
+    case ESY_ADC_SAMPLETIME_DEFAULT: return ADC_SAMPLETIME_15CYCLES;
     case ESY_ADC_SAMPLETIME_3CYCLES: return ADC_SAMPLETIME_3CYCLES;
     case ESY_ADC_SAMPLETIME_15CYCLES: return ADC_SAMPLETIME_15CYCLES;
     case ESY_ADC_SAMPLETIME_28CYCLES: return ADC_SAMPLETIME_28CYCLES;
@@ -92,6 +105,10 @@ static esy_err_t configure_sequence(stm32f4_adc_slot_t *slot,
                                     const uint8_t *channels, uint8_t count,
                                     bool continuous, bool circular_dma) {
   ADC_HandleTypeDef *hadc = &slot->hadc;
+  for (uint8_t i = 0u; i < count; ++i) {
+    esy_err_t status = validate_channel(hadc->Instance, channels[i]);
+    if (status != ESY_OK) return status;
+  }
   if (hadc->State != HAL_ADC_STATE_RESET && HAL_ADC_Stop(hadc) != HAL_OK)
     return ESY_ERR_IO;
   hadc->Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
@@ -162,12 +179,19 @@ esy_err_t esy_hb_adc_check_available(uint8_t phys_index) {
   return s_ctx.slots[phys_index].initialized ? ESY_ERR_BUSY : ESY_OK;
 }
 
-esy_err_t esy_hb_adc_init(esy_adc_t *adc, const esy_adc_config_t *config) {
-  if (adc == NULL || config == NULL ||
+esy_err_t esy_hb_adc_validate_config(const esy_adc_config_t *config) {
+  if (config == NULL ||
       config->phys_index >= STM32F4_ADC_MAX ||
-      !IS_ADC_CHANNEL(config->inner.channel) ||
-      (uint32_t)config->sample_time > ESY_ADC_SAMPLETIME_480CYCLES)
+      decode_adc(config->phys_index) == NULL ||
+      (uint32_t)config->sample_time > ESY_ADC_SAMPLETIME_DEFAULT)
     return ESY_ERR_INVALID_ARG;
+  return validate_channel(decode_adc(config->phys_index), config->inner.channel);
+}
+
+esy_err_t esy_hb_adc_init(esy_adc_t *adc, const esy_adc_config_t *config) {
+  if (adc == NULL) return ESY_ERR_INVALID_ARG;
+  esy_err_t valid = esy_hb_adc_validate_config(config);
+  if (valid != ESY_OK) return valid;
   if (__get_IPSR() != 0u || adc->ctx != NULL) return ESY_ERR_STATE;
   esy_err_t available = esy_hb_adc_check_available(config->phys_index);
   if (available != ESY_OK) return available;
@@ -268,11 +292,13 @@ static esy_err_t start_dma(esy_adc_t *adc, const esy_dma_config_t *config,
       (!circular && config->circular) ||
       config->inner.irq_priority >= (1u << __NVIC_PRIO_BITS))
     return ESY_ERR_INVALID_ARG;
-  for (uint8_t i = 0u; i < count; ++i)
-    if (!IS_ADC_CHANNEL(channels[i])) return ESY_ERR_INVALID_ARG;
   if (__get_IPSR() != 0u) return ESY_ERR_STATE;
   stm32f4_adc_slot_t *slot = adc_context(adc);
   if (slot == NULL) return ESY_ERR_STATE;
+  for (uint8_t i = 0u; i < count; ++i) {
+    esy_err_t status = validate_channel(slot->hadc.Instance, channels[i]);
+    if (status != ESY_OK) return status;
+  }
   if (slot->dma_owned ||
       esy_hb_dma_is_busy(config->inner.dreq, config->inner.channel))
     return ESY_ERR_BUSY;

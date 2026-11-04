@@ -48,6 +48,7 @@
  * physical-controller initialization and PM transitions. An occupied controller
  * returns BUSY before board configuration; this preflight is not a reservation
  * against callers that violate the shared lifecycle-owner contract.
+ * Configuration validity is checked before the board configures its pin.
  * Callbacks may only record data or notify that owner; do not call these APIs
  * from a callback. Each physical ADC and its assigned DMA stream have one owner.
  *
@@ -63,6 +64,25 @@
  * If a failed submit still reports busy, ownership remains retained: keep all
  * borrowed storage alive and abort before reuse. Use an application deadline to
  * abort a transfer whose expected terminal callback has not arrived.
+ *
+ * Classic ESP32 profile:
+ * - One handle exclusively owns ADC1 (phys_index 1), with channel 0 through 7.
+ *   The board supplies its channel routing; do not use the same ADC or pin
+ *   through an independent native provider while this handle owns it.
+ * - sample_time must be ESY_ADC_SAMPLETIME_DEFAULT. The native oneshot profile
+ *   uses 12-bit raw conversion and 12 dB attenuation. Explicit cycle requests
+ *   return NOT_SUPPORTED; invalid enum/channel values return INVALID_ARG.
+ * - sample_once performs one synchronous native conversion. Native contention
+ *   or an invalid conversion returns TIMEOUT without retrying or returning a
+ *   sample. Native execution time determines the call's latency; no software
+ *   timeout, retry or background task is added. Results are raw counts in
+ *   0..4095, without calibration or a promised counts-to-volts relationship.
+ * - DMA, scans, continuous mode and external triggers are unsupported; get_caps
+ *   returns zero. SOFTWARE with edge NONE is accepted. The wrapper creates and
+ *   destroys its SDK-owned unit only during init/deinit, where the provider may
+ *   allocate and block internally; sampling creates no native unit.
+ *   Failed cleanup retains its native unit and rejects new samples until deinit
+ *   succeeds. Registered PM resumes the same profile through the owner lifecycle.
  */
 
 #ifdef __cplusplus
@@ -76,7 +96,11 @@ extern "C" {
  * Default policy:
  * - phys_index   = 0 (unselected; STM32F4 requires native ADC index 1, 2 or 3)
  * - inner.channel = 0
- * - sample_time  = ESY_ADC_SAMPLETIME_15CYCLES
+ * - sample_time  = ESY_ADC_SAMPLETIME_DEFAULT
+ *
+ * STM32F4 resolves DEFAULT to the previous 15-cycle default. Explicit sampling
+ * enum values retain their existing numeric values and native behavior; the
+ * configuration and handle layouts are unchanged. ESP32 requires DEFAULT.
  *
  * @param[out] cfg ADC configuration pointer; must not be NULL.
  */
@@ -230,7 +254,7 @@ extern esy_err_t esy_hal_adc_set_trigger(esy_adc_t *adc,
  *
  * Uses @ref esy_adc_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  adc      ADC handle.

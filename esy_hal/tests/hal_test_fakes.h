@@ -247,6 +247,8 @@ typedef struct {
   esy_usb_ep_cfg_t last_usb_ep_cfg;
   esy_system_config_t last_system_config;
   const esy_system_context_callbacks_t *system_context_callbacks;
+  esy_err_t adc_validate_result;
+  uint32_t adc_validate_order;
 } platform_test_state_t;
 
 extern const platform_test_state_t *platform_test_state(void);
@@ -316,5 +318,7 @@ void platform_test_set_boot_action_results(esy_err_t pending, esy_err_t confirm)
 extern void platform_test_complete_spi_dma(
     esy_spi_t *spi, esy_spi_dma_transfer_status_t status);
 extern void platform_test_complete_dma(bool error);
+
+void platform_test_set_adc_validation_result(esy_err_t result);
 
 #endif /* ESY_HAL_TESTS_PLATFORM_TEST_FAKES_H */

@@ -56,8 +56,9 @@ typedef struct esy_adc_s esy_adc_t;
  * Bits describe implemented operations for the current handle/role, subject to
  * board resources, configuration limits and normal runtime errors. A set bit
  * neither reserves a resource nor guarantees every parameter combination.
- * DMA-named bits describe the corresponding API, not native DMA or asynchronous
- * completion. Unknown bits must be ignored; zero is a valid capability mask.
+ * DMA capabilities require native hardware DMA and asynchronous completion;
+ * synchronous software substitutes must not set them. Unknown bits must be
+ * ignored; zero is a valid capability mask.
  */
 typedef enum {
   ESY_ADC_CAP_DMA = 1u << 0, /**< Single-channel DMA transfer entry point. */
@@ -73,8 +74,9 @@ typedef enum {
 /**
  * @brief ADC sampling time configuration.
  *
- * Represents different ADC sampling cycle lengths.
- * The actual duration of each cycle is platform-dependent.
+ * Explicit cycle requests require backend support and are never silently
+ * replaced by another duration. DEFAULT selects the backend's documented
+ * native profile without requesting a particular sampling-cycle count.
  */
 typedef enum {
   ESY_ADC_SAMPLETIME_3CYCLES = 0, /**< 3 sampling cycles */
@@ -84,7 +86,8 @@ typedef enum {
   ESY_ADC_SAMPLETIME_84CYCLES,    /**< 84 sampling cycles */
   ESY_ADC_SAMPLETIME_112CYCLES,   /**< 112 sampling cycles */
   ESY_ADC_SAMPLETIME_144CYCLES,   /**< 144 sampling cycles */
-  ESY_ADC_SAMPLETIME_480CYCLES    /**< 480 sampling cycles */
+  ESY_ADC_SAMPLETIME_480CYCLES,   /**< 480 sampling cycles */
+  ESY_ADC_SAMPLETIME_DEFAULT     /**< Native profile; STM32F4 selects 15 cycles. */
 } esy_adc_sample_time_t;
 
 /**

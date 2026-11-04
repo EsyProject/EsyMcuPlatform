@@ -2533,3 +2533,15 @@ esy_err_t esy_hb_system_set_context_callbacks(
   s_state.system_context_callbacks = callbacks;
   return ESY_OK;
 }
+
+esy_err_t esy_hb_adc_validate_config(const esy_adc_config_t *config) {
+  if (config == NULL || config->phys_index >= TEST_DMA_RESOURCE_COUNT ||
+      (uint32_t)config->sample_time > ESY_ADC_SAMPLETIME_DEFAULT)
+    return ESY_ERR_INVALID_ARG;
+  s_state.adc_validate_order = next_event();
+  return s_state.adc_validate_result;
+}
+
+void platform_test_set_adc_validation_result(esy_err_t result) {
+  s_state.adc_validate_result = result;
+}
