@@ -17,7 +17,7 @@ static inline void esy_io_scheduler_atomic_flag_init(atomic_bool *flag,
 }
 
 /* Sequential consistency closes the two-flag start/quiesce handshake. */
-static inline bool esy_io_scheduler_atomic_flag_get(atomic_bool *flag) {
+static inline bool esy_io_scheduler_atomic_flag_get(const atomic_bool *flag) {
   return atomic_load_explicit(flag, memory_order_seq_cst);
 }
 

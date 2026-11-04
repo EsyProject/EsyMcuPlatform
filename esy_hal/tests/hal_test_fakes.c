@@ -121,6 +121,10 @@ void platform_test_set_dma_busy(bool busy) {
   s_dma_busy_override = busy ? 1 : 0;
 }
 
+void platform_test_set_dma_half_supported(bool supported) {
+  s_state.reject_dma_half_callback = !supported;
+}
+
 void platform_test_set_dma_owner(uint8_t resource, const void *owner) {
   TEST_ASSERT_LESS_THAN_UINT32(TEST_DMA_RESOURCE_COUNT, resource);
   s_state.dma_owners[resource] = owner;
@@ -143,6 +147,10 @@ void platform_test_set_dma_resource_mapping(bool uses_dreq, esy_err_t result) {
   s_state.dma_resource_result = result;
 }
 
+void platform_test_set_spi_submit_retains_borrow(bool retain) {
+  s_state.spi_submit_retains_borrow = retain;
+}
+
 void platform_test_set_spi_submit_result(esy_err_t result) {
   s_state.spi_submit_result = result;
 }
@@ -156,11 +164,10 @@ void platform_test_set_spi_cleanup_result(esy_err_t result) {
 }
 
 void platform_test_set_pwm_results(esy_err_t deinit, esy_err_t abort,
-                                  esy_err_t dma, esy_err_t poll) {
+                                  esy_err_t dma) {
   s_state.pwm_deinit_result = deinit;
   s_state.pwm_abort_result = abort;
   s_state.pwm_dma_result = dma;
-  s_state.pwm_poll_result = poll;
 }
 
 void platform_test_set_pwm_dma_complete_inline(bool complete_inline) {
@@ -171,9 +178,13 @@ void platform_test_set_pwm_available_result(esy_err_t result) {
   s_state.pwm_available_result = result;
 }
 
-void platform_test_set_uart_dma_results(esy_err_t abort, esy_err_t poll) {
+void platform_test_set_uart_abort_result(esy_err_t abort) {
   s_state.uart_abort_result = abort;
-  s_state.uart_poll_result = poll;
+}
+
+void platform_test_set_xio_uart_cleanup_results(esy_err_t tx, esy_err_t rx) {
+  s_state.xio_uart_tx_cleanup_result = tx;
+  s_state.xio_uart_rx_cleanup_result = rx;
 }
 
 void platform_test_set_uart_cleanup_result(esy_err_t result) {
@@ -188,11 +199,19 @@ void platform_test_set_capture_cleanup_result(esy_err_t result) {
   s_state.capture_cleanup_result = result;
 }
 
+void platform_test_set_capture_claim_result(esy_err_t result) {
+  s_state.capture_claim_result = result;
+}
+
 void platform_test_set_capture_reject_pin(bool reject) {
   s_state.capture_reject_pin = reject;
 }
 
 void platform_test_set_adc_busy(bool busy) { s_adc_busy = busy; }
+
+void platform_test_set_adc_validation_result(esy_err_t result) {
+  s_state.adc_validate_result = result;
+}
 
 void platform_test_set_adc_results(esy_err_t submit, esy_err_t abort,
                                    esy_err_t deinit) {
@@ -268,13 +287,16 @@ void platform_test_complete_dma(bool error) {
   void *callback_arg =
       error ? s_dma_transfer.error_callback_arg : s_dma_transfer.callback_arg;
 
-  TEST_ASSERT_NOT_NULL(callback);
-  callback(callback_arg);
+  if (callback != NULL) callback(callback_arg);
 }
 
 
 void platform_test_set_low_power_result(esy_err_t result) {
   s_state.low_power_result = result;
+}
+
+void platform_test_set_explicit_sleep_result(esy_power_sleep_result_t result) {
+  s_state.explicit_sleep_result = result;
 }
 
 void platform_test_set_low_power_supported_mode_mask(uint32_t mode_mask) {
@@ -680,6 +702,12 @@ uint8_t esy_hb_system_get_core_count(void) { return 2u; }
 
 bool esy_hb_system_is_in_isr(void) { return true; }
 
+esy_err_t esy_hb_system_set_context_callbacks(
+    const esy_system_context_callbacks_t *callbacks) {
+  s_state.system_context_callbacks = callbacks;
+  return ESY_OK;
+}
+
 esy_err_t esy_hb_flash_init(void) {
   s_state.driver_init_calls++;
   return ESY_OK;
@@ -899,6 +927,15 @@ esy_err_t esy_hb_low_power_cancel(esy_hb_low_power_mode_t mode) {
   return ESY_OK;
 }
 
+esy_err_t esy_hb_power_sleep(const esy_power_sleep_config_t *config,
+                             esy_power_sleep_result_t *out_result) {
+  if (config == NULL || out_result == NULL) return ESY_ERR_INVALID_ARG;
+  ++s_state.explicit_sleep_calls;
+  s_state.explicit_sleep_config = *config;
+  *out_result = s_state.explicit_sleep_result;
+  return s_state.low_power_result;
+}
+
 esy_err_t esy_hb_shutdown(esy_hb_shutdown_mode_t mode) {
   if (mode != ESY_HB_SHUTDOWN_MODE_STANDBY) {
     return ESY_ERR_INVALID_ARG;
@@ -1031,9 +1068,40 @@ esy_err_t esy_hb_dma_release(const void *owner, uint32_t dreq, uint8_t channel) 
   return ESY_OK;
 }
 
+esy_err_t esy_hb_dma_retire_from_isr(const void *owner, uint32_t dreq,
+                                   uint8_t channel) {
+  uint8_t resource;
+  esy_err_t result = dma_check_owner(owner, dreq, channel, &resource);
+  if (result == ESY_ERR_STATE) return ESY_OK;
+  if (result != ESY_OK) return result;
+  s_state.dma_abort_calls++;
+  if (s_state.dma_abort_result != ESY_OK) return s_state.dma_abort_result;
+  if (esy_hb_dma_is_busy(dreq, channel)) return ESY_ERR_BUSY;
+  s_state.dma_owners[resource] = NULL;
+  memset(&s_dma_transfer, 0, sizeof(s_dma_transfer));
+  return ESY_OK;
+}
+
+esy_err_t esy_hb_dma_abort_from_isr(const void *owner, uint32_t dreq,
+                                  uint8_t channel) {
+  uint8_t resource;
+  esy_err_t result = dma_check_owner(owner, dreq, channel, &resource);
+  if (result == ESY_ERR_STATE) return ESY_OK;
+  if (result != ESY_OK) return result;
+  s_state.dma_abort_calls++;
+  if (s_state.dma_abort_result != ESY_OK) return s_state.dma_abort_result;
+  s_state.dma_owners[resource] = NULL;
+  s_dma_busy_override = 0;
+  memset(&s_dma_transfer, 0, sizeof(s_dma_transfer));
+  return ESY_OK;
+}
+
 esy_err_t esy_hb_dma_prepare(const void *owner,
                              const esy_dma_config_t *transfer) {
   TEST_ASSERT_NOT_NULL(transfer);
+  s_state.submitted_dma = *transfer;
+  if (s_state.reject_dma_half_callback && transfer->half_callback != NULL)
+    return ESY_ERR_NOT_SUPPORTED;
   esy_err_t result = esy_hb_dma_claim(owner, transfer->inner.dreq,
                                     transfer->inner.channel);
   if (result != ESY_OK) return result;
@@ -1076,7 +1144,10 @@ esy_err_t esy_hb_dma_abort(const void *owner, uint32_t dreq, uint8_t channel) {
   s_state.last_dma_owner = owner;
   s_state.dma_abort_calls++;  s_state.last_dreq = dreq;
   s_state.last_channel = channel;
-  if (s_state.dma_abort_result == ESY_OK) s_state.dma_owners[resource] = NULL;
+  if (s_state.dma_abort_result == ESY_OK) {
+    s_state.dma_owners[resource] = NULL;
+    memset(&s_dma_transfer, 0, sizeof(s_dma_transfer));
+  }
   return s_state.dma_abort_result;
 }
 
@@ -1188,6 +1259,11 @@ int32_t esy_hb_timer_start(const esy_timer_task_config_t *task_config) {
   s_state.timer_callback_arg = task_config->callback_arg;
   if (s_state.timer_scripted) {
     int32_t id = s_state.timer_next_id;
+    if (id < 0) {
+      s_state.timer_callback = NULL;
+      s_state.timer_callback_arg = NULL;
+      return id;
+    }
     TEST_ASSERT_GREATER_OR_EQUAL_INT32(0, id);
     TEST_ASSERT_LESS_THAN_INT32(4, id);
     s_state.timer_active_mask |= 1u << (uint32_t)id;
@@ -1434,6 +1510,8 @@ esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *handle,
   s_state.last_spi_rx_dma = *rx_dma_config;
   s_spi_dma_complete_cb = complete_cb;
   s_spi_dma_user_data = user_data;
+  s_dma_busy_override = s_state.spi_submit_result == ESY_OK ||
+      s_state.spi_submit_retains_borrow ? 1 : 0;
   if (s_state.spi_submit_result != ESY_OK && s_dma_busy_override <= 0) {
     s_spi_dma_complete_cb = NULL;
     s_spi_dma_user_data = NULL;
@@ -1517,6 +1595,8 @@ esy_err_t esy_hb_uart_deinit(esy_uart_t *uart) {
   TEST_ASSERT_NOT_NULL(uart);
   if (s_state.uart_owner != uart || uart->ctx[0] != uart->backend.bytes)
     return ESY_ERR_STATE;
+  if (s_state.uart_tx_dma_busy || s_state.uart_rx_dma_busy || s_state.uart_wire_busy)
+    return ESY_ERR_BUSY;
   s_state.driver_deinit_order = next_event();
   if (s_state.uart_cleanup_result != ESY_OK)
     return s_state.uart_cleanup_result;
@@ -1539,10 +1619,27 @@ int32_t esy_hb_uart_receive_blocking(esy_uart_t *uart, uint8_t *data,
   return (int32_t)len;
 }
 
+int32_t esy_hb_uart_send_timeout(esy_uart_t *uart, const uint8_t *data,
+                                size_t len, uint32_t timeout_ms) {
+  TEST_ASSERT_NOT_NULL(uart);
+  TEST_ASSERT_NOT_NULL(data);
+  s_state.uart_send_timeout_ms = timeout_ms;
+  ++s_state.uart_send_timeout_calls;
+  return s_state.uart_send_timeout_override ? s_state.uart_send_timeout_result
+                                           : (int32_t)len;
+}
+
+void platform_test_set_uart_send_timeout_result(int32_t result) {
+  s_state.uart_send_timeout_override = true;
+  s_state.uart_send_timeout_result = result;
+}
+
 esy_err_t esy_hb_uart_send_dma(esy_uart_t *uart,
                                    esy_dma_config_t *dma_config) {
   TEST_ASSERT_NOT_NULL(uart);
   TEST_ASSERT_NOT_NULL(dma_config);
+  if (s_state.reject_dma_half_callback && dma_config->half_callback != NULL)
+    return ESY_ERR_NOT_SUPPORTED;
   s_state.driver_transfer_dma_calls++;
   s_state.last_tx_inner = dma_config->inner;
   s_state.submitted_dma = *dma_config;
@@ -1553,6 +1650,8 @@ esy_err_t esy_hb_uart_receive_dma(esy_uart_t *uart,
                                       esy_dma_config_t *dma_config) {
   TEST_ASSERT_NOT_NULL(uart);
   TEST_ASSERT_NOT_NULL(dma_config);
+  if (s_state.reject_dma_half_callback && dma_config->half_callback != NULL)
+    return ESY_ERR_NOT_SUPPORTED;
   s_state.driver_transfer_dma_calls++;
   s_state.last_rx_inner = dma_config->inner;
   s_state.submitted_dma = *dma_config;
@@ -1566,11 +1665,6 @@ esy_err_t esy_hb_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
   return s_state.uart_abort_result;
 }
 
-esy_err_t esy_hb_uart_poll(esy_uart_t *uart) {
-  TEST_ASSERT_NOT_NULL(uart);
-  ++s_state.uart_poll_calls;
-  return s_state.uart_poll_result;
-}
 
 void platform_test_set_uart_busy(bool tx_dma, bool rx_dma, bool wire) {
   s_state.uart_tx_dma_busy = tx_dma;
@@ -1861,11 +1955,6 @@ esy_err_t esy_hb_pwm_abort_dma(esy_pwm_t *pwm) {
   return s_state.pwm_abort_result;
 }
 
-esy_err_t esy_hb_pwm_poll(esy_pwm_t *pwm) {
-  TEST_ASSERT_NOT_NULL(pwm);
-  s_state.pwm_poll_calls++;
-  return s_state.pwm_poll_result;
-}
 
 esy_err_t esy_hb_pwm_set_duty(esy_pwm_t *pwm, float duty_cycle) {
   TEST_ASSERT_NOT_NULL(pwm);
@@ -1902,6 +1991,8 @@ esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
   (void)loop;
   TEST_ASSERT_NOT_NULL(pwm);
   TEST_ASSERT_NOT_NULL(dma_config);
+  if (s_state.reject_dma_half_callback && dma_config->half_callback != NULL)
+    return ESY_ERR_NOT_SUPPORTED;
   s_state.driver_transfer_dma_calls++;
   s_state.last_pwm_inner = dma_config->inner;
   s_state.submitted_dma = *dma_config;
@@ -1961,6 +2052,14 @@ esy_err_t esy_hb_pwm_get_phys_index(const esy_pwm_t *pwm,
 }
 
 void esy_hb_pwm_handle_irq(uint32_t index) { (void)index; }
+
+esy_err_t esy_hb_adc_validate_config(const esy_adc_config_t *config) {
+  if (config == NULL || config->phys_index >= TEST_DMA_RESOURCE_COUNT ||
+      (uint32_t)config->sample_time > ESY_ADC_SAMPLETIME_DEFAULT)
+    return ESY_ERR_INVALID_ARG;
+  s_state.adc_validate_order = next_event();
+  return s_state.adc_validate_result;
+}
 
 esy_err_t esy_hb_adc_check_available(uint8_t phys_index) {
   if (phys_index >= TEST_DMA_RESOURCE_COUNT) return ESY_ERR_INVALID_ARG;
@@ -2284,10 +2383,13 @@ esy_err_t esy_hb_xio_spi_init(esy_spi_t *spi,
   return ESY_OK;
 }
 
-void esy_hb_xio_spi_deinit(esy_spi_t *spi) {
+esy_err_t esy_hb_xio_spi_deinit(esy_spi_t *spi) {
   TEST_ASSERT_NOT_NULL(spi);
-  if (s_dma_busy_override > 0) return;
+  if (s_dma_busy_override > 0) return ESY_ERR_BUSY;
+  if (s_state.spi_cleanup_result != ESY_OK) return s_state.spi_cleanup_result;
   s_state.driver_deinit_order = next_event();
+  spi->ctx = NULL;
+  return ESY_OK;
 }
 
 int32_t esy_hb_xio_spi_write_blocking(esy_spi_t *spi, const uint8_t *tx_buf,
@@ -2423,9 +2525,13 @@ bool esy_hb_xio_uart_tx_is_busy(esy_uart_t *uart) {
   return uart != NULL && uart->ctx[0] != NULL && s_state.xio_uart_wire_busy;
 }
 
-void esy_hb_xio_uart_tx_deinit(esy_uart_t *uart) {
+esy_err_t esy_hb_xio_uart_tx_deinit(esy_uart_t *uart) {
+  if (uart == NULL) return ESY_OK;
+  if (s_state.xio_uart_tx_cleanup_result != ESY_OK)
+    return s_state.xio_uart_tx_cleanup_result;
   if (uart->ctx[0] != NULL) s_state.driver_deinit_order = next_event();
   uart->ctx[0] = NULL;
+  return ESY_OK;
 }
 
 esy_err_t esy_hb_xio_uart_rx_init(esy_uart_t *uart,
@@ -2469,17 +2575,16 @@ uint8_t esy_hb_xio_uart_rx_get_pin(esy_uart_t *uart) {
   return uart && uart->ctx[1] ? (uint8_t)((uintptr_t)uart->ctx[1] - 1u) : ESY_PIN_UNUSED;
 }
 
-void esy_hb_xio_uart_rx_deinit(esy_uart_t *uart) {
+esy_err_t esy_hb_xio_uart_rx_deinit(esy_uart_t *uart) {
+  if (uart == NULL) return ESY_OK;
+  if (s_state.xio_uart_rx_cleanup_result != ESY_OK)
+    return s_state.xio_uart_rx_cleanup_result;
   if (uart->ctx[1] != NULL) s_state.driver_deinit_order = next_event();
   uart->ctx[1] = NULL;
-}
-
-esy_err_t esy_hb_spi_poll(esy_spi_t *spi) {
-  if (s_state.spi_submit_result != ESY_OK && s_spi_dma_complete_cb != NULL)
-    platform_test_complete_spi_dma(spi, ESY_SPI_DMA_TRANSFER_DMA_ERROR);
   return ESY_OK;
 }
-bool esy_hb_spi_is_busy(esy_spi_t *spi) { (void)spi; return s_dma_busy_override > 0; }
+
+bool esy_hb_spi_is_busy(esy_spi_t *spi) { return spi != NULL && s_dma_busy_override > 0; }
 
 void platform_test_reject_dma_mapping(bool reject) { s_state.reject_dma_mapping = reject; }
 void platform_test_set_init_result(esy_err_t result) { s_state.init_result = result; }
@@ -2498,12 +2603,6 @@ void platform_test_fire_timer(void) {
   if (s_state.timer_callback != NULL)
     s_state.timer_callback(s_state.timer_callback_arg);
 }
-esy_err_t esy_hb_xio_spi_poll(esy_spi_t *spi) { (void)spi; return ESY_OK; }
-esy_err_t esy_hb_xio_spi_abort(esy_spi_t *spi) {
-  (void)spi;
-  s_dma_busy_override = 0;
-  return ESY_OK;
-}
 bool esy_hb_xio_spi_is_busy(esy_spi_t *spi) { (void)spi; return s_dma_busy_override > 0; }
 
 void platform_test_set_uart_resume_result(esy_err_t result) { s_state.uart_resume_result = result; }
@@ -2518,48 +2617,9 @@ esy_err_t esy_hb_xio_uart_rx_abort_dma(esy_uart_t *uart) {
   s_state.dma_abort_calls++;
   return s_state.dma_abort_result;
 }
-esy_err_t esy_hb_xio_uart_tx_poll(esy_uart_t *uart) {
-  TEST_ASSERT_NOT_NULL(uart);
-  s_state.uart_poll_calls++;
-  return s_state.uart_poll_result;
-}
-esy_err_t esy_hb_xio_uart_rx_poll(esy_uart_t *uart) {
-  TEST_ASSERT_NOT_NULL(uart);
-  s_state.uart_poll_calls++;
-  return s_state.uart_poll_result;
-}
 
-esy_err_t esy_hb_system_set_context_callbacks(
-    const esy_system_context_callbacks_t *callbacks) {
-  s_state.system_context_callbacks = callbacks;
+esy_err_t esy_hb_xio_spi_abort(esy_spi_t *spi) {
+  (void)spi;
+  s_dma_busy_override = 0;
   return ESY_OK;
-}
-
-esy_err_t esy_hb_adc_validate_config(const esy_adc_config_t *config) {
-  if (config == NULL || config->phys_index >= TEST_DMA_RESOURCE_COUNT ||
-      (uint32_t)config->sample_time > ESY_ADC_SAMPLETIME_DEFAULT)
-    return ESY_ERR_INVALID_ARG;
-  s_state.adc_validate_order = next_event();
-  return s_state.adc_validate_result;
-}
-
-void platform_test_set_adc_validation_result(esy_err_t result) {
-  s_state.adc_validate_result = result;
-}
-
-void platform_test_set_explicit_sleep_result(esy_power_sleep_result_t result) {
-  s_state.explicit_sleep_result = result;
-}
-
-esy_err_t esy_hb_power_sleep(const esy_power_sleep_config_t *config,
-                             esy_power_sleep_result_t *out_result) {
-  if (config == NULL || out_result == NULL) return ESY_ERR_INVALID_ARG;
-  ++s_state.explicit_sleep_calls;
-  s_state.explicit_sleep_config = *config;
-  *out_result = s_state.explicit_sleep_result;
-  return s_state.low_power_result;
-}
-
-void platform_test_set_capture_claim_result(esy_err_t result) {
-  s_state.capture_claim_result = result;
 }

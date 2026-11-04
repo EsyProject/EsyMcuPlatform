@@ -27,8 +27,8 @@ typedef struct {
   esy_device_t device;
   esy_pwm_t *pwm;
   bool suspended;
-  bool dma_ref_held;
-  bool output_enabled;
+  esy_device_atomic_u32_t dma_ref_held; /**< Atomic DMA reference flag. */
+  esy_device_atomic_u32_t output_enabled; /**< Atomic output activity flag. */
 } esy_pwm_device_binding_t;
 
 /** @note Register only with DMA stopped; active DMA returns ESY_ERR_BUSY. */

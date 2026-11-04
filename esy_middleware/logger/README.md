@@ -181,18 +181,21 @@ Each core process attempts at most its block budget. Blocking UART short sends,
 stdio writes/flushes and provider callbacks still determine elapsed time. UART
 retains short-write tails and retries BUSY/STATE no sooner than 10 ms using the
 HAL tick, including unsigned wrap; keep gaps below half the tick range.
-Queues can fill if polling is too infrequent. Stdio and asynchronous UART output
+Queues can fill if owner processing is too infrequent. Stdio and asynchronous UART output
 remain best-effort. RTT must use a nonblocking provider mode for caller-driven
 integration. The same detach, borrowed-buffer and DMA leases protect shutdown:
 BUSY retains storage, pending queued output is discarded only on successful
 cleanup, and timeout never permits force-clearing a live instance.
 
-UART processing polls active DMA retirement before attempting another block.
-The OS worker retries active DMA at 10 ms intervals rather than waiting solely
-for a completion notification. A pending shutdown continues retirement and
+The existing OS worker processes active UART DMA at a finite 10 ms interval;
+idle workers still wait for queued output. Caller-driven mode follows
+`esy_logger_backend_uart_core_next_wait_ms()` and continues processing while a
+transfer is active. The UART request has one terminal completion/error path;
+backend IRQs do not expose a second wake callback. A pending shutdown continues
+retirement and
 starts no queued output. Caller-driven cleanup failures return their UART error
 and retain storage; continue processing after deinit returns BUSY, then retry
-deinit. A failed submission that retains a HAL borrow is retired through polling
+deinit. A failed submission that retains a HAL borrow is retired through processing
 or a later successful abort before the best-effort log block is released.
 Provider and callback duration remain part of each processing step.
 

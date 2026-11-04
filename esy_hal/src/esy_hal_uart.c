@@ -180,11 +180,11 @@ static const esy_device_ops_t k_uart_device_ops = {
 
 static const esy_uart_vtable_t k_uart_ops = {
     .send_blocking = vt_send_blocking,
+    .send_timeout = esy_hb_uart_send_timeout,
     .receive_blocking = vt_receive_blocking,
     .send_dma = vt_send_dma,
     .receive_dma = vt_receive_dma,
     .abort_dma = vt_abort_dma,
-    .poll = esy_hb_uart_poll,
     .get_dma_trans_count_remaining = esy_hb_uart_get_dma_trans_count_remaining,
     .rx_stream_start = vt_rx_stream_start,
     .rx_stream_peek = vt_rx_stream_peek,

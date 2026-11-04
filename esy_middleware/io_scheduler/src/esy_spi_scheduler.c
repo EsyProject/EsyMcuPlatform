@@ -9,6 +9,7 @@
 #include "esy_spi_scheduler_internal.h"
 #include "esy_io_scheduler_task_resource_internal.h"
 #include "esy_hal/esy_hal_system.h"
+#include "esy_middleware/os/esy_os.h"
 #define ESY_SPI_SCHEDULER_DEFAULT_TASK_STACK_SIZE 512u
 
 static bool is_worker(void *task) {
@@ -26,10 +27,7 @@ static esy_err_t stop_worker(void *task) {
 static void spi_scheduler_task(void *arg) {
   esy_spi_scheduler_t *gw = arg;
   for (;;) {
-    (void)esy_os_task_notify_take(true,
-        esy_io_scheduler_atomic_flag_get(&gw->busy) ||
-        esy_io_scheduler_atomic_flag_get(&gw->stopping) ||
-        !esy_io_scheduler_atomic_flag_get(&gw->ready) ? 1u : UINT32_MAX);
+    (void)esy_os_task_notify_take(true, esy_spi_scheduler_next_wait_ms(gw));
     esy_spi_scheduler_process_context(gw);
     if (esy_io_scheduler_atomic_flag_get(&gw->stopping) && !gw->current &&
         !esy_hal_spi_is_busy(gw->spi)) {
@@ -94,6 +92,9 @@ esy_err_t esy_spi_scheduler_create(esy_spi_t *spi,
   gw->task = task;
   esy_os_task_set_core_affinity(task, cfg->task_core_affinity);
   esy_io_scheduler_atomic_flag_set(&gw->ready, true);
+  /* The worker can already be waiting while create publishes its task handle.
+   * A latched give also covers a worker which has not started waiting yet. */
+  (void)esy_os_task_notify_give(task);
   *out_gw = gw;
   return ESY_OK;
 }

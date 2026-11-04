@@ -20,7 +20,7 @@
  * - Initialization uses @ref esy_xio_spi_config_t (XIO-specific:
  * instance/SM/pins/speed/etc.).
  * - Initialize the complete caller-owned handle with {0} before first use.
- *   One task/core owner serializes lifecycle, I/O and polling. Never copy or
+ *   One task/core owner serializes lifecycle and I/O. Never copy or
  *   clear live storage, including while DMA or callbacks retain it.
  */
 
@@ -85,11 +85,13 @@ esy_err_t esy_hb_xio_spi_init(esy_spi_t *spi,
  *
  * @param[in,out] spi SPI handle
  * @note Stop producers and retire callbacks before this task-owner operation.
- * Active DMA leaves the handle and resources unchanged; finish poll or abort
+ * Active DMA leaves the handle and resources unchanged; await completion or abort
  * successfully before retrying. Completed cleanup clears ctx and permits init
  * again without resetting the handle. No other backend may use it concurrently.
+ * @return OK after full cleanup, INVALID_ARG for NULL, BUSY while DMA/callbacks
+ * or cached native DMA reservation cleanup remains; other errors retain storage.
  */
-void esy_hb_xio_spi_deinit(esy_spi_t *spi);
+esy_err_t esy_hb_xio_spi_deinit(esy_spi_t *spi);
 
 /**
  * @brief Blocking transmit using byte-backed frames.
@@ -216,6 +218,10 @@ int32_t esy_hb_xio_spi_transfer16_blocking(esy_spi_t *spi,
  * 8-bit DMA elements and 16-bit frames with 16-bit DMA elements, for either bit
  * order. Each memory element contains one numeric frame value. Other frame/width
  * combinations return NOT_SUPPORTED before DMA claims, FIFO drain or CS changes.
+ * @note Master DMA rejects NOT_SUPPORTED before claims/CS if the actual
+ * PIO divider requires more than 8192 tail inspections or configured CS
+ * hold/inactive delays exceed 8192 core cycles. Blocking operations retain
+ * their existing clock/timing support. No OS or caller progress hook is used.
  */
 esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
                                           esy_dma_config_t *tx_dma_config,
@@ -257,11 +263,6 @@ uint8_t esy_hb_xio_spi_get_rx_pin(esy_spi_t *spi);
  */
 uint8_t esy_hb_xio_spi_get_pin_sck(esy_spi_t *spi);
 
-/** @brief Owner-task poll; returns BUSY until both DMA channels and PIO finish.
- * Terminal callbacks run here after channel retirement, never in the DMA ISR.
- * Serialize with all operations on this handle and its DMA channels.
- */
-esy_err_t esy_hb_xio_spi_poll(esy_spi_t *spi);
 /** @brief Retire both channels without callback; BUSY/error retains ownership. */
 esy_err_t esy_hb_xio_spi_abort(esy_spi_t *spi);
 /** @brief Query whether DMA still owns the handle and borrowed buffers. */

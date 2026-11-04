@@ -43,6 +43,8 @@ typedef struct fake_esy_hal_uart_slot_s {
   uint8_t last_tx[128];
   size_t last_tx_len;
   uint32_t send_count;
+  uint32_t send_timeout_count; /**< Number of bounded TX attempts. */
+  uint32_t last_timeout_ms; /**< Last bounded TX budget. */
   /** Optional blocking-send result injection; negative errors and short writes. */
   bool override_send_result;
   int32_t send_result;
@@ -56,9 +58,6 @@ typedef struct fake_esy_hal_uart_slot_s {
   void (*busy_hook)(esy_uart_t *uart); /**< Optional synchronous TX busy-query hook. */
   bool dma_pending; /**< Accepted TX borrow survives a hardware-idle observation. */
   bool rx_busy;
-  esy_err_t poll_result; /**< Injected owner poll result, initially ESY_OK. */
-  uint32_t poll_count; /**< Number of owner polls. */
-  void (*poll_hook)(esy_uart_t *uart); /**< Successful poll hook. */
   uint32_t send_dma_count;
   esy_err_t send_dma_result;
   bool retain_failed_submission; /**< Failed submit may retain TX storage. */
@@ -98,6 +97,7 @@ void fake_esy_hal_uart_set_rx_data(esy_uart_t *uart, const uint8_t *data,
 void fake_esy_hal_uart_set_rx_text(esy_uart_t *uart, const char *text);
 void fake_esy_hal_uart_set_send_dma_result(esy_uart_t *uart,
                                                 esy_err_t ret);
+/** @brief Deliver the pending terminal callback once and retire its borrow. */
 void fake_esy_hal_uart_complete_last_dma(esy_uart_t *uart);
 void fake_esy_hal_uart_fail_last_dma(esy_uart_t *uart);
 size_t fake_esy_hal_uart_push_rx_stream(esy_uart_t *uart,

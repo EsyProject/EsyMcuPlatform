@@ -17,6 +17,8 @@
 #include "esy_hal_backend/esy_hb_gpio.h"
 
 #define STM32F4_SPI_MAX 4u
+#define SPI_DMA_MAX_TAIL_READS 8192u
+#define SPI_DMA_TAIL_SYNC_READS 16u
 #define STM32F4_SPI_BLOCKING_TIMEOUT_LOOPS 1000000u
 
 typedef struct {
@@ -46,10 +48,11 @@ typedef struct {
     uint8_t                   rx_channel;
     bool                      tx_owned;
     bool                      rx_owned;
-    bool                      dma_active;
+    atomic_bool               dma_active;
     atomic_uint               dma_events;
+    atomic_bool               dma_finishing;
 
-    bool enabled;
+    atomic_bool enabled;
     bool native_owned;
     esy_spi_t *bound_spi;
 } stm32f4_spi_ctx_t;
@@ -64,23 +67,40 @@ static inline void cs_high_if_needed(const stm32f4_spi_ctx_t *c) {
     if (c->role == ESY_SPI_ROLE_MASTER && c->cs_pin != ESY_PIN_UNUSED) esy_hb_gpio_write(c->cs_pin, true);
 }
 
-static uint32_t calc_prescaler(uint32_t pclk, uint32_t target_hz) {
-    if (!target_hz) target_hz = 1000000u;
-    struct { uint16_t div; uint32_t hal; } opts[] = {
-        { 2,   SPI_BAUDRATEPRESCALER_2   },
-        { 4,   SPI_BAUDRATEPRESCALER_4   },
-        { 8,   SPI_BAUDRATEPRESCALER_8   },
-        { 16,  SPI_BAUDRATEPRESCALER_16  },
-        { 32,  SPI_BAUDRATEPRESCALER_32  },
-        { 64,  SPI_BAUDRATEPRESCALER_64  },
-        { 128, SPI_BAUDRATEPRESCALER_128 },
-        { 256, SPI_BAUDRATEPRESCALER_256 },
-    };
-    for (unsigned i = 0; i < sizeof(opts)/sizeof(opts[0]); ++i) {
-        uint32_t baud = pclk / opts[i].div;
-        if (baud <= target_hz) return opts[i].hal;
+typedef struct {
+    uint16_t divider;
+    uint32_t native;
+} spi_prescaler_option_t;
+
+static const spi_prescaler_option_t k_spi_prescalers[] = {
+    {2u, SPI_BAUDRATEPRESCALER_2},
+    {4u, SPI_BAUDRATEPRESCALER_4},
+    {8u, SPI_BAUDRATEPRESCALER_8},
+    {16u, SPI_BAUDRATEPRESCALER_16},
+    {32u, SPI_BAUDRATEPRESCALER_32},
+    {64u, SPI_BAUDRATEPRESCALER_64},
+    {128u, SPI_BAUDRATEPRESCALER_128},
+    {256u, SPI_BAUDRATEPRESCALER_256},
+};
+
+/* Choose the fastest representable SCK that never exceeds the requested rate.
+ * Multiplication avoids accepting a divider whose fractional rate rounds down
+ * to the target in integer-Hz arithmetic. No divider means unsupported speed. */
+static esy_err_t calc_prescaler(uint32_t pclk, uint32_t target_hz,
+                                 uint32_t *prescaler) {
+    if (pclk == 0u || target_hz == 0u || prescaler == NULL)
+        return ESY_ERR_INVALID_ARG;
+    for (size_t i = 0u; i < sizeof(k_spi_prescalers) / sizeof(k_spi_prescalers[0]); ++i) {
+        if ((uint64_t)target_hz * k_spi_prescalers[i].divider >= pclk) {
+            *prescaler = k_spi_prescalers[i].native;
+            return ESY_OK;
+        }
     }
-    return SPI_BAUDRATEPRESCALER_256;
+    return ESY_ERR_NOT_SUPPORTED;
+}
+
+static uint32_t spi_peripheral_clock_hz(uint8_t phys_index) {
+    return phys_index == 1u ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
 }
 
 static uint32_t spi_data_size_from_bits(uint8_t data_bits) {
@@ -142,36 +162,50 @@ static stm32f4_spi_ctx_t *spi_context(const esy_spi_t *spi) {
 
 enum { SPI_DMA_RX_DONE = 1u, SPI_DMA_TX_DONE = 2u, SPI_DMA_ERROR = 4u };
 
-/* ISR callbacks publish only; the owner polls to retire both DMA directions. */
+static void spi_finish_dma_from_isr(stm32f4_spi_ctx_t *c);
+static uint64_t spi_dma_tail_budget(const stm32f4_spi_ctx_t *c);
+
+/* Each native callback publishes its terminal direction before attempting
+ * aggregation. The final callback retires both routes and wire activity. */
+static void spi_dma_publish(stm32f4_spi_ctx_t *c, unsigned event) {
+    atomic_fetch_or_explicit(&c->dma_events, event, memory_order_release);
+    spi_finish_dma_from_isr(c);
+}
 static void spi_dma_internal_callback(void *arg) {
     stm32f4_spi_ctx_t *c = arg;
-    atomic_fetch_or_explicit(&c->dma_events, SPI_DMA_RX_DONE, memory_order_release);
+    spi_dma_publish(c, SPI_DMA_RX_DONE);
 }
 static void spi_dma_tx_callback(void *arg) {
     stm32f4_spi_ctx_t *c = arg;
-    atomic_fetch_or_explicit(&c->dma_events, SPI_DMA_TX_DONE, memory_order_release);
+    spi_dma_publish(c, SPI_DMA_TX_DONE);
 }
 static void spi_dma_error_callback(void *arg) {
     stm32f4_spi_ctx_t *c = arg;
-    atomic_fetch_or_explicit(&c->dma_events, SPI_DMA_ERROR, memory_order_release);
+    spi_dma_publish(c, SPI_DMA_ERROR);
 }
 
-/* Task-only retirement. Only streams prepared by this transaction may be
- * aborted; a failed second prepare must not steal another stream's owner. */
-static esy_err_t spi_retire_dma_streams(stm32f4_spi_ctx_t *c) {
+/* Only routes prepared by this transaction may be retired. IRQ retirement
+ * never enters a task-side native abort or waits for another dispatcher. */
+static esy_err_t spi_retire_dma_streams(stm32f4_spi_ctx_t *c, bool from_isr, bool failed) {
     esy_err_t tx_result = ESY_OK;
     esy_err_t rx_result = ESY_OK;
     CLEAR_BIT(c->inst->CR2, SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
     if (c->tx_owned) {
         (void)esy_hb_dma_get_trans_count_remaining(c->tx_dreq, c->tx_channel,
                                                   &c->tx_remaining);
-        tx_result = esy_hb_dma_abort(c, c->tx_dreq, c->tx_channel);
+        tx_result = (from_isr
+            ? (failed ? esy_hb_dma_abort_from_isr(c, c->tx_dreq, c->tx_channel)
+                      : esy_hb_dma_retire_from_isr(c, c->tx_dreq, c->tx_channel))
+            : esy_hb_dma_abort(c, c->tx_dreq, c->tx_channel));
         if (tx_result == ESY_OK) c->tx_owned = false;
     }
     if (c->rx_owned) {
         (void)esy_hb_dma_get_trans_count_remaining(c->rx_dreq, c->rx_channel,
                                                   &c->rx_remaining);
-        rx_result = esy_hb_dma_abort(c, c->rx_dreq, c->rx_channel);
+        rx_result = (from_isr
+            ? (failed ? esy_hb_dma_abort_from_isr(c, c->rx_dreq, c->rx_channel)
+                      : esy_hb_dma_retire_from_isr(c, c->rx_dreq, c->rx_channel))
+            : esy_hb_dma_abort(c, c->rx_dreq, c->rx_channel));
         if (rx_result == ESY_OK) c->rx_owned = false;
     }
     return tx_result != ESY_OK ? tx_result : rx_result;
@@ -186,10 +220,11 @@ static void spi_release_transaction(stm32f4_spi_ctx_t *c) {
 
 static esy_err_t spi_reject_dma_start(stm32f4_spi_ctx_t *c, esy_err_t error) {
     atomic_fetch_or_explicit(&c->dma_events, SPI_DMA_ERROR, memory_order_release);
-    esy_err_t cleanup = spi_retire_dma_streams(c);
+    esy_err_t cleanup = spi_retire_dma_streams(c, false, true);
     if (cleanup != ESY_OK || (c->inst->SR & SPI_SR_BSY) != 0u) {
+        atomic_store_explicit(&c->dma_active, true, memory_order_release);
         /* A failed submit can retain hardware. Keep callbacks/storage borrowed;
-         * the owner must poll or retry abort before reusing the buffers. */
+         * retry abort before reusing the buffers. */
         return cleanup != ESY_OK ? cleanup : ESY_ERR_BUSY;
     }
     spi_release_transaction(c);
@@ -206,6 +241,12 @@ esy_err_t esy_hb_spi_claim(esy_spi_t *spi, const esy_spi_config_t *cfg) {
         return ESY_ERR_INVALID_ARG;
     if (cfg->data_bits != 8u && cfg->data_bits != 16u)
         return ESY_ERR_NOT_SUPPORTED;
+    if (cfg->role != ESY_SPI_ROLE_SLAVE) {
+        uint32_t prescaler;
+        esy_err_t status = calc_prescaler(spi_peripheral_clock_hz(cfg->phys_index),
+                                          cfg->speed_hz, &prescaler);
+        if (status != ESY_OK) return status;
+    }
     if (spi->ctx != NULL) {
         stm32f4_spi_ctx_t *c = spi_context(spi);
         return c != NULL && c->phys_index == cfg->phys_index &&
@@ -219,6 +260,9 @@ esy_err_t esy_hb_spi_claim(esy_spi_t *spi, const esy_spi_config_t *cfg) {
     stm32f4_spi_ctx_t *c = (stm32f4_spi_ctx_t *)(void *)spi->backend.bytes;
     memset(c, 0, sizeof(*c));
     atomic_init(&c->dma_events, 0u);
+    atomic_init(&c->dma_finishing, false);
+    atomic_init(&c->dma_active, false);
+    atomic_init(&c->enabled, false);
     c->inst = cfg->phys_index == 1u ? SPI1 : cfg->phys_index == 2u ? SPI2 : SPI3;
     c->phys_index = cfg->phys_index;
     c->bound_spi = spi;
@@ -231,7 +275,7 @@ esy_err_t esy_hb_spi_release(esy_spi_t *spi) {
     if (spi->ctx == NULL) return ESY_OK;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (c == NULL) return ESY_ERR_STATE;
-    if (c->native_owned || c->dma_active || c->tx_owned || c->rx_owned)
+    if (c->native_owned || c->dma_active || c->dma_finishing || c->tx_owned || c->rx_owned)
         return ESY_ERR_BUSY;
     uint8_t index = c->phys_index;
     memset(c, 0, sizeof(*c));
@@ -269,9 +313,12 @@ extern esy_err_t esy_hb_spi_init(esy_spi_t *spi, const esy_spi_config_t *cfg) {
     h->Init.NSS            = (c->role == ESY_SPI_ROLE_SLAVE)
                                  ? SPI_NSS_HARD_INPUT
                                  : SPI_NSS_SOFT;
-    uint32_t pclk          = (cfg->phys_index == 1) ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
-    if (!pclk) return ESY_ERR_INVALID_ARG;
-    h->Init.BaudRatePrescaler = calc_prescaler(pclk, c->speed_hz);
+    h->Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+    if (c->role != ESY_SPI_ROLE_SLAVE) {
+        result = calc_prescaler(spi_peripheral_clock_hz(c->phys_index),
+                                 c->speed_hz, &h->Init.BaudRatePrescaler);
+        if (result != ESY_OK) return result;
+    }
     h->Init.FirstBit       = c->is_msb_first ? SPI_FIRSTBIT_MSB : SPI_FIRSTBIT_LSB;
     h->Init.TIMode         = SPI_TIMODE_DISABLE;
     h->Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -294,7 +341,7 @@ esy_err_t esy_hb_spi_deinit(esy_spi_t *spi) {
     if (spi->ctx == NULL) return ESY_OK;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (c == NULL) return ESY_ERR_STATE;
-    if (c->dma_active || c->tx_owned || c->rx_owned ||
+    if (c->dma_active || c->dma_finishing || c->tx_owned || c->rx_owned ||
         (c->enabled && (c->inst->SR & SPI_SR_BSY) != 0u)) return ESY_ERR_BUSY;
     if (c->native_owned && HAL_SPI_DeInit(&c->hspi) != HAL_OK)
         return ESY_ERR_FAIL;
@@ -309,7 +356,7 @@ extern int32_t esy_hb_spi_write_blocking(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !tx_buf || !len) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
     SPI_TypeDef *spi_inst = c->inst;
 
     cs_low_if_needed(c);
@@ -339,7 +386,7 @@ extern int32_t esy_hb_spi_read_blocking(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !rx_buf || !len) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
     SPI_TypeDef *spi_inst = c->inst;
 
     cs_low_if_needed(c);
@@ -370,7 +417,7 @@ extern int32_t esy_hb_spi_transfer_blocking(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !tx_buf || !rx_buf || !len) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
     SPI_TypeDef *spi_inst = c->inst;
 
     cs_low_if_needed(c);
@@ -400,7 +447,7 @@ extern int32_t esy_hb_spi_write16_blocking(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !tx_buf || !len) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
     SPI_TypeDef *spi_inst = c->inst;
 
     cs_low_if_needed(c);
@@ -430,7 +477,7 @@ extern int32_t esy_hb_spi_read16_blocking(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !rx_buf || !len) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
     SPI_TypeDef *spi_inst = c->inst;
 
     cs_low_if_needed(c);
@@ -461,7 +508,7 @@ extern int32_t esy_hb_spi_transfer16_blocking(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !tx_buf || !rx_buf || !len) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
     SPI_TypeDef *spi_inst = c->inst;
 
     cs_low_if_needed(c);
@@ -493,7 +540,7 @@ extern esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *spi,
     if (!spi || !spi_context(spi) || !tx_dma_config || !rx_dma_config) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active || (c->inst->SR & SPI_SR_BSY) != 0u) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing || (c->inst->SR & SPI_SR_BSY) != 0u) return ESY_ERR_BUSY;
     if (tx_dma_config->circular || rx_dma_config->circular)
         return ESY_ERR_NOT_SUPPORTED;
     const esy_dma_transfer_size_t width = c->data_bits <= 8u
@@ -512,6 +559,9 @@ extern esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *spi,
         rx_dma_config->inner.channel, &rx_resource);
     if (route != ESY_OK) return route;
     if (tx_resource == rx_resource) return ESY_ERR_INVALID_ARG;
+
+    if (spi_dma_tail_budget(c) > SPI_DMA_MAX_TAIL_READS)
+        return ESY_ERR_NOT_SUPPORTED;
 
     while (c->inst->SR & SPI_SR_RXNE) {
         (void)c->inst->DR;
@@ -536,8 +586,6 @@ extern esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *spi,
     atomic_store_explicit(&c->dma_events, 0u, memory_order_relaxed);
     c->tx_owned = false;
     c->rx_owned = false;
-    c->dma_active = true;
-
     rx_dma_config->inner.direction = ESY_DMA_PERIPH_TO_MEM;
     rx_dma_config->src             = (void *)dr;
     rx_dma_config->callback        = spi_dma_internal_callback;
@@ -563,6 +611,7 @@ extern esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *spi,
     c->tx_owned = true;
 
     uint32_t mask = (1u << tx_resource) | (1u << rx_resource);
+    atomic_store_explicit(&c->dma_active, true, memory_order_release);
     esy_err_t started = esy_hb_dma_start(c, mask);
     if (started != ESY_OK) return spi_reject_dma_start(c, started);
     SET_BIT(c->inst->CR2, SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
@@ -584,15 +633,16 @@ extern esy_err_t esy_hb_spi_set_speed(esy_spi_t *spi, uint32_t speed_hz) {
     if (!spi || !spi_context(spi) || !speed_hz) return ESY_ERR_INVALID_ARG;
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
-    if (c->dma_active || (c->inst->SR & SPI_SR_BSY) != 0u) return ESY_ERR_BUSY;
+    if (c->dma_active || c->dma_finishing || (c->inst->SR & SPI_SR_BSY) != 0u) return ESY_ERR_BUSY;
     if (c->role != ESY_SPI_ROLE_MASTER &&
         c->role != ESY_SPI_ROLE_MASTER_NO_CS) return ESY_ERR_INVALID_ARG;
 
+    uint32_t prescaler;
+    esy_err_t result = calc_prescaler(spi_peripheral_clock_hz(c->phys_index),
+                                      speed_hz, &prescaler);
+    if (result != ESY_OK) return result;
     SPI_HandleTypeDef *h = &c->hspi;
-    uint32_t pclk = (c->phys_index == 1) ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
-    if (!pclk) return ESY_ERR_INVALID_ARG;
-
-    h->Init.BaudRatePrescaler = calc_prescaler(pclk, speed_hz);
+    h->Init.BaudRatePrescaler = prescaler;
     if (HAL_SPI_Init(h) != HAL_OK) return ESY_ERR_FAIL;
     __HAL_SPI_ENABLE(h);
 
@@ -603,11 +653,12 @@ extern esy_err_t esy_hb_spi_set_speed(esy_spi_t *spi, uint32_t speed_hz) {
 extern esy_err_t esy_hb_spi_abort(esy_spi_t *spi) {
     stm32f4_spi_ctx_t *c = spi_context(spi);
     if (c == NULL) return ESY_ERR_INVALID_ARG;
+    if (c->dma_finishing) return ESY_ERR_BUSY;
     if (!c->enabled) return ESY_ERR_STATE;
     if (!c->dma_active)
         return (c->inst->SR & SPI_SR_BSY) != 0u ? ESY_ERR_BUSY : ESY_OK;
     atomic_fetch_or_explicit(&c->dma_events, SPI_DMA_ERROR, memory_order_release);
-    esy_err_t result = spi_retire_dma_streams(c);
+    esy_err_t result = spi_retire_dma_streams(c, false, true);
     if (result != ESY_OK) return result;
     if ((c->inst->SR & SPI_SR_BSY) != 0u) return ESY_ERR_BUSY;
     spi_release_transaction(c);
@@ -632,43 +683,71 @@ extern void esy_hb_spi_handle_irq(esy_spi_t *spi) {
     (void)spi;
 }
 
-/* Owner task only; callbacks may enqueue after state and CS are retired. */
-esy_err_t esy_hb_spi_poll(esy_spi_t *spi) {
-    if (!spi || !spi_context(spi)) return ESY_ERR_INVALID_ARG;
-    stm32f4_spi_ctx_t *c = spi_context(spi);
-    if (!c->enabled) return ESY_ERR_STATE;
-    if (!c->dma_active) return ESY_OK;
+/* RX completion certifies the final sampled frame. Cover the remaining
+ * BSY tail with two frame times from the programmed APB divider. Each loop
+ * takes at least one CPU cycle; no SysTick progress is required in an IRQ.
+ * Slave BSY is not used as an end-of-frame condition (STM32F4 erratum). */
+static uint64_t spi_dma_tail_budget(const stm32f4_spi_ctx_t *c) {
+    if (c->role == ESY_SPI_ROLE_SLAVE) return 0u;
+    const uint32_t pclk = c->phys_index == 1u
+        ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
+    if (pclk == 0u) return UINT64_MAX;
+    const uint32_t divider = 2u << ((c->inst->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos);
+    return ((uint64_t)SystemCoreClock * divider *
+            (2u * c->data_bits + 1u) + pclk - 1u) / pclk + SPI_DMA_TAIL_SYNC_READS;
+}
+
+static bool spi_finish_wire(stm32f4_spi_ctx_t *c) {
+    if (c->role == ESY_SPI_ROLE_SLAVE) return true;
+    uint64_t derived = spi_dma_tail_budget(c);
+    uint32_t budget = derived <= SPI_DMA_MAX_TAIL_READS
+        ? (uint32_t)derived : SPI_DMA_MAX_TAIL_READS;
+    while (budget-- != 0u) {
+        if ((c->inst->SR & SPI_SR_BSY) == 0u) return true;
+    }
+    return false;
+}
+
+static void spi_finish_dma_from_isr(stm32f4_spi_ctx_t *c) {
+    if (!c->dma_active) return;
     unsigned events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
-    /* Hardware idle alone cannot distinguish success from an IRQ still pending
-     * on the other direction. Observe both terminal events before success. */
     if (!(events & SPI_DMA_ERROR) &&
         (events & (SPI_DMA_RX_DONE | SPI_DMA_TX_DONE)) !=
-            (SPI_DMA_RX_DONE | SPI_DMA_TX_DONE)) return ESY_OK;
-    if (!(events & SPI_DMA_ERROR) &&
-        ((c->tx_owned && esy_hb_dma_is_busy(c->tx_dreq, c->tx_channel)) ||
-         (c->rx_owned && esy_hb_dma_is_busy(c->rx_dreq, c->rx_channel)))) return ESY_OK;
-    /* Retire even idle channels: a pending or peer-core ISR may still hold
-     * callback storage after hardware has cleared BUSY. */
-    if (spi_retire_dma_streams(c) != ESY_OK) return ESY_ERR_BUSY;
-    if ((c->inst->SR & SPI_SR_BSY) != 0u) return ESY_OK;
-    events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
-    esy_spi_dma_transfer_result_t result = {ESY_SPI_DMA_TRANSFER_DMA_ERROR, 0u, 0u};
-    size_t tx_left = c->tx_remaining, rx_left = c->rx_remaining;
-    if (!(events & SPI_DMA_ERROR) &&
-        tx_left <= c->tx_length / c->tx_unit_bytes && rx_left <= c->rx_length / c->rx_unit_bytes) {
-        result.tx_transferred = c->tx_length - tx_left * c->tx_unit_bytes;
-        result.rx_transferred = c->rx_length - rx_left * c->rx_unit_bytes;
-        result.status = (tx_left || rx_left) ? ESY_SPI_DMA_TRANSFER_SHORT : ESY_SPI_DMA_TRANSFER_OK;
+            (SPI_DMA_RX_DONE | SPI_DMA_TX_DONE)) return;
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&c->dma_finishing, &expected,
+            true, memory_order_acq_rel, memory_order_acquire)) return;
+    if (spi_retire_dma_streams(c, true, (events & SPI_DMA_ERROR) != 0u) != ESY_OK) {
+        atomic_store_explicit(&c->dma_finishing, false, memory_order_release);
+        return;
     }
+    if ((events & SPI_DMA_ERROR) != 0u || !spi_finish_wire(c)) {
+        /* Recovery is explicit after a stuck serializer: memory is retired,
+         * the peripheral is disabled, and successful deinit/init is required. */
+        __HAL_SPI_DISABLE(&c->hspi);
+        c->enabled = false;
+        events |= SPI_DMA_ERROR;
+    }
+    esy_spi_dma_transfer_result_t result = {ESY_SPI_DMA_TRANSFER_DMA_ERROR, 0u, 0u};
+    const size_t tx_left = c->tx_remaining, rx_left = c->rx_remaining;
+    if (tx_left <= c->tx_length / c->tx_unit_bytes)
+        result.tx_transferred = c->tx_length - tx_left * c->tx_unit_bytes;
+    if (rx_left <= c->rx_length / c->rx_unit_bytes)
+        result.rx_transferred = c->rx_length - rx_left * c->rx_unit_bytes;
+    if (!(events & SPI_DMA_ERROR))
+        result.status = (tx_left || rx_left) ? ESY_SPI_DMA_TRANSFER_SHORT : ESY_SPI_DMA_TRANSFER_OK;
     esy_spi_dma_complete_cb_t cb = c->pending_cb;
     void *arg = c->pending_arg;
-    spi_release_transaction(c);
-    if (cb) cb(spi, &result, arg);
-    return ESY_OK;
+    c->pending_cb = NULL;
+    c->pending_arg = NULL;
+    cs_high_if_needed(c);
+    if (cb != NULL) cb(c->bound_spi, &result, arg);
+    atomic_store_explicit(&c->dma_active, false, memory_order_release);
+    atomic_store_explicit(&c->dma_finishing, false, memory_order_release);
 }
 
 bool esy_hb_spi_is_busy(esy_spi_t *spi) {
     if (!spi || !spi_context(spi)) return false;
     stm32f4_spi_ctx_t *c = spi_context(spi);
-    return c->dma_active || (c->enabled && ((c->inst->SR & SPI_SR_BSY) != 0u));
+    return c->dma_active || c->dma_finishing || (c->enabled && ((c->inst->SR & SPI_SR_BSY) != 0u));
 }

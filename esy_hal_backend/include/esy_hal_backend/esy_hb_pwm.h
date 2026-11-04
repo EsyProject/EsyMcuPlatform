@@ -124,6 +124,8 @@ extern esy_err_t esy_hb_pwm_set_polarity(esy_pwm_t *pwm, bool start_low);
  * @brief Enable or disable trigger output.
  *
  * This is typically used to generate a trigger for peripherals such as ADC.
+ * STM32F4 requires a timer with native master/TRGO output. TIM9 still supports
+ * ordinary PWM but returns NOT_SUPPORTED here before changing timer registers.
  *
  * @param[in] pwm     PWM handle
  * @param[in] enabled true to enable, false to disable
@@ -136,6 +138,11 @@ extern esy_err_t esy_hb_pwm_enable_trigger_output(esy_pwm_t *pwm, bool enabled);
 /**
  * @brief Configure PWM DMA output (optional).
  *
+ * Completion/half/error callbacks run automatically in native IRQ context.
+ * Finite completion retains the final output; error/abort stops output.
+ * Callbacks must be bounded/nonblocking and must not reenter PWM lifecycle.
+ * Keep handle, samples and callback context until terminal return or abort.
+ * No OS or caller progress hook is required.
  * @param[in] pwm        PWM handle
  * @param[in] dma_config DMA configuration (provided by caller)
  * @param[in] loop       true for cyclic/loop mode, false for one-shot
@@ -148,24 +155,14 @@ extern esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
                                            bool loop);
 
 /**
- * @brief Retire an owned DMA route and suppress pending callbacks.
+ * @brief Retire an owned DMA route and suppress pending completion callbacks.
  * @param[in,out] pwm Initialized handle; idle abort is idempotent.
  * @return ESY_OK after callback storage retirement, otherwise ownership remains.
  * @note Serialized owner only, outside IRQ/user callbacks. May wait in provider.
+ * Failure retains storage for an explicit owner retry. Success retires the route.
  */
 extern esy_err_t esy_hb_pwm_abort_dma(esy_pwm_t *pwm);
 
-/**
- * @brief Retire terminal DMA and deliver coalesced notifications on the owner.
- * @param[in,out] pwm Initialized handle.
- * @return ESY_OK, or cleanup error with buffer/callback ownership retained.
- * @note At most one half/full callback per call; error takes precedence.
- * Finite/error callbacks run after DMA retirement. Finite completion keeps PWM
- * output enabled to latch/hold its final compare; error/abort stops output.
- * Circular callbacks retain
- * the route. Caller serializes this call with every PWM operation.
- */
-extern esy_err_t esy_hb_pwm_poll(esy_pwm_t *pwm);
 
 /**
  * @brief Register a wrap interrupt callback.
@@ -281,8 +278,10 @@ extern void esy_hb_pwm_handle_irq(uint32_t index);
  *
  * Uses @ref esy_pwm_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
+ * STM32F4 advertises DMA_OUTPUT only on timers with native capture/compare DMA;
+ * TIM9 keeps WRAP_IRQ and POLARITY without claiming DMA output.
  *
  * @param[in]  pwm      PWM handle
  * @param[out] out_caps Public capability bitmask

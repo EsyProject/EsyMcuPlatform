@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -65,9 +66,9 @@ typedef enum {
  *                @ref esy_dma_config_t::callback_arg or
  *                @ref esy_dma_config_t::half_callback_arg.
  *
- * @note Public generic HAL callbacks execute from the owner task in
- * esy_hal_dma_poll(). Backend/peripheral-internal callback context follows
- * its own API and may be ISR context; keep handlers bounded and nonblocking.
+ * @note Public generic HAL callbacks execute automatically in hardware IRQ
+ * context. Peripheral-internal callbacks follow their own API contracts.
+ * Keep handlers bounded, nonblocking and ISR-safe.
  * Do not reenter DMA lifecycle/control APIs from a DMA callback.
  */
 typedef void (*esy_dma_callback_t)(void *arg);
@@ -114,8 +115,9 @@ typedef struct {
   esy_dma_callback_t callback;            /**< Completion callback (optional) */
   void *callback_arg;                     /**< Completion callback argument */
 
-  esy_dma_callback_t half_callback; /**< Half-transfer callback (optional;
-                                       common for circular/double-buffer) */
+  esy_dma_callback_t half_callback; /**< Optional half-transfer notification.
+                                       Pico rejects non-NULL with NOT_SUPPORTED;
+                                       leave NULL when no half IRQ is required. */
   void *half_callback_arg;                /**< Half-transfer callback argument */
   esy_dma_callback_t error_callback;      /**< Transfer error callback */
   void *error_callback_arg;               /**< Transfer error callback argument */

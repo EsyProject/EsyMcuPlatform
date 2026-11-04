@@ -116,3 +116,15 @@ void esy_hb_dma_handle_irq(uint32_t dreq, uint8_t channel) {
     (void)dreq;
     (void)channel;
 }
+
+esy_err_t esy_hb_dma_retire_from_isr(const void *owner, uint32_t dreq,
+                                     uint8_t channel) {
+    (void)owner; (void)dreq; (void)channel;
+    return ESY_ERR_NOT_SUPPORTED;
+}
+
+esy_err_t esy_hb_dma_abort_from_isr(const void *owner, uint32_t dreq,
+                                    uint8_t channel) {
+    (void)owner; (void)dreq; (void)channel;
+    return ESY_ERR_NOT_SUPPORTED;
+}

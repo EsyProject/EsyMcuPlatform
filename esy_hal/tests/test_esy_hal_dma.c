@@ -296,18 +296,21 @@ void test_registered_dma_transfer_holds_reference_until_completion(void) {
   TEST_ASSERT_EQUAL_UINT32(1u, usage_count);
 
   platform_test_complete_dma(false);
-  TEST_ASSERT_EQUAL_UINT32(0u, probe.calls);
-  TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_EQUAL_UINT32(1u, probe.calls);
+  TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&dma.device, &usage_count));
+  TEST_ASSERT_EQUAL_UINT32(0u, usage_count);
+
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
   platform_test_set_dma_results(ESY_OK, ESY_ERR_TIMEOUT, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_hal_dma_poll(&dma));
+  platform_test_complete_dma(true);
+  TEST_ASSERT_EQUAL_UINT32(1u, probe.calls);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
   TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&dma.device, &usage_count));
   TEST_ASSERT_EQUAL_UINT32(1u, usage_count);
-  TEST_ASSERT_EQUAL_UINT32(0u, probe.calls);
   platform_test_set_dma_results(ESY_OK, ESY_OK, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
-  TEST_ASSERT_EQUAL_UINT32(1u, probe.calls);
-  TEST_ASSERT_EQUAL_INT32(
-      ESY_OK, esy_device_get_usage_count(&dma.device, &usage_count));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_abort(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(&dma.device, &usage_count));
   TEST_ASSERT_EQUAL_UINT32(0u, usage_count);
 }
 
@@ -390,7 +393,7 @@ void test_dma_init_rejects_pico_routes_sharing_one_physical_channel(void) {
   TEST_ASSERT_FALSE(dma.initialized);
 }
 
-void test_dma_error_priority_and_failed_retirement_preserve_storage(void) {
+void test_dma_error_stop_failure_retains_storage_until_explicit_abort(void) {
   esy_dma_t dma = {0};
   uint32_t done = 0u, error = 0u, half = 0u;
   esy_dma_config_t transfer = {
@@ -401,30 +404,58 @@ void test_dma_error_priority_and_failed_retirement_preserve_storage(void) {
   };
   init_dma(&dma);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
-  platform_test_half_complete_dma();
-  platform_test_complete_dma(false);
-  platform_test_complete_dma(true);
-  platform_test_set_dma_busy(true);
   platform_test_set_dma_results(ESY_OK, ESY_ERR_TIMEOUT, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_hal_dma_poll(&dma));
+  platform_test_complete_dma(true);
   TEST_ASSERT_EQUAL_UINT32(0u, done + half + error);
   TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_deinit(&dma));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_prepare(&dma, &transfer));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_set_trans_count(
       &dma, TEST_TX_DREQ, TEST_TX_CHANNEL, 1u, true));
-  platform_test_set_dma_busy(false);
   platform_test_set_dma_results(ESY_OK, ESY_OK, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
-  TEST_ASSERT_EQUAL_UINT32(1u, error);
-  TEST_ASSERT_EQUAL_UINT32(0u, done + half);
-  TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
-  TEST_ASSERT_EQUAL_UINT32(1u, error);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_abort(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_EQUAL_UINT32(0u, done + half + error);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
 }
 
-void test_dma_circular_notifications_coalesce_until_error_termination(void) {
+void test_dma_irq_retires_and_delivers_terminal_callback_automatically_once(void) {
+  esy_dma_t dma = {0};
+  uint32_t completed = 0u;
+  esy_dma_config_t transfer = {
+      .src = "abc", .length = 3u, .inner = k_channels[0],
+      .callback = dma_callback, .callback_arg = &completed,
+  };
+  init_dma(&dma);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
+  platform_test_complete_dma(false);
+  TEST_ASSERT_EQUAL_UINT32(1u, completed);
+  TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  platform_test_complete_dma(false);
+  TEST_ASSERT_EQUAL_UINT32(1u, completed);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
+}
+
+void test_dma_failed_abort_retains_prepared_state_for_explicit_retry(void) {
+  esy_dma_t dma = {0};
+  esy_dma_config_t transfer = {
+      .src = "abc", .length = 3u, .inner = k_channels[0],
+  };
+  init_dma(&dma);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_prepare(&dma, &transfer));
+  platform_test_set_dma_results(ESY_OK, ESY_ERR_TIMEOUT, ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT,
+      esy_hal_dma_abort(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_TRUE(dma.runtime[0].prepared);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_prepare(&dma, &transfer));
+  platform_test_set_dma_results(ESY_OK, ESY_OK, ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_hal_dma_abort(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
+}
+
+void test_dma_circular_notifications_are_immediate_and_error_is_terminal(void) {
   esy_dma_t dma = {0};
   uint32_t done = 0u, half = 0u, error = 0u;
   esy_dma_config_t transfer = {
@@ -438,14 +469,11 @@ void test_dma_circular_notifications_coalesce_until_error_termination(void) {
   platform_test_half_complete_dma();
   platform_test_half_complete_dma();
   platform_test_complete_dma(false);
-  TEST_ASSERT_EQUAL_UINT32(0u, done + half);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
   TEST_ASSERT_EQUAL_UINT32(1u, done);
-  TEST_ASSERT_EQUAL_UINT32(1u, half);
+  TEST_ASSERT_EQUAL_UINT32(2u, half);
   TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->dma_abort_calls);
   TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
   platform_test_complete_dma(true);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
   TEST_ASSERT_EQUAL_UINT32(1u, error);
   TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
 }
@@ -497,11 +525,6 @@ void test_dma_chain_rejects_without_modifying_prepared_routes(void) {
                    esy_hal_dma_chain_to(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL, 2u));
 }
 
-void test_dma_poll_rejects_invalid_owner(void) {
-  esy_dma_t dma = {0};
-  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_dma_poll(NULL));
-  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_dma_poll(&dma));
-}
 
 void test_dma_competing_controllers_preserve_prepared_request_and_callback(void) {
   esy_dma_t first = {0}, second = {0};
@@ -530,21 +553,70 @@ void test_dma_competing_controllers_preserve_prepared_request_and_callback(void)
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start(&first, 1u));
   TEST_ASSERT_EQUAL_PTR(&first, platform_test_state()->last_dma_owner);
   platform_test_set_dma_busy(true);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&second));
-  init_dma(&second);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_deinit(&second));
   platform_test_set_dma_busy(false);
   platform_test_complete_dma(false);
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_prepare(&second, &transfer));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&first));
   TEST_ASSERT_EQUAL_UINT32(1u, first_done);
   TEST_ASSERT_EQUAL_UINT32(0u, second_done);
   TEST_ASSERT_NULL(platform_test_state()->dma_owners[TEST_TX_CHANNEL]);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&second, &transfer));
   platform_test_complete_dma(false);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&second));
   TEST_ASSERT_EQUAL_UINT32(1u, second_done);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&first));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&second));
+}
+
+typedef struct {
+  esy_dma_t *dma;
+  esy_dma_config_t *transfer;
+  unsigned calls;
+} dma_idle_callback_probe_t;
+
+static void dma_inspect_idle_during_callback(void *arg) {
+  dma_idle_callback_probe_t *probe = arg;
+  ++probe->calls;
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(probe->dma));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_deinit(probe->dma));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_abort(
+      probe->dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_prepare(probe->dma, probe->transfer));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_start(probe->dma, 1u));
+}
+
+void test_dma_is_idle_includes_prepared_transfer_and_native_callback_execution(void) {
+  esy_dma_t dma = {0};
+  esy_dma_config_t transfer = {
+      .src = "abc", .length = 3u, .inner = k_channels[0],
+      .callback = dma_inspect_idle_during_callback,
+      .half_callback = dma_inspect_idle_during_callback,
+      .error_callback = dma_inspect_idle_during_callback,
+  };
+  dma_idle_callback_probe_t probe = {.dma = &dma, .transfer = &transfer};
+  transfer.callback_arg = &probe;
+  transfer.half_callback_arg = &probe;
+  transfer.error_callback_arg = &probe;
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(NULL));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(&dma));
+  init_dma(&dma);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  platform_test_set_dma_busy(true);
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(&dma));
+  platform_test_set_dma_busy(false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_prepare(&dma, &transfer));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start(&dma, 1u));
+  platform_test_half_complete_dma();
+  platform_test_complete_dma(false);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL_UINT32(2u, probe.calls);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
+  platform_test_complete_dma(true);
+  TEST_ASSERT_EQUAL_UINT32(3u, probe.calls);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(&dma));
 }
 
 void test_dma_physical_aliases_conflict_between_distinct_controller_routes(void) {
@@ -628,7 +700,6 @@ void test_dma_peripheral_claim_blocks_generic_prepare_and_survives_idle_abort(vo
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_prepare(&dma, &transfer));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_abort(
       &dma, TEST_TX_DREQ, TEST_TX_CHANNEL));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
   TEST_ASSERT_EQUAL_PTR(&peripheral_owner,
                         platform_test_state()->dma_owners[TEST_TX_CHANNEL]);
   TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->dma_abort_calls);
@@ -684,4 +755,35 @@ void test_dma_competing_prepare_releases_only_the_rejected_controllers_graph_ref
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_unregister_device(&second));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&first));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&second));
+}
+
+void test_dma_without_half_irq_support_accepts_terminal_only_and_rejects_half_requests(void) {
+  esy_dma_t dma = {0};
+  uint32_t complete = 0u, half = 0u;
+  esy_dma_config_t transfer = {
+      .src = "abc", .dst = (void *)0x1000u, .length = 3u,
+      .inner = k_channels[0], .callback = dma_callback, .callback_arg = &complete,
+  };
+  init_dma(&dma);
+  platform_test_set_dma_half_supported(false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
+  TEST_ASSERT_NULL(platform_test_state()->submitted_dma.half_callback);
+  TEST_ASSERT_NULL(platform_test_state()->submitted_dma.half_callback_arg);
+  platform_test_complete_dma(false);
+  TEST_ASSERT_EQUAL_UINT32(1u, complete);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+
+  transfer.half_callback = dma_callback;
+  transfer.half_callback_arg = &half;
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_dma_prepare(&dma, &transfer));
+  TEST_ASSERT_EQUAL_UINT32(1u, platform_test_state()->driver_prepare_calls);
+  TEST_ASSERT_NULL(platform_test_state()->dma_owners[TEST_TX_CHANNEL]);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL_UINT32(0u, half);
+
+  transfer.half_callback = NULL;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
+  platform_test_complete_dma(false);
+  TEST_ASSERT_EQUAL_UINT32(2u, complete);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
 }

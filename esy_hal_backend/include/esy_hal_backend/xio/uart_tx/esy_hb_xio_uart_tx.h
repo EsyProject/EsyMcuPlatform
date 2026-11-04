@@ -43,7 +43,7 @@ extern "C" {
  * No dynamic memory allocation is performed.
  * Initialize the complete handle with {0} before its first direction init.
  * TX and RX may then own separate slots of the same handle. One task/core owner
- * serializes init/deinit, I/O and polling for both directions. Never copy or
+ * serializes init/deinit, I/O for both directions. Never copy or
  * clear live storage or callbacks. A repeated TX init returns STATE unchanged.
  * A failed first TX init retains no program/SM and may be retried. The pin must
  * exist on the selected chip and lie in GPIO 0..31.
@@ -70,7 +70,7 @@ esy_err_t esy_hb_xio_uart_tx_init(esy_uart_t *uart,
  *
  * Waits for FIFO space and then for physical drain, including the last stop
  * bit. A success permits releasing the source and suspending this direction.
- * One task/core serializes this call with DMA, poll, busy checks and lifecycle;
+ * One task/core serializes this call with DMA, busy checks and lifecycle;
  * it is not ISR-safe and has no hard execution-time bound. Keep the PIO clock
  * and state machine enabled. An already disabled SM returns STATE before send.
  *
@@ -106,6 +106,10 @@ bool esy_hb_xio_uart_tx_is_busy(esy_uart_t *uart);
  * must be provided by the caller. This function does not allocate memory.
  *
  * @param[in] uart     UART handle
+ * Completion/error is delivered automatically from a native IRQ after memory
+ * access retires. No caller progress function or OS dependency is required.
+ * Callbacks are bounded/nonblocking and cannot reenter I/O or lifecycle.
+ *
  * @param[in] dma_cfg  DMA configuration
  * @retval ESY_OK  Successfully started
  * @retval <0      Error code
@@ -127,25 +131,21 @@ uint8_t esy_hb_xio_uart_tx_get_pin(esy_uart_t *uart);
  *
  * The storage for @p uart itself is not freed.
  * Stop producers and finish callback retirement before this task-owner call.
- * Active DMA or undrained physical TX leaves the direction unchanged: complete
- * owner polling or abort, then keep checking is_busy until false before retrying.
+ * Active DMA or undrained physical TX leaves the direction unchanged: await
+ * IRQ completion or abort, then check is_busy until false before retrying.
  * Abort alone does not discard queued bytes. Otherwise cleanup clears the TX slot,
  * preserves RX, and permits TX reinitialization. An unused TX slot is a no-op.
  *
  * @param[in,out] uart  UART handle (private backend context is cleared/reset)
+ * @return OK after complete cleanup; BUSY or native failure retains the
+ * direction and backing storage for retry. Never clear retained context.
  */
-void esy_hb_xio_uart_tx_deinit(esy_uart_t *uart);
+esy_err_t esy_hb_xio_uart_tx_deinit(esy_uart_t *uart);
 
 /** @brief Task-owner cancellation; success retires native DMA and callbacks.
  * Failure retains caller storage for retry. Queued PIO bytes may still transmit.
  */
 esy_err_t esy_hb_xio_uart_tx_abort_dma(esy_uart_t *uart);
-
-/** @brief Retire published terminal IRQ events before notifying the owner.
- * One direction is checked per call; SDK abort and callback time contribute.
- * Never call from ISR or callbacks. Unconfigured directions are harmless.
- */
-esy_err_t esy_hb_xio_uart_tx_poll(esy_uart_t *uart);
 
 #ifdef __cplusplus
 }

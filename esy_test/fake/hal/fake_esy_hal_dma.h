@@ -13,8 +13,11 @@
  * stream aliases or move data. Up to 32 configured routes across live handles
  * share bounded static counter storage. Handle runtime holds lifecycle/callback
  * state. Deinit releases its slots only after transfers are aborted/completed.
- * IRQ entry publishes completion for active matching pairs; owner poll retires
- * terminal state before task-context callbacks. Generic chaining is unsupported. Keep owners alive while fake operations can
+ * IRQ injection automatically retires active matching pairs and invokes their
+ * completion/error callbacks on the injecting test thread. Failed native-stop
+ * simulation retains ownership for explicit task abort; no terminal callback
+ * is delivered while storage is unsafe.
+ * Generic chaining is unsupported. Keep owners alive while fake operations can
  * inspect them. Fixture reset discards registrations without dereferencing owners
  * and invalidates all counter state.
  */
@@ -41,6 +44,12 @@ void fake_esy_hal_dma_reset(void);
  */
 void fake_esy_hal_dma_set_prepare_result(esy_err_t ret);
 
+/** @brief Select native half-transfer support (default true).
+ * When false, prepare rejects a non-NULL half_callback with NOT_SUPPORTED
+ * before changing transfer state. Ordinary finite completion stays available.
+ */
+void fake_esy_hal_dma_set_half_supported(bool supported);
+
 /**
  * @brief Set the result returned by start APIs.
  */
@@ -51,18 +60,24 @@ void fake_esy_hal_dma_set_start_result(esy_err_t ret);
  */
 void fake_esy_hal_dma_set_start_single_result(esy_err_t ret);
 
-/** @brief Inject task-side retirement failure; success permits poll/abort retry. */
+/** @brief Inject native-stop/abort failure; success permits explicit abort retry. */
 void fake_esy_hal_dma_set_abort_result(esy_err_t result);
 
 /** @brief Inject a control error without changing prepared/started state. */
 void fake_esy_hal_dma_set_control_result(esy_err_t result);
 
 /**
- * @brief Publish a transfer error for an active owner/pair, without notification.
+ * @brief Inject an error IRQ and attempt automatic terminal delivery.
  * @return ESY_OK, INVALID_ARG for unknown pair, or STATE for an idle route.
  */
 esy_err_t fake_esy_hal_dma_signal_error(esy_dma_t *dma, uint32_t dreq,
                                        uint8_t channel);
+
+/** @brief Inject an immediate nonterminal half notification.
+ * @return OK, INVALID_ARG for unknown owner/route, or STATE when inactive.
+ */
+esy_err_t fake_esy_hal_dma_signal_half(esy_dma_t *dma, uint32_t dreq,
+                                      uint8_t channel);
 
 /**
  * @brief Set remaining beat count for one owner's configured routing pair.

@@ -104,7 +104,7 @@ void test_esy_hal_xio_spi_dma_completes_xio_board_metadata(void) {
 
   init_xio_spi(&spi);
 
-  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_xio_spi_transfer_dma(
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_spi_transfer_dma(
                                       &spi, &tx_dma, &rx_dma, NULL, NULL));
 
   const platform_test_state_t *state = platform_test_state();
@@ -147,10 +147,10 @@ void test_esy_hal_xio_spi_default_deinit_and_half_duplex_paths(void) {
   init_xio_spi(&spi);
   TEST_ASSERT_EQUAL_INT32(
       ESY_ERR_INVALID_ARG,
-      esy_hal_xio_spi_transfer_dma(NULL, &tx_dma, &rx_dma, NULL, NULL));
-  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_xio_spi_transfer_dma(
+      esy_hal_spi_transfer_dma(NULL, &tx_dma, &rx_dma, NULL, NULL));
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_spi_transfer_dma(
                                       &spi, &tx_dma, NULL, NULL, NULL));
-  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_xio_spi_transfer_dma(
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_spi_transfer_dma(
                                       &spi, NULL, &rx_dma, NULL, NULL));
 
   esy_hal_xio_spi_deinit(&spi);
@@ -241,25 +241,29 @@ void test_esy_hal_xio_spi_device_unregisters_before_start(void) {
   TEST_ASSERT_NULL(esy_hal_spi_get_device(&spi));
 }
 
-void test_xio_spi_exposes_poll_abort_without_hardware_context_queries(void) {
+void test_xio_spi_exposes_abort_without_hardware_context_queries(void) {
   esy_spi_t spi = {0};
   size_t remaining;
   init_xio_spi(&spi);
-  TEST_ASSERT_NOT_NULL(spi.ops->poll);
   TEST_ASSERT_NOT_NULL(spi.ops->abort);
   TEST_ASSERT_NOT_NULL(spi.ops->is_busy);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_abort(&spi));
   TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
       esy_hal_spi_get_dma_trans_count_remaining(&spi, &remaining, NULL));
   platform_test_set_dma_busy(true);
-  esy_hal_xio_spi_deinit(&spi);
-  TEST_ASSERT_NOT_NULL(spi.ops->poll);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_xio_spi_deinit(&spi));
+  TEST_ASSERT_NOT_NULL(spi.ops);
   platform_test_set_dma_busy(false);
-  esy_hal_xio_spi_deinit(&spi);
+  platform_test_set_spi_cleanup_result(ESY_ERR_BUSY);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_xio_spi_deinit(&spi));
+  TEST_ASSERT_NOT_NULL(spi.ops);
+  platform_test_set_spi_cleanup_result(ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_deinit(&spi));
   TEST_ASSERT_NULL(spi.ops);
   init_xio_spi(&spi);
-  esy_hal_xio_spi_deinit(&spi);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_deinit(&spi));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_deinit(&spi));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_xio_spi_deinit(NULL));
 }
 
 void test_xio_spi_pm_preserves_dma_started_before_device_registration(void) {
@@ -284,7 +288,7 @@ void test_xio_spi_pm_preserves_dma_started_before_device_registration(void) {
   init_xio_spi(&spi);
   esy_xio_spi_config_t config = platform_test_state()->last_xio_spi_config;
   TEST_ASSERT_EQUAL(ESY_OK,
-      esy_hal_xio_spi_transfer_dma(&spi, &tx, NULL, NULL, NULL));
+      esy_hal_spi_transfer_dma(&spi, &tx, NULL, NULL, NULL));
   platform_test_set_dma_busy(true);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_register_device(
       &binding, &spi, &registry, &registration, &config));
@@ -397,12 +401,21 @@ void test_xio_dma_convenience_uses_shared_descriptor_validation_before_dispatch(
       .transfer_size = ESY_DMA_TRANSFER_SIZE_32};
   init_xio_spi(&spi);
   TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
-      esy_hal_xio_spi_transfer_dma(&spi, &dma, NULL, NULL, NULL));
+      esy_hal_spi_transfer_dma(&spi, &dma, NULL, NULL, NULL));
   TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_transfer_dma_calls);
   dma.transfer_size = ESY_DMA_TRANSFER_SIZE_16;
   dma.length = 3u;
   TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
-      esy_hal_xio_spi_transfer_dma(&spi, &dma, NULL, NULL, NULL));
+      esy_hal_spi_transfer_dma(&spi, &dma, NULL, NULL, NULL));
   TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_transfer_dma_calls);
+  esy_hal_xio_spi_deinit(&spi);
+}
+
+void test_xio_spi_reports_dma_capability_without_requiring_an_os(void) {
+  esy_spi_t spi = {0};
+  uint32_t caps = 0u;
+  init_xio_spi(&spi);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_get_caps(&spi, &caps));
+  TEST_ASSERT_BITS_HIGH(ESY_SPI_CAP_DMA_TRANSFER | ESY_SPI_CAP_TRANSFER16, caps);
   esy_hal_xio_spi_deinit(&spi);
 }

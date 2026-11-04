@@ -44,6 +44,13 @@ static size_t remaining(esy_dma_t *dma, const esy_dma_inner_config_t *route) {
 
 static void count_completion(void *arg) { ++*(uint32_t *)arg; }
 
+static void inspect_fake_dma_callback_idle(void *arg) {
+  esy_dma_t *dma = arg;
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(dma));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_deinit(dma));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_abort(dma, 15u, 4u));
+}
+
 void setUp(void) { fake_esy_hal_dma_reset(); }
 void tearDown(void) {}
 
@@ -244,7 +251,7 @@ void test_fake_dma_control_trigger_uses_owner_pair_and_requires_prepare(void) {
   TEST_ASSERT_EQUAL_UINT32(0u, remaining(&dma, &k_shared_request_routes[1]));
 }
 
-void test_fake_dma_irq_waits_for_owner_poll_before_terminal_callback(void) {
+void test_fake_dma_irq_retires_automatically_and_terminal_callback_runs_once(void) {
   esy_dma_t dma = {0};
   uint16_t samples[8] = {0};
   uint32_t callbacks = 0u;
@@ -255,19 +262,14 @@ void test_fake_dma_irq_waits_for_owner_poll_before_terminal_callback(void) {
   transfer.callback_arg = &callbacks;
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
   esy_hal_dma_handle_irq(15u, 4u);
-  TEST_ASSERT_EQUAL_UINT32(0u, callbacks);
-  TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, 15u, 4u));
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_deinit(&dma));
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_dma_set_trans_count(&dma, 15u, 4u, 1u, true));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
   TEST_ASSERT_EQUAL_UINT32(1u, callbacks);
   TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, 15u, 4u));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
+  esy_hal_dma_handle_irq(15u, 4u);
   TEST_ASSERT_EQUAL_UINT32(1u, callbacks);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
 }
 
-void test_fake_dma_error_beats_completion_and_retirement_failure_is_retryable(void) {
+void test_fake_dma_failed_error_stop_retains_transfer_until_explicit_abort(void) {
   esy_dma_t dma = {0};
   uint16_t samples[8] = {0};
   uint32_t done = 0u, error = 0u;
@@ -280,15 +282,17 @@ void test_fake_dma_error_beats_completion_and_retirement_failure_is_retryable(vo
   transfer.error_callback_arg = &error;
   TEST_ASSERT_EQUAL(ESY_ERR_STATE, fake_esy_hal_dma_signal_error(&dma, 15u, 4u));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
-  esy_hal_dma_handle_irq(15u, 4u);
-  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_dma_signal_error(&dma, 15u, 4u));
   fake_esy_hal_dma_set_abort_result(ESY_ERR_TIMEOUT);
-  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_hal_dma_poll(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_dma_signal_error(&dma, 15u, 4u));
   TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_hal_dma_abort(&dma, 15u, 4u));
   TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, 15u, 4u));
   TEST_ASSERT_EQUAL_UINT32(0u, error + done);
   fake_esy_hal_dma_set_abort_result(ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_poll(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_abort(&dma, 15u, 4u));
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL_UINT32(0u, error + done);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
+  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_dma_signal_error(&dma, 15u, 4u));
   TEST_ASSERT_EQUAL_UINT32(1u, error);
   TEST_ASSERT_EQUAL_UINT32(0u, done);
 }
@@ -312,4 +316,52 @@ void test_fake_dma_control_failure_preserves_prepared_transfer(void) {
   TEST_ASSERT_EQUAL_UINT32(8u, remaining(&dma, &k_shared_request_routes[0]));
   fake_esy_hal_dma_set_control_result(ESY_OK);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start(&dma, 1u));
+}
+
+void test_fake_dma_idle_tracks_prepared_half_and_callback_borrows(void) {
+  esy_dma_t dma = {0};
+  uint16_t samples[8] = {0};
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(NULL));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(&dma));
+  init_controller(&dma, k_shared_request_routes, 1u);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  esy_dma_config_t transfer = transfer_for(&k_shared_request_routes[0], samples,
+                                           sizeof(samples));
+  transfer.callback = inspect_fake_dma_callback_idle;
+  transfer.callback_arg = &dma;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, fake_esy_hal_dma_signal_half(NULL, 15u, 4u));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, fake_esy_hal_dma_signal_half(&dma, 15u, 4u));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_prepare(&dma, &transfer));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_FALSE(esy_hal_dma_is_busy(&dma, 15u, 4u));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start(&dma, 1u));
+  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_dma_signal_half(&dma, 15u, 4u));
+  TEST_ASSERT_TRUE(esy_hal_dma_is_busy(&dma, 15u, 4u));
+  esy_hal_dma_handle_irq(15u, 4u);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
+}
+
+void test_fake_dma_without_half_irq_support_rejects_only_explicit_half_requests(void) {
+  esy_dma_t dma = {0};
+  uint16_t samples[4] = {0};
+  uint32_t callbacks = 0u;
+  init_controller(&dma, k_shared_request_routes, 1u);
+  fake_esy_hal_dma_set_half_supported(false);
+  esy_dma_config_t transfer = transfer_for(
+      &k_shared_request_routes[0], samples, sizeof(samples));
+  transfer.half_callback = count_completion;
+  transfer.half_callback_arg = &callbacks;
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_dma_prepare(&dma, &transfer));
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL_UINT32(0u, remaining(&dma, &k_shared_request_routes[0]));
+  transfer.half_callback = NULL;
+  transfer.callback = count_completion;
+  transfer.callback_arg = &callbacks;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_start_single(&dma, &transfer));
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, fake_esy_hal_dma_signal_half(&dma, 15u, 4u));
+  esy_hal_dma_handle_irq(15u, 4u);
+  TEST_ASSERT_EQUAL_UINT32(1u, callbacks);
+  TEST_ASSERT_TRUE(esy_hal_dma_is_idle(&dma));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_dma_deinit(&dma));
 }

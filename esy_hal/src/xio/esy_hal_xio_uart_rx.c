@@ -26,8 +26,8 @@ esy_err_t esy_hal_xio_uart_rx_init(
   return ret;
 }
 
-void esy_hal_xio_uart_rx_deinit(esy_uart_t *uart) {
-  esy_hb_xio_uart_rx_deinit(uart);
+esy_err_t esy_hal_xio_uart_rx_deinit(esy_uart_t *uart) {
+  return esy_hb_xio_uart_rx_deinit(uart);
 }
 
 uint8_t esy_hal_xio_uart_rx_pin(esy_uart_t *uart) {
@@ -36,9 +36,6 @@ uint8_t esy_hal_xio_uart_rx_pin(esy_uart_t *uart) {
 
 esy_err_t esy_hal_xio_uart_rx_abort_dma(esy_uart_t *uart) {
   return esy_hb_xio_uart_rx_abort_dma(uart);
-}
-esy_err_t esy_hal_xio_uart_rx_poll(esy_uart_t *uart) {
-  return esy_hb_xio_uart_rx_poll(uart);
 }
 
 int32_t esy_hal_xio_uart_rx_receive_blocking(esy_uart_t *uart,

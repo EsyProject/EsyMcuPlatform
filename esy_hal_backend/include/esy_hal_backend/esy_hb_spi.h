@@ -44,13 +44,17 @@ extern "C" {
  * this lifecycle. ESP32 detects an already-created master driver context, but
  * the SDK offers no complete public query for a bus without master devices or
  * pre-existing slave drivers; excluding these owners is a caller obligation. SPI1/flash is unsupported there. STM32F4 accepts only 8 or
- * 16 data bits; other nonzero widths through 16 return NOT_SUPPORTED.
+ * 16 data bits; other nonzero widths through 16 return NOT_SUPPORTED. STM32F4
+ * master clock requests below PCLK/256 return NOT_SUPPORTED before reservation
+ * or board/native changes; a representable divider never exceeds the requested
+ * SCK. The peripheral clock must remain stable through claim/init and each I/O
+ * operation. Slave SCK is supplied externally and is not divider-limited here.
  *
  * @param[in,out] handle Zero-state or already-reserved retired handle.
  * @param[in] config Configuration to validate before any board/native effects.
  * @return OK on reservation; BUSY if another handle owns it; INVALID_ARG for
- * invalid configuration; NOT_SUPPORTED for unsupported frame width/controller;
- * STATE for an active, copied or foreign handle. Failure changes no pins.
+ * invalid configuration; NOT_SUPPORTED for unsupported frame width/controller
+ * or an unrepresentable STM32F4 master clock request; STATE for an active, copied or foreign handle. Failure changes no pins.
  */
 esy_err_t esy_hb_spi_claim(esy_spi_t *handle, const esy_spi_config_t *config);
 
@@ -74,7 +78,7 @@ extern esy_err_t esy_hb_spi_init(esy_spi_t *handle,
  * @return OK when native state is retired; BUSY while DMA/native work remains;
  * STATE for copied/foreign handles; a negative SDK cleanup status on failure.
  * @note Task-only and serialized. Failure preserves resources and storage for
- * poll/abort or deinit retry. Success permits board pin reset and then release,
+ * abort or deinit retry. Success permits board pin reset and then release,
  * or native init with the same reservation during PM resume.
  */
 extern esy_err_t esy_hb_spi_deinit(esy_spi_t *handle);
@@ -193,21 +197,23 @@ extern int32_t esy_hb_spi_transfer16_blocking(esy_spi_t *handle,
  * @retval ESY_OK Success (transfer started)
  * @retval <0     Error code (returns @ref ESY_ERR_NOT_SUPPORTED if unsupported)
  *
- * @note HAL validates caller-provided memory endpoints before board completion.
- *       Its single-direction placeholder has a NULL memory endpoint, with the
- *       same nonzero byte length and element width as the present direction.
- *       Pico/STM32 route the placeholder to a fixed dummy/discard word; ESP32
- *       accepts the placeholder or an absent configuration and uses the SDK's
- *       missing-buffer mode. ESP32 requires equal direction lengths, 8-bit
- *       elements for frames up to 8 bits or 16-bit otherwise, complete aligned
- *       elements, noncircular mode and at most 4094 bytes. RX up to four bytes
- *       uses the SDK's inline word; longer RX requires a multiple of four bytes
- *       (at most 4092), with other lengths returning NOT_SUPPORTED. These RX
- *       bounds also apply to ESP32 blocking APIs. Invalid descriptors reject
- *       before CS/SDK side effects. ESP32 completes inline and reports
- *       zero bytes for an absent memory endpoint; no callback follows rejection.
- *       A successful terminal result requires both present directions to have
- *       consumed their requested transfer counts.
+ * @note Pico/STM32F4 complete automatically in native IRQ context. Both DMA
+ * routes retire before the terminal callback. Master success also certifies
+ * the final wire tail and CS release; slave completion follows the final RX
+ * frame without waiting for a future external clock/CS edge. HAL supplies a
+ * fixed dummy/discard endpoint for the absent direction. Callback arguments,
+ * handle and buffers remain borrowed through terminal callback return or
+ * successful abort. Callbacks are bounded/nonblocking and must not reenter
+ * lifecycle/I/O or free borrowed storage. No OS or caller progress hook exists.
+ * @note ESP32 returns NOT_SUPPORTED without starting DMA/retaining callbacks.
+ * @note A native stop failure retains storage for explicit owner-side abort.
+ * Wire-tail fault reports DMA_ERROR and disables SPI until deinit/init. IRQ
+ * tail iteration budgets derive from actual clock dividers: Pico one frame,
+ * STM32F4 two frames, plus register synchronization. Loop/bus costs contribute
+ * to ISR duration; these are not elapsed-time guarantees. Slave BSY is not an
+ * end-of-frame condition. Master DMA rejects NOT_SUPPORTED before claims or CS
+ * if its divider-derived budget exceeds 8192 inspections; the IRQ path always
+ * enforces that fixed maximum. Blocking transfer rates remain unchanged.
  */
 extern esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *handle,
                                              esy_dma_config_t *tx_dma_config,
@@ -235,6 +241,10 @@ extern esy_err_t esy_hb_spi_get_dma_trans_count_remaining(const esy_spi_t *handl
 /**
  * @brief Set SPI clock rate at runtime (optional).
  *
+ * STM32F4 master operation selects the fastest native divider whose SCK does
+ * not exceed speed_hz. Requests below PCLK/256 return NOT_SUPPORTED without
+ * changing the live configuration. Keep the peripheral clock stable per call.
+ *
  * @param[in] handle   SPI handle
  * @param[in] speed_hz Target clock rate in Hz
  *
@@ -246,15 +256,11 @@ extern esy_err_t esy_hb_spi_set_speed(esy_spi_t *handle, uint32_t speed_hz);
 /**
  * @brief Abort the current transaction from the serialized owner task.
  *
- * STM32F4 success retires owned DMA streams, callbacks and wire activity before
- * releasing CS; cancellation emits no terminal callback. Failure retains the
- * transaction and borrowed buffers for poll/abort retry. Other ports may return
- * NOT_SUPPORTED. Never call this operation from a DMA callback.
- *
- * @param[in] handle SPI handle
- *
- * @retval ESY_OK Success
- * @retval <0     Error code
+ * Success cancels both native routes without a terminal callback. Failure
+ * retains the transaction and storage for explicit abort retry. Call outside
+ * IRQ/callbacks, serialized with owner lifecycle. Pico cancellation disables
+ * its SPI instance; deinit/init is required before another operation. ESP32
+ * returns NOT_SUPPORTED. No normal completion needs caller processing.
  */
 extern esy_err_t esy_hb_spi_abort(esy_spi_t *handle);
 
@@ -263,7 +269,7 @@ extern esy_err_t esy_hb_spi_abort(esy_spi_t *handle);
  *
  * Uses @ref esy_spi_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  handle   SPI handle
@@ -298,19 +304,10 @@ extern esy_err_t esy_hb_spi_get_phys_index(const esy_spi_t *handle, uint8_t *out
  */
 extern void esy_hb_spi_handle_irq(esy_spi_t *handle);
 /**
- * @brief Advance deferred DMA retirement from the serialized owner task.
- * @param[in,out] handle Initialized SPI handle, borrowed through callback return.
- * @return ESY_OK when progress succeeds (possibly still active), INVALID_ARG for
- * an invalid handle, or BUSY while cleanup retains the transfer and buffers.
- * Never call from ISR or concurrently with I/O/lifecycle. Pico/STM32 require
- * periodic calls after DMA acceptance; terminal callbacks execute here.
- */
-extern esy_err_t esy_hb_spi_poll(esy_spi_t *handle);
-/**
  * @brief Query pending completion, both DMA directions and wire from the owner.
  * @param[in] handle Initialized SPI handle; NULL/uninitialized returns false.
  * @return true while the transfer still owns storage or hardware; false if idle.
- * Serialize against I/O, poll and lifecycle. This call does not advance cleanup.
+ * Serialize against I/O and lifecycle. This call does not advance cleanup.
  */
 extern bool esy_hb_spi_is_busy(esy_spi_t *handle);
 

@@ -10,7 +10,7 @@
 
 #define FAKE_DMA_MAX_ROUTES 32u
 
-enum { FAKE_DMA_DONE = 1u, FAKE_DMA_ERROR = 4u };
+enum { FAKE_DMA_DONE = 1u, FAKE_DMA_HALF = 2u, FAKE_DMA_ERROR = 4u };
 
 typedef struct {
   esy_dma_t *owner;
@@ -27,11 +27,26 @@ typedef struct {
   esy_err_t start_single_result;
   esy_err_t abort_result;
   esy_err_t control_result;
+  bool reject_half_callback;
 } fake_esy_hal_dma_ctx_t;
 
 /* Test-owned, single-threaded state. Runtime flags/callbacks belong to the
  * caller's handle; this bounded table stores only fake counters and widths. */
 static fake_esy_hal_dma_ctx_t s_ctx;
+
+static bool callbacks_running(const esy_dma_t *dma) {
+  for (uint32_t i = 0u; i < dma->channel_count; ++i)
+    if (dma->runtime[i].callback_running) return true;
+  return false;
+}
+
+static void deliver_callback(esy_dma_channel_runtime_t *runtime,
+                              esy_dma_callback_t callback, void *arg) {
+  if (callback == NULL) return;
+  runtime->callback_running = true;
+  callback(arg);
+  runtime->callback_running = false;
+}
 
 static fake_dma_route_t *find_route(const esy_dma_t *dma, uint32_t dreq,
                                     uint8_t channel) {
@@ -62,12 +77,11 @@ static void clear_transfer(esy_dma_channel_runtime_t *runtime) {
   runtime->circular = false;
   runtime->prepared = false;
   runtime->started = false;
-  atomic_store(&runtime->events, 0u);
 }
 
 static esy_err_t trigger_route(esy_dma_channel_runtime_t *runtime,
                                 bool trigger_now) {
-  if (runtime->started || atomic_load(&runtime->events) != 0u) return ESY_ERR_BUSY;
+  if (callbacks_running(runtime->owner) || runtime->started) return ESY_ERR_BUSY;
   if (!runtime->prepared) return ESY_ERR_STATE;
   if (s_ctx.control_result != ESY_OK) return s_ctx.control_result;
   if (trigger_now) {
@@ -111,7 +125,10 @@ esy_err_t esy_hal_dma_init(esy_dma_t *dma,
     dma->runtime[index].dreq = config->channels[index].dreq;
     dma->runtime[index].channel = config->channels[index].channel;
     dma->runtime[index].resource_id = index;
-    atomic_init(&dma->runtime[index].events, 0u);
+    atomic_init(&dma->runtime[index].ref_held, 0u);
+    atomic_init(&dma->runtime[index].prepared, 0u);
+    atomic_init(&dma->runtime[index].started, 0u);
+    atomic_init(&dma->runtime[index].callback_running, 0u);
     ++index;
   }
   dma->initialized = true;
@@ -122,7 +139,8 @@ esy_err_t esy_hal_dma_deinit(esy_dma_t *dma) {
   if (dma == NULL || !dma->initialized) return ESY_ERR_INVALID_ARG;
   if (dma->device.registry != NULL) return ESY_ERR_STATE;
   for (uint32_t i = 0u; i < dma->channel_count; ++i) {
-    if (dma->runtime[i].prepared || dma->runtime[i].started)
+    if (dma->runtime[i].prepared || dma->runtime[i].started ||
+        dma->runtime[i].callback_running)
       return ESY_ERR_BUSY;
   }
   for (size_t i = 0u; i < FAKE_DMA_MAX_ROUTES; ++i) {
@@ -137,6 +155,10 @@ void fake_esy_hal_dma_reset(void) { memset(&s_ctx, 0, sizeof(s_ctx)); }
 
 void fake_esy_hal_dma_set_prepare_result(esy_err_t ret) {
   s_ctx.prepare_result = ret;
+}
+
+void fake_esy_hal_dma_set_half_supported(bool supported) {
+  s_ctx.reject_half_callback = !supported;
 }
 
 void fake_esy_hal_dma_set_start_result(esy_err_t ret) {
@@ -166,6 +188,8 @@ esy_err_t esy_hal_dma_prepare(esy_dma_t *dma, esy_dma_config_t *config) {
   fake_dma_route_t *route = find_route(dma, config->inner.dreq,
                                       config->inner.channel);
   if (route == NULL) return ESY_ERR_INVALID_ARG;
+  if (s_ctx.reject_half_callback && config->half_callback != NULL)
+    return ESY_ERR_NOT_SUPPORTED;
   size_t unit_bytes;
   switch (config->transfer_size) {
     case ESY_DMA_TRANSFER_SIZE_8: unit_bytes = sizeof(uint8_t); break;
@@ -176,6 +200,7 @@ esy_err_t esy_hal_dma_prepare(esy_dma_t *dma, esy_dma_config_t *config) {
   if (config->length == 0u || config->length % unit_bytes != 0u)
     return ESY_ERR_INVALID_ARG;
   esy_dma_channel_runtime_t *runtime = &dma->runtime[route->route_index];
+  if (callbacks_running(dma)) return ESY_ERR_BUSY;
   if (runtime->prepared || runtime->started) return ESY_ERR_BUSY;
   if (s_ctx.prepare_result != ESY_OK) return s_ctx.prepare_result;
   route->remaining = config->length / unit_bytes;
@@ -195,6 +220,7 @@ esy_err_t esy_hal_dma_prepare(esy_dma_t *dma, esy_dma_config_t *config) {
 esy_err_t esy_hal_dma_start(esy_dma_t *dma, uint32_t route_mask) {
   if (dma == NULL || !dma->initialized || route_mask == 0u ||
       (route_mask >> dma->channel_count) != 0u) return ESY_ERR_INVALID_ARG;
+  if (callbacks_running(dma)) return ESY_ERR_BUSY;
   for (uint8_t i = 0u; i < dma->channel_count; ++i) {
     if ((route_mask & (1u << i)) == 0u) continue;
     if (find_route_index(dma, i) == NULL) return ESY_ERR_STATE;
@@ -226,7 +252,10 @@ esy_err_t esy_hal_dma_start_single(esy_dma_t *dma,
 esy_err_t esy_hal_dma_abort(esy_dma_t *dma, uint32_t dreq, uint8_t channel) {
   fake_dma_route_t *route = find_route(dma, dreq, channel);
   if (route == NULL) return ESY_ERR_INVALID_ARG;
-  if (s_ctx.abort_result != ESY_OK) return s_ctx.abort_result;
+  if (callbacks_running(dma)) return ESY_ERR_BUSY;
+  if (s_ctx.abort_result != ESY_OK) {
+    return s_ctx.abort_result;
+  }
   clear_transfer(&dma->runtime[route->route_index]);
   return ESY_OK;
 }
@@ -234,6 +263,17 @@ esy_err_t esy_hal_dma_abort(esy_dma_t *dma, uint32_t dreq, uint8_t channel) {
 bool esy_hal_dma_is_busy(const esy_dma_t *dma, uint32_t dreq, uint8_t channel) {
   fake_dma_route_t *route = find_route(dma, dreq, channel);
   return route != NULL && dma->runtime[route->route_index].started;
+}
+
+bool esy_hal_dma_is_idle(const esy_dma_t *dma) {
+  if (dma == NULL || !dma->initialized) return false;
+  for (uint32_t i = 0u; i < dma->channel_count; ++i) {
+    const esy_dma_channel_runtime_t *runtime = &dma->runtime[i];
+    if (runtime->prepared || runtime->started || runtime->ref_held ||
+        runtime->callback_running)
+      return false;
+  }
+  return true;
 }
 
 esy_err_t esy_hal_dma_bind_irq_to_core(esy_dma_t *dma, uint8_t irq_index,
@@ -296,27 +336,26 @@ esy_err_t esy_hal_dma_chain_to(esy_dma_t *dma, uint32_t dreq, uint8_t channel,
   return result == ESY_OK ? ESY_ERR_NOT_SUPPORTED : result;
 }
 
-esy_err_t esy_hal_dma_poll(esy_dma_t *dma) {
-  if (dma == NULL || !dma->initialized) return ESY_ERR_INVALID_ARG;
-  esy_err_t first_error = ESY_OK;
-  for (uint8_t i = 0u; i < dma->channel_count; ++i) {
-    esy_dma_channel_runtime_t *runtime = &dma->runtime[i];
-    uint32_t events = atomic_load(&runtime->events);
-    if (events == 0u) continue;
-    bool terminal = (events & FAKE_DMA_ERROR) || !runtime->circular;
-    if (terminal && s_ctx.abort_result != ESY_OK) {
-      first_error = s_ctx.abort_result;
-      continue;
-    }
-    esy_dma_callback_t callback = events & FAKE_DMA_ERROR
+/* Fake IRQ injection uses the same automatic terminal ownership model as
+ * native Pico/STM32 IRQ dispatch. A failed stop retains storage until abort. */
+static void dispatch_event(esy_dma_channel_runtime_t *runtime, unsigned event) {
+  if (!runtime->started) return;
+  bool terminal = event == FAKE_DMA_ERROR ||
+      (!runtime->circular && event == FAKE_DMA_DONE);
+  if (terminal) {
+    if (s_ctx.abort_result != ESY_OK) return;
+    esy_dma_callback_t callback = event == FAKE_DMA_ERROR
         ? runtime->error_cb : runtime->complete_cb;
-    void *arg = events & FAKE_DMA_ERROR
-        ? runtime->error_arg : runtime->complete_arg;
-    if (terminal) clear_transfer(runtime);
-    else atomic_store(&runtime->events, 0u);
+    void *arg = event == FAKE_DMA_ERROR ? runtime->error_arg : runtime->complete_arg;
+    runtime->callback_running = true;
+    clear_transfer(runtime);
     if (callback != NULL) callback(arg);
+    runtime->callback_running = false;
+  } else if (event == FAKE_DMA_HALF) {
+    deliver_callback(runtime, runtime->half_cb, runtime->half_arg);
+  } else {
+    deliver_callback(runtime, runtime->complete_cb, runtime->complete_arg);
   }
-  return first_error;
 }
 
 void fake_esy_hal_dma_set_abort_result(esy_err_t result) { s_ctx.abort_result = result; }
@@ -328,7 +367,18 @@ esy_err_t fake_esy_hal_dma_signal_error(esy_dma_t *dma, uint32_t dreq,
   if (route == NULL) return ESY_ERR_INVALID_ARG;
   esy_dma_channel_runtime_t *runtime = &dma->runtime[route->route_index];
   if (!runtime->started) return ESY_ERR_STATE;
-  atomic_fetch_or(&runtime->events, FAKE_DMA_ERROR);
+  dispatch_event(runtime, FAKE_DMA_ERROR);
+  return ESY_OK;
+}
+
+esy_err_t fake_esy_hal_dma_signal_half(esy_dma_t *dma, uint32_t dreq,
+                                      uint8_t channel) {
+  fake_dma_route_t *route = find_route(dma, dreq, channel);
+  if (route == NULL) return ESY_ERR_INVALID_ARG;
+  esy_dma_channel_runtime_t *runtime = &dma->runtime[route->route_index];
+  if (!runtime->started) return ESY_ERR_STATE;
+  if (s_ctx.reject_half_callback) return ESY_ERR_NOT_SUPPORTED;
+  dispatch_event(runtime, FAKE_DMA_HALF);
   return ESY_OK;
 }
 
@@ -341,6 +391,6 @@ void esy_hal_dma_handle_irq(uint32_t dreq, uint8_t channel) {
     if (!runtime->started || runtime->dreq != dreq || runtime->channel != channel)
       continue;
     route->remaining = runtime->circular ? route->reload_count : 0u;
-    atomic_fetch_or(&runtime->events, FAKE_DMA_DONE);
+    dispatch_event(runtime, FAKE_DMA_DONE);
   }
 }

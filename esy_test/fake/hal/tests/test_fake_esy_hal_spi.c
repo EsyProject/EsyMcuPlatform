@@ -86,12 +86,11 @@ void test_failed_submission_default_rejects_without_borrow_or_callback(void) {
       record_completion, &completion));
   TEST_ASSERT_FALSE(esy_hal_spi_is_busy(&spi));
   TEST_ASSERT_NULL(fake_esy_hal_spi_get_borrowed_tx(&spi));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
   fake_esy_hal_spi_complete_last_dma(&spi);
   TEST_ASSERT_EQUAL_UINT(0u, completion.calls);
 }
 
-void test_retained_failure_preserves_buffers_across_poll_abort_failures_then_notifies_once(void) {
+void test_retained_failure_preserves_buffers_across_abort_failures_then_notifies_once(void) {
   esy_spi_t spi = {0};
   uint8_t tx[8] = {0}, rx[8] = {0}, replacement[8] = {0};
   esy_dma_config_t tx_dma = {.src = tx, .length = sizeof(tx)};
@@ -99,7 +98,6 @@ void test_retained_failure_preserves_buffers_across_poll_abort_failures_then_not
   completion_t completion = {0}, rejected = {0};
   fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_IO);
   fake_esy_hal_spi_set_failed_submit_retains_borrow(true);
-  fake_esy_hal_spi_set_poll_result(ESY_ERR_BUSY);
   fake_esy_hal_spi_set_abort_result(ESY_ERR_IO);
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_spi_transfer_dma(&spi, &tx_dma,
       &rx_dma, record_completion, &completion));
@@ -109,18 +107,14 @@ void test_retained_failure_preserves_buffers_across_poll_abort_failures_then_not
   tx_dma.src = replacement;
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_spi_transfer_dma(&spi, &tx_dma,
       NULL, record_completion, &rejected));
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_spi_poll(&spi));
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_spi_abort(&spi));
   TEST_ASSERT_TRUE(esy_hal_spi_is_busy(&spi));
   TEST_ASSERT_EQUAL_PTR(tx, fake_esy_hal_spi_get_borrowed_tx(&spi));
   TEST_ASSERT_EQUAL_UINT(0u, completion.calls);
-  TEST_ASSERT_EQUAL_UINT(1u, fake_esy_hal_spi_get_poll_count(&spi));
   TEST_ASSERT_EQUAL_UINT(1u, fake_esy_hal_spi_get_abort_count(&spi));
-  fake_esy_hal_spi_set_poll_result(ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
+  fake_esy_hal_spi_complete_last_dma(&spi);
   TEST_ASSERT_EQUAL_UINT(1u, completion.calls);
   TEST_ASSERT_EQUAL(ESY_SPI_DMA_TRANSFER_DMA_ERROR, completion.status);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
   fake_esy_hal_spi_complete_last_dma(&spi);
   TEST_ASSERT_EQUAL_UINT(1u, completion.calls);
   TEST_ASSERT_EQUAL_UINT(0u, rejected.calls);
@@ -138,11 +132,9 @@ void test_successful_abort_releases_retained_failure_without_a_late_callback(voi
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_abort(&spi));
   TEST_ASSERT_FALSE(esy_hal_spi_is_busy(&spi));
   TEST_ASSERT_NULL(fake_esy_hal_spi_get_borrowed_tx(&spi));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
   fake_esy_hal_spi_complete_last_dma(&spi);
   TEST_ASSERT_EQUAL_UINT(0u, completion.calls);
   fake_esy_hal_spi_reset();
-  TEST_ASSERT_EQUAL_UINT(0u, fake_esy_hal_spi_get_poll_count(&spi));
   TEST_ASSERT_EQUAL_UINT(0u, fake_esy_hal_spi_get_abort_count(&spi));
   TEST_ASSERT_NULL(fake_esy_hal_spi_get_borrowed_tx(&spi));
 }
@@ -357,4 +349,28 @@ void test_pm_write_requires_the_active_direct_parent_and_transitioning_requester
   TEST_ASSERT_EQUAL(ESY_ERR_STATE,
       esy_hal_spi_write_blocking_for_pm(&spi, &requester, data, sizeof(data)));
   TEST_ASSERT_EQUAL_UINT(1u, fake_esy_hal_spi_get_tx_count(&spi));
+}
+
+void test_spi_irq_completes_automatically_and_abort_suppresses_late_completion(void) {
+  esy_spi_t spi = {0};
+  uint8_t data[8] = {0};
+  esy_dma_config_t tx = {.src = data, .length = sizeof(data)};
+  completion_t completion = {0};
+  fake_esy_hal_spi_set_transfer_dma_async(true);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_transfer_dma(&spi, &tx, NULL,
+      record_completion, &completion));
+  TEST_ASSERT_EQUAL_UINT32(0u, completion.calls);
+  TEST_ASSERT_TRUE(esy_hal_spi_is_busy(&spi));
+  TEST_ASSERT_EQUAL_PTR(data, fake_esy_hal_spi_get_borrowed_tx(&spi));
+  fake_esy_hal_spi_complete_last_dma(&spi);
+  TEST_ASSERT_EQUAL_UINT32(1u, completion.calls);
+  TEST_ASSERT_FALSE(esy_hal_spi_is_busy(&spi));
+  TEST_ASSERT_NULL(fake_esy_hal_spi_get_borrowed_tx(&spi));
+  fake_esy_hal_spi_complete_last_dma(&spi);
+  TEST_ASSERT_EQUAL_UINT32(1u, completion.calls);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_transfer_dma(&spi, &tx, NULL,
+      record_completion, &completion));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_abort(&spi));
+  fake_esy_hal_spi_complete_last_dma(&spi);
+  TEST_ASSERT_EQUAL_UINT32(1u, completion.calls);
 }

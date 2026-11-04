@@ -41,6 +41,7 @@ typedef struct
     uint8_t    phys_index;
     bool       dma_event_pending;
     bool       dma_error_pending;
+    bool       dma_half_pending;
 } fake_pwm_slot_t;
 
 typedef struct {
@@ -48,6 +49,8 @@ typedef struct {
     esy_err_t dma_result;
     esy_err_t abort_result;
     esy_err_t deinit_result;
+    esy_err_t disable_result;
+    bool reject_half_callback;
 } fake_esy_hal_pwm_ctx_t;
 
 static fake_esy_hal_pwm_ctx_t s_ctx = {.dma_result = ESY_ERR_NOT_SUPPORTED};
@@ -93,7 +96,6 @@ static const esy_pwm_vtable_t k_fake_pwm_ops = {
         .enable_trigger_output = esy_hal_pwm_enable_trigger_output,
         .dma_output = esy_hal_pwm_dma_output,
         .abort_dma = esy_hal_pwm_abort_dma,
-        .poll = esy_hal_pwm_poll,
         .set_wrap_handler = esy_hal_pwm_set_wrap_handler,
         .suspend = esy_hal_pwm_suspend,
         .resume = esy_hal_pwm_resume,
@@ -147,6 +149,7 @@ static void fake_pwm_clear_dma(fake_pwm_slot_t *slot)
     slot->dma_error_arg = NULL;
     slot->dma_event_pending = false;
     slot->dma_error_pending = false;
+    slot->dma_half_pending = false;
 }
 
 esy_err_t esy_hal_pwm_abort_dma(esy_pwm_t *pwm)
@@ -156,22 +159,27 @@ esy_err_t esy_hal_pwm_abort_dma(esy_pwm_t *pwm)
     if (slot == NULL || !slot->initialized) return ESY_ERR_NOT_SUPPORTED;
     if (slot->callback_running) return ESY_ERR_BUSY;
     if (!slot->dma_active) return ESY_OK;
-    if (s_ctx.abort_result != ESY_OK) return s_ctx.abort_result;
+    if (s_ctx.abort_result != ESY_OK) {
+        return s_ctx.abort_result;
+    }
     slot->enabled = false;
     fake_pwm_clear_dma(slot);
     return ESY_OK;
 }
 
-esy_err_t esy_hal_pwm_poll(esy_pwm_t *pwm)
+static esy_err_t fake_pwm_dispatch(esy_pwm_t *pwm)
 {
     if (pwm == NULL) return ESY_ERR_INVALID_ARG;
     fake_pwm_slot_t *slot = fake_pwm_get_slot(pwm, false);
     if (slot == NULL || !slot->initialized) return ESY_ERR_NOT_SUPPORTED;
     if (slot->callback_running) return ESY_ERR_BUSY;
-    if (!slot->dma_active || !slot->dma_event_pending) return ESY_OK;
+    if (!slot->dma_active || (!slot->dma_event_pending && !slot->dma_half_pending)) return ESY_OK;
+    bool full = slot->dma_event_pending;
     bool error = slot->dma_error_pending;
-    bool terminal = error || !slot->dma_circular;
-    if (terminal && s_ctx.abort_result != ESY_OK) return s_ctx.abort_result;
+    bool terminal = error || (full && !slot->dma_circular);
+    if (terminal && s_ctx.abort_result != ESY_OK) {
+        return s_ctx.abort_result;
+    }
     esy_dma_callback_t callback = error ? slot->dma_error_cb : slot->dma_complete_cb;
     void *arg = error ? slot->dma_error_arg : slot->dma_complete_arg;
     slot->dma_event_pending = false;
@@ -180,7 +188,10 @@ esy_err_t esy_hal_pwm_poll(esy_pwm_t *pwm)
         slot->enabled = false;
     }
     slot->callback_running = true;
-    if (callback != NULL) callback(arg);
+    if (!error && slot->dma_half_pending && slot->dma_half_cb)
+        slot->dma_half_cb(slot->dma_half_arg);
+    slot->dma_half_pending = false;
+    if (full && callback != NULL) callback(arg);
     slot->callback_running = false;
     if (terminal) fake_pwm_clear_dma(slot);
     return ESY_OK;
@@ -230,6 +241,7 @@ esy_err_t esy_hal_pwm_enable(esy_pwm_t *pwm, bool enable)
     fake_pwm_slot_t *slot = fake_pwm_get_slot(pwm, false);
     if (slot == NULL || !slot->initialized) return ESY_ERR_NOT_IMPLEMENTED;
     if (slot->dma_active || slot->callback_running) return ESY_ERR_BUSY;
+    if (!enable && s_ctx.disable_result != ESY_OK) return s_ctx.disable_result;
     slot->enabled = enable;
     return ESY_OK;
 }
@@ -266,6 +278,8 @@ esy_err_t esy_hal_pwm_dma_output(esy_pwm_t *pwm,
         return ESY_ERR_BUSY;
     if (s_ctx.dma_result == ESY_ERR_NOT_SUPPORTED) return s_ctx.dma_result;
     if (dma_cfg->src == NULL || dma_cfg->length == 0u) return ESY_ERR_INVALID_ARG;
+    if (s_ctx.reject_half_callback && dma_cfg->half_callback != NULL)
+        return ESY_ERR_NOT_SUPPORTED;
     slot->dma_active = true;
     slot->dma_circular = loop || dma_cfg->circular;
     slot->dma_complete_cb = dma_cfg->callback;
@@ -396,6 +410,10 @@ void fake_esy_hal_pwm_set_dma_result(esy_err_t result)
     s_ctx.dma_result = result;
 }
 
+void fake_esy_hal_pwm_set_half_supported(bool supported) {
+    s_ctx.reject_half_callback = !supported;
+}
+
 void fake_esy_hal_pwm_set_cleanup_results(esy_err_t abort_result,
                                           esy_err_t deinit_result)
 {
@@ -412,7 +430,7 @@ esy_err_t fake_esy_hal_pwm_queue_dma_event(esy_pwm_t *pwm, bool error)
     if (slot->callback_running) return ESY_ERR_BUSY;
     slot->dma_event_pending = true;
     slot->dma_error_pending |= error;
-    return ESY_OK;
+    return fake_pwm_dispatch(pwm);
 }
 
 bool fake_esy_hal_pwm_is_dma_active(const esy_pwm_t *pwm) {
@@ -423,4 +441,23 @@ bool fake_esy_hal_pwm_is_dma_active(const esy_pwm_t *pwm) {
 void fake_esy_hal_pwm_set_device(esy_pwm_t *pwm, const struct esy_device_s *device) {
     fake_pwm_slot_t *slot = fake_pwm_get_slot(pwm, false);
     if (slot != NULL) slot->device = device;
+}
+
+void fake_esy_hal_pwm_set_disable_result(esy_err_t result) { s_ctx.disable_result = result; }
+
+esy_err_t fake_esy_hal_pwm_queue_half_event(esy_pwm_t *pwm) {
+    if (pwm == NULL) return ESY_ERR_INVALID_ARG;
+    fake_pwm_slot_t *slot = fake_pwm_get_slot(pwm, false);
+    if (!slot || !slot->initialized || !slot->dma_active) return ESY_ERR_STATE;
+    if (slot->callback_running) return ESY_ERR_BUSY;
+    if (s_ctx.reject_half_callback) return ESY_ERR_NOT_SUPPORTED;
+    slot->dma_half_pending = true;
+    return fake_pwm_dispatch(pwm);
+}
+
+
+bool esy_hal_pwm_is_idle(const esy_pwm_t *pwm) {
+    const fake_pwm_slot_t *slot = fake_pwm_get_slot((esy_pwm_t *)pwm, false);
+    return slot && slot->initialized && !slot->dma_active &&
+        !slot->callback_running && !slot->enabled;
 }

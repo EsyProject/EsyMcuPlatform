@@ -16,12 +16,11 @@
 #include "esy_common/defs/peripheral/esy_uart_defs.h"          /* esy_uart_t */
 
 /**
- * @note DMA is finite-only on the built-in Pico XIO backend. IRQs publish
- * completion/error events; the serialized owner must keep calling
- * esy_hal_uart_poll() until terminal retirement or successful abort. Native
- * pending/peer callbacks retire before notifications and borrowed storage are
- * released. Failed cleanup keeps the handle/buffers borrowed for retry.
- * XIO terminal callbacks run in the polling task and must not reenter UART APIs.
+ * @note DMA is finite-only on the built-in Pico XIO backend. Native IRQs retire
+ * source/destination access and deliver completion/error callbacks automatically.
+ * No OS dependency or caller progress operation is required. Callbacks must be
+ * bounded/nonblocking and must not reenter UART I/O or lifecycle. A stuck DMA
+ * retains caller storage until explicit control-context abort succeeds.
  * Completion retires DMA source access; queued PIO bytes may still transmit.
  * TX busy remains true until physical drain, including the last stop bit.
  * Blocking TX waits for that drain before returning. Check busy repeatedly
@@ -29,7 +28,7 @@
  * report busy while the provider discards an old FIFO-starvation indication.
  * Runtime PM skips undrained TX; system suspend returns BUSY. Keep the PIO clock
  * fixed and the state machine enabled until idle. All busy checks use the same
- * serialized task/core owner as I/O, poll, lifecycle and PM; they are not ISR APIs.
+ * serialized task/core owner as I/O, lifecycle and PM; they are not ISR APIs.
  * Circular ordinary DMA is rejected before starting. Half notifications are
  * not provided by the Pico generic DMA backend.
  * On Pico, selected state machines are reserved in the SDK claim table. The
@@ -139,12 +138,18 @@ bool esy_hal_xio_uart_is_busy(esy_uart_t *uart, bool is_tx);
  * This function stops TX/RX programs (if active), releases XIO resources,
  * and clears backend state. Calling it multiple times is safe.
  * Registered handles, tracked DMA, callbacks or undrained physical TX leave the
- * complete handle unchanged. Poll/abort DMA and check TX busy until false, then
+ * complete handle unchanged. Await DMA completion or abort and check TX busy, then
  * retry from the serialized owner. Aborting DMA does not discard queued bytes.
  *
  * @param[in,out] uart UART handle.
+ * @return OK after both directions retire; BUSY for active DMA/wire or retained
+ * native claims; STATE while registered; or native cleanup failure. Failure may
+ * leave one direction released: I/O becomes unavailable, backing storage remains
+ * owned, and only deinit retry is permitted before another init. Never clear the
+ * retained handle. PM cleanup failure faults its registered graph because a
+ * partially released device cannot remain ACTIVE.
  */
-void esy_hal_xio_uart_deinit(esy_uart_t *uart);
+esy_err_t esy_hal_xio_uart_deinit(esy_uart_t *uart);
 
 #ifdef __cplusplus
 } /* extern "C" */

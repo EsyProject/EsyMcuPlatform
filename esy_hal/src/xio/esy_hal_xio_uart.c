@@ -38,10 +38,12 @@ bool esy_hal_xio_uart_is_busy(esy_uart_t *uart, bool is_tx) {
   return false;
 }
 
-static void xio_uart_hardware_deinit(esy_uart_t *uart) {
-  /* Both TX and RX deinit paths are no-op safe in the HAL backend. */
-  esy_hal_xio_uart_tx_deinit(uart);
-  esy_hal_xio_uart_rx_deinit(uart);
+static esy_err_t xio_uart_hardware_deinit(esy_uart_t *uart) {
+  /* Attempt both independent directions; retain every failed native context. */
+  esy_err_t tx = esy_hal_xio_uart_tx_deinit(uart);
+  esy_err_t rx = esy_hal_xio_uart_rx_deinit(uart);
+  if (tx != ESY_OK || rx != ESY_OK) uart->ops = NULL;
+  return tx != ESY_OK ? tx : rx;
 }
 
 static esy_err_t xio_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
@@ -49,10 +51,13 @@ static esy_err_t xio_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
                : esy_hal_xio_uart_rx_abort_dma(uart);
 }
 
-static esy_err_t xio_uart_poll(esy_uart_t *uart) {
-  esy_err_t tx = esy_hal_xio_uart_tx_poll(uart);
-  esy_err_t rx = esy_hal_xio_uart_rx_poll(uart);
-  return tx != ESY_OK ? tx : rx;
+
+static esy_err_t xio_uart_get_caps(const esy_uart_t *uart, uint32_t *caps) {
+  if (uart == NULL || caps == NULL) return ESY_ERR_INVALID_ARG;
+  *caps = 0u;
+  if (uart->ctx[0]) *caps |= ESY_UART_CAP_TX_DMA;
+  if (uart->ctx[1]) *caps |= ESY_UART_CAP_RX_DMA;
+  return ESY_OK;
 }
 
 static const esy_uart_vtable_t k_xio_uart_tx_ops = {
@@ -60,7 +65,7 @@ static const esy_uart_vtable_t k_xio_uart_tx_ops = {
     .send_dma = esy_hal_xio_uart_tx_send_dma,
     .is_busy = esy_hal_xio_uart_is_busy,
     .abort_dma = xio_uart_abort_dma,
-    .poll = xio_uart_poll,
+    .get_caps = xio_uart_get_caps,
 };
 
 static const esy_uart_vtable_t k_xio_uart_rx_ops = {
@@ -69,7 +74,7 @@ static const esy_uart_vtable_t k_xio_uart_rx_ops = {
     .is_readable = esy_hal_xio_uart_rx_is_readable,
     .is_busy = esy_hal_xio_uart_is_busy,
     .abort_dma = xio_uart_abort_dma,
-    .poll = xio_uart_poll,
+    .get_caps = xio_uart_get_caps,
 };
 
 static const esy_uart_vtable_t k_xio_uart_duplex_ops = {
@@ -80,21 +85,21 @@ static const esy_uart_vtable_t k_xio_uart_duplex_ops = {
     .is_readable = esy_hal_xio_uart_rx_is_readable,
     .is_busy = esy_hal_xio_uart_is_busy,
     .abort_dma = xio_uart_abort_dma,
-    .poll = xio_uart_poll,
+    .get_caps = xio_uart_get_caps,
 };
 
 static esy_err_t xio_uart_hardware_init(esy_uart_t *uart,
     const esy_xio_uart_config_t *tx, const esy_xio_uart_config_t *rx) {
+  if (uart->ctx[0] != NULL || uart->ctx[1] != NULL) return ESY_ERR_STATE;
   esy_err_t ret = ESY_OK;
   uart->ops = NULL;
-  memset(uart->ctx, 0, sizeof(uart->ctx));
   if (tx != NULL) ret = esy_hal_xio_uart_tx_init(uart, tx);
   if (ret == ESY_OK && rx != NULL)
     ret = esy_hal_xio_uart_rx_init(uart, rx);
   if (ret != ESY_OK) {
-    xio_uart_hardware_deinit(uart);
+    esy_err_t cleanup = xio_uart_hardware_deinit(uart);
     uart->ops = NULL;
-    return ret;
+    return cleanup != ESY_OK ? cleanup : ret;
   }
   uart->ops = tx != NULL ? (rx != NULL ? &k_xio_uart_duplex_ops : &k_xio_uart_tx_ops)
                          : &k_xio_uart_rx_ops;
@@ -110,13 +115,17 @@ esy_err_t esy_hal_xio_uart_init(esy_uart_t *uart,
   return xio_uart_hardware_init(uart, tx_cfg, rx_cfg);
 }
 
-void esy_hal_xio_uart_deinit(esy_uart_t *uart) {
-  if (!uart || (esy_hal_uart_runtime(uart)->device != NULL)) return;
+esy_err_t esy_hal_xio_uart_deinit(esy_uart_t *uart) {
+  if (uart == NULL) return ESY_OK;
+  if (esy_hal_uart_runtime(uart)->device != NULL) return ESY_ERR_STATE;
   if (atomic_load_explicit(&esy_hal_uart_runtime(uart)->tx_dma.state, memory_order_acquire) != 0u ||
-      atomic_load_explicit(&esy_hal_uart_runtime(uart)->rx_dma.state, memory_order_acquire) != 0u) return;
-  if (esy_hal_xio_uart_tx_is_busy(uart)) return;
-  xio_uart_hardware_deinit(uart);
+      atomic_load_explicit(&esy_hal_uart_runtime(uart)->rx_dma.state, memory_order_acquire) != 0u)
+    return ESY_ERR_BUSY;
+  if (esy_hal_xio_uart_tx_is_busy(uart)) return ESY_ERR_BUSY;
+  esy_err_t result = xio_uart_hardware_deinit(uart);
+  if (result != ESY_OK) return result;
   memset(uart, 0, sizeof(*uart));
+  return ESY_OK;
 }
 
 static esy_err_t xio_uart_device_pm_action(esy_device_t *device,
@@ -138,7 +147,10 @@ static esy_err_t xio_uart_device_pm_action(esy_device_t *device,
           esy_hal_uart_is_busy(binding->base.uart, false)) {
         return ESY_ERR_BUSY;
       }
-      xio_uart_hardware_deinit(binding->base.uart);
+      ret = xio_uart_hardware_deinit(binding->base.uart);
+      /* Either direction may already be gone; the graph cannot retain ACTIVE
+       * after partial cleanup. Preserve native state and fault for recovery. */
+      if (ret != ESY_OK) return ESY_ERR_STATE;
       binding->base.suspended = true;
       return ESY_OK;
 

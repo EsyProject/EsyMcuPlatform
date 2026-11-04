@@ -10,12 +10,14 @@
  *
  * Zero-initialize the handle before first init. All public calls and completion
  * callbacks run on one externally serialized owner context, never an ISR.
- * DMA callbacks only publish atomic completion. No task or memory is allocated.
+ * DMA callbacks only publish atomic completion; unsupported DMA uses synchronous
+ * send_timeout with a finite request budget. No task or memory is allocated.
  * The caller exclusively owns UART TX while initialized; independent HAL
  * RX stream use is allowed. The backend must report physical wire and retained
  * DMA ownership through its busy query. A failed submit may retain a transfer;
- * process keeps its queue slot/data until terminal poll or successful abort.
- * Stop producers before shutdown. Call process periodically.
+ * process keeps its queue slot/data until terminal processing or successful abort.
+ * Stop producers before shutdown. Drive process regularly while work remains
+ * active, using next_wait_ms to pace DMA retirement and physical wire checks.
  * Completion may submit, but must not recursively process, stop, abort, init or deinit.
  * Successful submission copies the descriptor and borrows immutable data through
  * its exactly-once completion callback. Failure borrows nothing and gives no callback.
@@ -33,6 +35,8 @@ extern "C" {
 #endif
 /** @brief Opaque handle capacity, including internal alignment slack. */
 #define ESY_UART_TX_SCHEDULER_STORAGE_BYTES 384u
+/** @brief Default finite synchronous fallback budget, in milliseconds. */
+#define ESY_UART_TX_SCHEDULER_DEFAULT_TIMEOUT_MS 1000u
 /** @brief Caller-owned handle; must outlive successful deinit. */
 typedef struct {
   alignas(max_align_t) uint8_t bytes[ESY_UART_TX_SCHEDULER_STORAGE_BYTES];
@@ -54,6 +58,7 @@ typedef struct {
   size_t length; /**< 1..INT32_MAX, additionally limited by the backend. */
   esy_uart_tx_scheduler_tx_callback_t on_complete; /**< Required terminal callback. */
   void *user_data; /**< Borrowed callback context. */
+  uint32_t timeout_ms; /**< Synchronous fallback budget: 0 selects default; otherwise 1..INT32_MAX ms. */
 } esy_uart_tx_scheduler_tx_request_t;
 /** @brief Caller-owned descriptor storage, valid until deinit succeeds. */
 typedef struct {
@@ -72,7 +77,7 @@ esy_err_t esy_uart_tx_scheduler_submit(esy_uart_tx_scheduler_t *scheduler,
     const esy_uart_tx_scheduler_tx_request_t *request);
 /** @brief Advance at most one terminal request and start at most one transfer.
  * Success waits for both terminal DMA notification and physical wire idle.
- * Polls UART retirement once. A failed submission that remains busy gets at
+ * DMA completion is automatic. A failed DMA submission that remains busy gets at
  * most one abort attempt per process call; its original error is completed only
  * after retirement. Cleanup failure retains the request for retry without resend.
  * request_abort also retires ordinary accepted TX through at most one abort
@@ -81,8 +86,8 @@ esy_err_t esy_uart_tx_scheduler_submit(esy_uart_tx_scheduler_t *scheduler,
  * An already observed DMA terminal result with idle wire wins before an abort
  * succeeds. Once abort succeeds, CANCELLED wins later terminal observations.
  * Failed retained submissions always report their original ERROR, even during
- * explicit abort. Explicit cleanup may complete despite a failed owner poll;
- * otherwise that poll error propagates with resources retained.
+ * explicit abort. Explicit cleanup may complete despite a failed HAL processing call;
+ * synchronous fallback failures borrow no buffer after the HAL call returns.
  * @return OK, INVALID_ARG for NULL, STATE if inactive/recursive, or the UART
  * retirement/abort error. Keep processing retained requests after cleanup failure. */
 esy_err_t esy_uart_tx_scheduler_process(esy_uart_tx_scheduler_t *scheduler);
@@ -104,6 +109,11 @@ esy_err_t esy_uart_tx_scheduler_request_stop(esy_uart_tx_scheduler_t *scheduler,
  * @return OK; INVALID_ARG for NULL; STATE if inactive or during process/callback.
  */
 esy_err_t esy_uart_tx_scheduler_request_abort(esy_uart_tx_scheduler_t *scheduler);
+/** @brief Relative owner wait: queued work 0 ms, active work 1 ms, idle UINT32_MAX.
+ * Query after process. The owner arranges submission scheduling and paces active
+ * processing with its monotonic clock; repeated queries do not advance time.
+ */
+uint32_t esy_uart_tx_scheduler_next_wait_ms(const esy_uart_tx_scheduler_t *scheduler);
 /** @brief Owner-only query: any queued or active request, including pending callbacks. */
 bool esy_uart_tx_scheduler_is_busy(const esy_uart_tx_scheduler_t *scheduler);
 /** @brief Release an idle handle; does not stop or alter RX.

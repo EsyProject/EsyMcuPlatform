@@ -156,23 +156,15 @@ static void complete_inline(esy_uart_t *device) {
   fake_esy_hal_uart_complete_last_dma(device);
 }
 
-static void complete_during_poll(esy_uart_t *device) {
-  fake_esy_hal_uart_find(device)->poll_hook = NULL;
-  fake_esy_hal_uart_complete_last_dma(device);
-}
-
-void test_owner_poll_failure_preserves_request_until_terminal_retirement(void) {
+void test_native_completion_waits_for_owner_callback_delivery_and_fifo_advance(void) {
   init(); submit(); submit();
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&uart);
-  slot->poll_hook = complete_during_poll;
-  slot->poll_result = ESY_ERR_IO;
-  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_uart_tx_scheduler_process(&scheduler));
+  fake_esy_hal_uart_complete_last_dma(&uart);
   TEST_ASSERT_EQUAL_UINT(0u, completed);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
   TEST_ASSERT_TRUE(esy_uart_tx_scheduler_is_busy(&scheduler));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_uart_tx_scheduler_deinit(&scheduler));
-  slot->poll_result = ESY_OK;
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
   TEST_ASSERT_EQUAL_UINT(1u, completed);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
@@ -197,8 +189,8 @@ void test_synchronous_dma_callback_is_deferred_to_next_owner_slice(void) {
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_deinit(&scheduler));
 }
 
-void test_failed_submit_retains_queue_head_until_poll_or_abort_retires_it(void) {
-  for (unsigned retire_with_poll = 0u; retire_with_poll < 2u; ++retire_with_poll) {
+void test_failed_submit_retains_queue_head_until_process_or_abort_retires_it(void) {
+  for (unsigned retire_with_irq = 0u; retire_with_irq < 2u; ++retire_with_irq) {
     completed = 0u;
     init(); submit(); submit(); submit();
     fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&uart);
@@ -225,7 +217,7 @@ void test_failed_submit_retains_queue_head_until_poll_or_abort_retires_it(void) 
     TEST_ASSERT_EQUAL_UINT(0u, completed);
     TEST_ASSERT_EQUAL_UINT32(sends_before + 1u, slot->send_dma_count);
     TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_uart_tx_scheduler_deinit(&scheduler));
-    if (retire_with_poll != 0u) slot->poll_hook = complete_during_poll;
+    if (retire_with_irq != 0u) fake_esy_hal_uart_complete_last_dma(&uart);
     else slot->abort_result = ESY_OK;
     TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
     TEST_ASSERT_EQUAL_UINT(1u, completed);
@@ -298,13 +290,11 @@ void test_abort_request_only_marks_state_and_cancels_one_active_or_queued_reques
   init(); submit(); submit(); submit();
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&uart);
-  const uint32_t polls = slot->poll_count;
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_stop(&scheduler, false));
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_abort(&scheduler));
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_abort(&scheduler));
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_stop(&scheduler, false));
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_stop(&scheduler, true));
-  TEST_ASSERT_EQUAL_UINT32(polls, slot->poll_count);
   TEST_ASSERT_EQUAL_UINT32(0u, slot->abort_count);
   TEST_ASSERT_EQUAL_UINT(0u, completed);
   esy_uart_tx_scheduler_tx_request_t req = request();
@@ -315,7 +305,6 @@ void test_abort_request_only_marks_state_and_cancels_one_active_or_queued_reques
     TEST_ASSERT_EQUAL_UINT(i + 1u, completed);
     TEST_ASSERT_EQUAL(ESY_UART_TX_SCHEDULER_TX_CANCELLED, statuses[i]);
     TEST_ASSERT_EQUAL(ESY_OK, errors[i]);
-    TEST_ASSERT_EQUAL_UINT32(polls + i + 1u, slot->poll_count);
   }
   TEST_ASSERT_EQUAL_UINT32(1u, slot->abort_count);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
@@ -340,10 +329,8 @@ void test_active_abort_failure_retries_without_retiring_or_resubmitting_the_borr
   slot->abort_result = ESY_ERR_IO;
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_abort(&scheduler));
   for (uint32_t i = 0u; i < 2u; ++i) {
-    const uint32_t polls = slot->poll_count;
     TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_uart_tx_scheduler_process(&scheduler));
     TEST_ASSERT_EQUAL_UINT32(i + 1u, slot->abort_count);
-    TEST_ASSERT_EQUAL_UINT32(polls + 1u, slot->poll_count);
     TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
     TEST_ASSERT_EQUAL_UINT(0u, completed);
     TEST_ASSERT_EQUAL_PTR(bytes, slot->last_dma_src);
@@ -470,11 +457,10 @@ void test_explicit_abort_preserves_failed_retained_submission_error_until_idle(v
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_deinit(&scheduler));
 }
 
-void test_explicit_abort_can_retire_normal_dma_even_when_owner_poll_reports_an_error(void) {
+void test_explicit_abort_retires_native_dma_without_a_hal_progress_call(void) {
   init(); submit();
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&uart);
-  slot->poll_result = ESY_ERR_IO;
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_request_abort(&scheduler));
   TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
   TEST_ASSERT_EQUAL_UINT32(1u, slot->abort_count);
@@ -504,4 +490,72 @@ void test_active_abort_and_queued_cancellation_leave_the_rx_stream_independent(v
   TEST_ASSERT_EQUAL_MEMORY(bytes, data, length);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_rx_stream_consume(&uart, length));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_rx_stream_stop(&uart));
+}
+
+void test_active_uart_observes_native_irq_completion_and_preserves_wire_tail(void) {
+  init();
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_uart_tx_scheduler_next_wait_ms(&scheduler));
+  submit();
+  TEST_ASSERT_EQUAL_UINT32(0u, esy_uart_tx_scheduler_next_wait_ms(&scheduler));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_uart_tx_scheduler_next_wait_ms(&scheduler));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT(0u, completed);
+  fake_esy_hal_uart_find(&uart)->keep_tx_busy_after_dma = true;
+  fake_esy_hal_uart_complete_last_dma(&uart);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT(0u, completed);
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_uart_tx_scheduler_next_wait_ms(&scheduler));
+  fake_esy_hal_uart_find(&uart)->tx_busy = false;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT(1u, completed);
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_uart_tx_scheduler_next_wait_ms(&scheduler));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT(1u, completed);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_deinit(&scheduler));
+}
+
+void test_uart_sync_fallback_uses_default_budget_and_defers_success_callback(void) {
+  init(); submit();
+  fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&uart);
+  slot->send_dma_result = ESY_ERR_NOT_SUPPORTED;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
+  TEST_ASSERT_EQUAL_UINT32(1u, slot->send_timeout_count);
+  TEST_ASSERT_EQUAL_UINT32(ESY_UART_TX_SCHEDULER_DEFAULT_TIMEOUT_MS, slot->last_timeout_ms);
+  TEST_ASSERT_EQUAL_UINT(0u, completed);
+  TEST_ASSERT_TRUE(esy_uart_tx_scheduler_is_busy(&scheduler));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+  TEST_ASSERT_EQUAL_UINT(1u, completed);
+  TEST_ASSERT_EQUAL(ESY_UART_TX_SCHEDULER_TX_OK, statuses[0]);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_deinit(&scheduler));
+}
+
+void test_uart_sync_fallback_respects_request_budget_and_reports_short_and_error_results(void) {
+  const int32_t results[] = {2, ESY_ERR_TIMEOUT, ESY_ERR_IO};
+  for (unsigned i = 0u; i < 3u; ++i) {
+    init();
+    esy_uart_tx_scheduler_tx_request_t req = request();
+    req.timeout_ms = 37u;
+    TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_submit(&scheduler, &req));
+    fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&uart);
+    slot->send_dma_result = ESY_ERR_NOT_SUPPORTED;
+    slot->override_send_result = true;
+    slot->send_result = results[i];
+    TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_process(&scheduler));
+    TEST_ASSERT_EQUAL_UINT32(37u, slot->last_timeout_ms);
+    TEST_ASSERT_EQUAL_UINT(i + 1u, completed);
+    TEST_ASSERT_EQUAL(ESY_UART_TX_SCHEDULER_TX_ERROR, statuses[i]);
+    TEST_ASSERT_EQUAL(results[i] < 0 ? results[i] : ESY_ERR_IO, errors[i]);
+    TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_deinit(&scheduler));
+  }
+}
+
+void test_uart_sync_fallback_rejects_unbounded_budget_before_queueing(void) {
+  init();
+  esy_uart_tx_scheduler_tx_request_t req = request();
+  req.timeout_ms = UINT32_MAX;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_uart_tx_scheduler_submit(&scheduler, &req));
+  TEST_ASSERT_FALSE(esy_uart_tx_scheduler_is_busy(&scheduler));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_uart_tx_scheduler_deinit(&scheduler));
 }

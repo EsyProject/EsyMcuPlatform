@@ -9,6 +9,8 @@
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "esp_rom_gpio.h"
+#include "soc/ledc_periph.h"
 #include <string.h>
 
 #define MAX_PWM_CHANNELS 8
@@ -21,6 +23,7 @@ typedef struct {
     uint8_t channel;
     float duty_cycle;
     bool enabled;
+    bool suspended;
     bool channel_configured;
     bool start_low;
     ledc_timer_t timer_num;
@@ -46,6 +49,10 @@ typedef struct {
 /* One externally serialized owner coordinates every channel and shared timer. */
 static esy_hb_pwm_ctx_t s_ctx;
 
+/* LEDC idle is upstream of GPIO-matrix inversion. A native high idle becomes
+ * low for start_low, and remains high for the noninverted polarity. */
+static const uint32_t k_ledc_idle_level = 1u;
+
 static ledc_timer_t get_timer_for_channel(uint8_t channel) {
     return (ledc_timer_t)(channel / PWM_CHANNELS_PER_TIMER);
 }
@@ -56,6 +63,20 @@ static uint32_t duty_to_ledc_duty(float duty_cycle, ledc_timer_bit_t resolution)
     
     uint32_t max_duty = (1 << resolution) - 1;
     return (uint32_t)(duty_cycle * max_duty);
+}
+
+static bool channel_ready(const esy_pwm_esp32_ctx_t *ctx) {
+    return ctx->channel_configured &&
+        !s_ctx.timers[ctx->timer_num].release_pending;
+}
+
+static esy_err_t apply_duty(esy_pwm_esp32_ctx_t *ctx, float duty_cycle) {
+    uint32_t duty = duty_to_ledc_duty(duty_cycle, DEFAULT_PWM_RESOLUTION);
+    if (ledc_set_duty(LEDC_LOW_SPEED_MODE, ctx->ledc_channel, duty) != ESP_OK)
+        return ESY_ERR_FAIL;
+    if (ledc_update_duty(LEDC_LOW_SPEED_MODE, ctx->ledc_channel) != ESP_OK)
+        return ESY_ERR_FAIL;
+    return ESY_OK;
 }
 
 static esy_err_t acquire_timer(ledc_timer_t timer_num, uint32_t freq_hz) {
@@ -162,7 +183,7 @@ esy_err_t esy_hb_pwm_init(esy_pwm_t *pwm, const esy_pwm_config_t *config) {
     }
     ctx->channel_configured = true;
     if (ledc_stop(LEDC_LOW_SPEED_MODE, ctx->ledc_channel,
-                  ctx->start_low ? 0u : 1u) != ESP_OK) {
+                  k_ledc_idle_level) != ESP_OK) {
         err = esy_hb_pwm_deinit(pwm);
         return err == ESY_OK ? ESY_ERR_FAIL : err;
     }
@@ -178,7 +199,8 @@ esy_err_t esy_hb_pwm_deinit(esy_pwm_t *pwm) {
     if (timer->owners == 1u) timer->release_pending = true;
     
     if (ctx->channel_configured &&
-        ledc_stop(LEDC_LOW_SPEED_MODE, ctx->ledc_channel, 0) != ESP_OK)
+        ledc_stop(LEDC_LOW_SPEED_MODE, ctx->ledc_channel,
+                  k_ledc_idle_level) != ESP_OK)
         return ESY_ERR_FAIL;
     if (ctx->wrap_interrupt != NULL) {
         if (esp_intr_free(ctx->wrap_interrupt) != ESP_OK) return ESY_ERR_FAIL;
@@ -201,23 +223,16 @@ esy_err_t esy_hb_pwm_set_duty(esy_pwm_t *pwm, float duty_cycle) {
     
     esy_pwm_esp32_ctx_t *ctx = (esy_pwm_esp32_ctx_t *)pwm->ctx;
     
-    if (duty_cycle < 0.0f || duty_cycle > 1.0f) {
+    if (!(duty_cycle >= 0.0f && duty_cycle <= 1.0f)) {
         return ESY_ERR_INVALID_ARG;
     }
     /* Updating LEDC duty also enables its physical output. Keep disabled
      * channels untouched, as required by the public PWM state contract. */
-    if (!ctx->enabled) return ESY_ERR_STATE;
-    
-    uint32_t duty = duty_to_ledc_duty(duty_cycle, DEFAULT_PWM_RESOLUTION);
-    
-    esp_err_t ret = ledc_set_duty(LEDC_LOW_SPEED_MODE, ctx->ledc_channel, duty);
-    if (ret != ESP_OK) {
-        return ESY_ERR_FAIL;
-    }
-    ret = ledc_update_duty(LEDC_LOW_SPEED_MODE, ctx->ledc_channel);
-    if (ret != ESP_OK) {
-        return ESY_ERR_FAIL;
-    }
+    if (!channel_ready(ctx) || !ctx->enabled || ctx->suspended)
+        return ESY_ERR_STATE;
+
+    esy_err_t ret = apply_duty(ctx, duty_cycle);
+    if (ret != ESY_OK) return ret;
     ctx->duty_cycle = duty_cycle;
     return ESY_OK;
 }
@@ -234,6 +249,7 @@ esy_err_t esy_hb_pwm_set_wrap(esy_pwm_t *pwm, uint32_t freq_hz) {
     esy_pwm_esp32_ctx_t *ctx = (esy_pwm_esp32_ctx_t *)pwm->ctx;
     esy_pwm_esp32_timer_t *timer = &s_ctx.timers[ctx->timer_num];
     if (timer->release_pending) return ESY_ERR_BUSY;
+    if (!ctx->channel_configured) return ESY_ERR_STATE;
     if (timer->freq_hz == freq_hz) return ESY_OK;
     if (timer->owners > 1u) return ESY_ERR_BUSY;
     
@@ -251,22 +267,15 @@ esy_err_t esy_hb_pwm_enable(esy_pwm_t *pwm, bool enable) {
     }
     
     esy_pwm_esp32_ctx_t *ctx = (esy_pwm_esp32_ctx_t *)pwm->ctx;
-    
+    if (!channel_ready(ctx) || ctx->suspended) return ESY_ERR_STATE;
+
     if (enable && !ctx->enabled) {
-        uint32_t duty = duty_to_ledc_duty(ctx->duty_cycle, DEFAULT_PWM_RESOLUTION);
-        esp_err_t ret = ledc_set_duty(LEDC_LOW_SPEED_MODE, ctx->ledc_channel, duty);
-        if (ret != ESP_OK) {
-            return ESY_ERR_FAIL;
-        }
-        
-        ret = ledc_update_duty(LEDC_LOW_SPEED_MODE, ctx->ledc_channel);
-        if (ret != ESP_OK) {
-            return ESY_ERR_FAIL;
-        }
-        
+        esy_err_t ret = apply_duty(ctx, ctx->duty_cycle);
+        if (ret != ESY_OK) return ret;
         ctx->enabled = true;
     } else if (!enable && ctx->enabled) {
-        esp_err_t ret = ledc_stop(LEDC_LOW_SPEED_MODE, ctx->ledc_channel, ctx->start_low ? 0 : 1);
+        esp_err_t ret = ledc_stop(LEDC_LOW_SPEED_MODE, ctx->ledc_channel,
+                                  k_ledc_idle_level);
         if (ret != ESP_OK) {
             return ESY_ERR_FAIL;
         }
@@ -282,8 +291,18 @@ esy_err_t esy_hb_pwm_set_polarity(esy_pwm_t *pwm, bool start_low) {
         return ESY_ERR_INVALID_ARG;
     }
     
-    (void)start_low;
-    return ESY_ERR_NOT_SUPPORTED;
+    esy_pwm_esp32_ctx_t *ctx = (esy_pwm_esp32_ctx_t *)pwm->ctx;
+    if (!channel_ready(ctx)) return ESY_ERR_STATE;
+    if (ctx->start_low == start_low) return ESY_OK;
+
+    /* Reconnect only this channel's existing output with the new inversion.
+     * Reconfiguring the LEDC channel would enable a stopped output. The ROM
+     * operation has no failure result; pin/channel validity was checked at init. */
+    esp_rom_gpio_connect_out_signal(ctx->gpio_num,
+        ledc_periph_signal[LEDC_LOW_SPEED_MODE].sig_out0_idx + ctx->ledc_channel,
+        start_low, false);
+    ctx->start_low = start_low;
+    return ESY_OK;
 }
 
 esy_err_t esy_hb_pwm_enable_trigger_output(esy_pwm_t *pwm, bool enabled) {
@@ -300,10 +319,6 @@ esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm, esy_dma_config_t *dma_config, bo
 }
 
 esy_err_t esy_hb_pwm_abort_dma(esy_pwm_t *pwm) {
-    return pwm != NULL && pwm->ctx != NULL ? ESY_OK : ESY_ERR_INVALID_ARG;
-}
-
-esy_err_t esy_hb_pwm_poll(esy_pwm_t *pwm) {
     return pwm != NULL && pwm->ctx != NULL ? ESY_OK : ESY_ERR_INVALID_ARG;
 }
 
@@ -332,13 +347,28 @@ esy_err_t esy_hb_pwm_set_wrap_handler(esy_pwm_t *pwm, void (*handler)(void *), v
 }
 
 esy_err_t esy_hb_pwm_suspend(esy_pwm_t *pwm) {
-    (void)pwm;
-    return ESY_ERR_NOT_SUPPORTED;
+    if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
+    esy_pwm_esp32_ctx_t *ctx = (esy_pwm_esp32_ctx_t *)pwm->ctx;
+    if (!channel_ready(ctx) || ctx->suspended) return ESY_ERR_STATE;
+
+    /* Keep the timer running and owned: its peer may still be generating PWM. */
+    if (ledc_stop(LEDC_LOW_SPEED_MODE, ctx->ledc_channel,
+                  k_ledc_idle_level) != ESP_OK) return ESY_ERR_FAIL;
+    ctx->suspended = true;
+    return ESY_OK;
 }
 
 esy_err_t esy_hb_pwm_resume(esy_pwm_t *pwm) {
-    (void)pwm;
-    return ESY_ERR_NOT_SUPPORTED;
+    if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
+    esy_pwm_esp32_ctx_t *ctx = (esy_pwm_esp32_ctx_t *)pwm->ctx;
+    if (!channel_ready(ctx) || !ctx->suspended) return ESY_ERR_STATE;
+
+    if (ctx->enabled) {
+        esy_err_t ret = apply_duty(ctx, ctx->duty_cycle);
+        if (ret != ESY_OK) return ret;
+    }
+    ctx->suspended = false;
+    return ESY_OK;
 }
 
 esy_err_t esy_hb_pwm_set_low_power_mode(esy_pwm_t *pwm, bool enable_lprun) {
@@ -382,8 +412,7 @@ esy_err_t esy_hb_pwm_get_caps(const esy_pwm_t *pwm, uint32_t *out_caps) {
         return ESY_ERR_INVALID_ARG;
     }
     
-    /* No optional ESY_PWM_CAP_* operation is implemented by this port. */
-    *out_caps = 0;
+    *out_caps = ESY_PWM_CAP_POLARITY;
     
     return ESY_OK;
 }

@@ -18,6 +18,7 @@
 #define MAX_DMA_CHANNELS 12
 #define DMA_IRQ_COUNT 2u
 #define DMA_CHANNEL_MASK_LIMIT ((1u << MAX_DMA_CHANNELS) - 1u)
+#define DMA_ISR_STOP_READ_BUDGET 64u
 
 enum { DMA_IRQ_UNREGISTERED, DMA_IRQ_INSTALLING, DMA_IRQ_READY };
 
@@ -29,9 +30,12 @@ typedef struct {
   void *error_callback_args[MAX_DMA_CHANNELS];
   uint32_t dummy[MAX_DMA_CHANNELS];
   atomic_bool configured[MAX_DMA_CHANNELS];
+  atomic_bool native_claimed[MAX_DMA_CHANNELS];
   uint32_t dreq[MAX_DMA_CHANNELS];
   size_t unit_bytes[MAX_DMA_CHANNELS];
   atomic_flag dispatch_guard;
+  atomic_int dispatch_core;
+  atomic_uint dispatch_exception;
   uint8_t irq_state[DMA_IRQ_COUNT];
   uint8_t irq_core[DMA_IRQ_COUNT];
   uint8_t irq_priority[DMA_IRQ_COUNT];
@@ -39,14 +43,15 @@ typedef struct {
 
 static esy_hb_dma_ctx_t s_ctx = {
     .dispatch_guard = ATOMIC_FLAG_INIT,
+    .dispatch_core = ATOMIC_VAR_INIT(-1),
     .dummy = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
               0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
               0xFFFFFFFF, 0xFFFFFFFF}};
 
 /* Task/IRQ exclusion is for callback retirement, not DMA data movement.
  * Shared DMA IRQs on one core use one priority so they cannot preempt an IRQ
- * holding dispatch_guard. ISR never waits. Callbacks must be bounded and must
- * not configure/abort DMA. Task callers mask local IRQs while waiting for an
+ * holding dispatch_guard. ISR never waits. Callbacks may use the bounded native
+ * retirement helpers, but must not call task lifecycle APIs. Task callers mask local IRQs while waiting for an
  * already executing peer ISR. */
 static uint32_t dma_callbacks_lock(void) {
   uint32_t key = save_and_disable_interrupts();
@@ -78,16 +83,22 @@ static uint32_t dma_owned_irq_mask(void) {
 }
 static void esy_hb_dma_irq0_handler(void) {
   if (atomic_flag_test_and_set_explicit(&s_ctx.dispatch_guard, memory_order_acquire)) return;
+  atomic_store_explicit(&s_ctx.dispatch_core, (int)get_core_num(), memory_order_release);
+  atomic_store_explicit(&s_ctx.dispatch_exception, __get_current_exception(), memory_order_release);
   uint32_t status = dma_hw->ints0 & dma_owned_irq_mask();
   dma_hw->ints0 = status;
   dma_dispatch(status);
+  atomic_store_explicit(&s_ctx.dispatch_core, -1, memory_order_release);
   atomic_flag_clear_explicit(&s_ctx.dispatch_guard, memory_order_release);
 }
 static void esy_hb_dma_irq1_handler(void) {
   if (atomic_flag_test_and_set_explicit(&s_ctx.dispatch_guard, memory_order_acquire)) return;
+  atomic_store_explicit(&s_ctx.dispatch_core, (int)get_core_num(), memory_order_release);
+  atomic_store_explicit(&s_ctx.dispatch_exception, __get_current_exception(), memory_order_release);
   uint32_t status = dma_hw->ints1 & dma_owned_irq_mask();
   dma_hw->ints1 = status;
   dma_dispatch(status);
+  atomic_store_explicit(&s_ctx.dispatch_core, -1, memory_order_release);
   atomic_flag_clear_explicit(&s_ctx.dispatch_guard, memory_order_release);
 }
 
@@ -181,30 +192,72 @@ esy_err_t esy_hb_dma_get_resource_id(uint32_t dreq, uint8_t channel,
   return ESY_OK;
 }
 
+/* Task owners hold the assembly reservation across every claim/release path,
+ * including cached native reservations. The dispatcher may only publish an
+ * idle logical resource; it never acquires this task-side reservation. */
+static esy_err_t dma_claim_reserved(const void *owner, uint8_t resource) {
+  const void *expected = NULL;
+  if (!atomic_compare_exchange_strong_explicit(&s_ctx.owners[resource],
+      &expected, owner, memory_order_acq_rel, memory_order_acquire))
+    return ESY_ERR_BUSY;
+  /* ISR retirement returns the logical resource without taking the SDK's
+   * global allocation lock. Its native reservation is reused by task owners. */
+  if (atomic_load_explicit(&s_ctx.native_claimed[resource], memory_order_acquire)) {
+    if (!dma_channel_is_busy(resource)) return ESY_OK;
+    atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
+    return ESY_ERR_BUSY;
+  }
+  /* Fixed-ID SDK claim has no non-panicking try operation. The task reservation
+   * excludes native release and built-in Wi-Fi's lazy SDK allocation. Foreign
+   * raw SDK allocators still require consumer serialization. */
+  if (dma_channel_is_claimed(resource) || dma_channel_is_busy(resource)) {
+    atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
+    return ESY_ERR_BUSY;
+  }
+  dma_channel_claim(resource);
+  atomic_store_explicit(&s_ctx.native_claimed[resource], true, memory_order_release);
+  return ESY_OK;
+}
+
 esy_err_t esy_hb_dma_claim(const void *owner, uint32_t dreq, uint8_t channel) {
   uint8_t resource;
   if (owner == NULL) return ESY_ERR_INVALID_ARG;
   esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
   if (result != ESY_OK) return result;
-  const void *expected = NULL;
-  if (!atomic_compare_exchange_strong_explicit(&s_ctx.owners[resource],
-      &expected, owner, memory_order_acq_rel, memory_order_acquire))
-    return ESY_ERR_BUSY;
-  /* Fixed-ID SDK claim has no non-panicking try operation. Reserve allocation
-   * assembly against platform Wi-Fi's lazy SDK allocation. Foreign raw SDK
-   * allocators still require consumer serialization. Never wait or mask IRQs
-   * across an SDK call; an interrupted reservation makes contenders retry. */
-  if (!esy_hb_resource_assembly_try_acquire()) {
-    atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
-    return ESY_ERR_BUSY;
-  }
-  if (dma_channel_is_claimed(resource) || dma_channel_is_busy(resource)) {
-    esy_hb_resource_assembly_release();
-    atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
-    return ESY_ERR_BUSY;
-  }
-  dma_channel_claim(resource);
+  if (!esy_hb_resource_assembly_try_acquire()) return ESY_ERR_BUSY;
+  result = dma_claim_reserved(owner, resource);
   esy_hb_resource_assembly_release();
+  return result;
+}
+
+static esy_err_t dma_release_reserved(const void *owner, uint8_t resource) {
+  const void *current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
+  if (current != NULL && current != owner) return ESY_ERR_BUSY;
+  if (dma_channel_is_busy(resource)) return ESY_ERR_BUSY;
+  if (current == NULL &&
+      !atomic_load_explicit(&s_ctx.native_claimed[resource], memory_order_acquire))
+    return dma_channel_is_claimed(resource) ? ESY_ERR_BUSY : ESY_OK;
+  /* Task/IRQ metadata exclusion spans native unclaim and owner publication:
+   * a peer-channel dispatcher must not carry an old channel mask into a new
+   * SDK owner's transaction. Hardware is already idle; SDK unclaim only
+   * clears its claim bit under the SDK's short allocation lock. */
+  uint32_t key = dma_callbacks_lock();
+  current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
+  if ((current != NULL && current != owner) || dma_channel_is_busy(resource)) {
+    dma_callbacks_unlock(key);
+    return ESY_ERR_BUSY;
+  }
+  s_ctx.configured[resource] = false;
+  s_ctx.callbacks[resource] = NULL;
+  s_ctx.callback_args[resource] = NULL;
+  s_ctx.error_callbacks[resource] = NULL;
+  s_ctx.error_callback_args[resource] = NULL;
+  if (atomic_load_explicit(&s_ctx.native_claimed[resource], memory_order_acquire)) {
+    dma_channel_unclaim(resource);
+    atomic_store_explicit(&s_ctx.native_claimed[resource], false, memory_order_release);
+  }
+  atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
+  dma_callbacks_unlock(key);
   return ESY_OK;
 }
 
@@ -214,25 +267,72 @@ esy_err_t esy_hb_dma_release(const void *owner, uint32_t dreq, uint8_t channel) 
   esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
   if (result != ESY_OK) return result;
   if (esy_is_in_isr()) return ESY_ERR_NOT_SUPPORTED;
+  if (!esy_hb_resource_assembly_try_acquire()) return ESY_ERR_BUSY;
+  result = dma_release_reserved(owner, resource);
+  esy_hb_resource_assembly_release();
+  return result;
+}
+
+static esy_err_t dma_retire_locked(const void *owner, uint8_t resource) {
   const void *current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
   if (current != NULL && current != owner) return ESY_ERR_BUSY;
-  if (dma_channel_is_busy(resource)) return ESY_ERR_BUSY;
-  if (current == NULL)
-    return dma_channel_is_claimed(resource) ? ESY_ERR_BUSY : ESY_OK;
-  /* Task/IRQ metadata exclusion spans native unclaim and owner publication:
-   * a peer-channel dispatcher must not carry an old channel mask into a new
-   * SDK owner's transaction. Hardware is already idle; SDK unclaim only
-   * clears its claim bit under the SDK's short allocation lock. */
-  uint32_t key = dma_callbacks_lock();
+  if (dma_channel_is_busy(resource) || (dma_hw->abort & (1u << resource)))
+    return ESY_ERR_BUSY;
+  if (current == NULL) return ESY_OK;
+  dma_channel_set_irq0_enabled(resource, false);
+  dma_channel_set_irq1_enabled(resource, false);
+  dma_hw->ints0 = 1u << resource;
+  dma_hw->ints1 = 1u << resource;
   s_ctx.configured[resource] = false;
   s_ctx.callbacks[resource] = NULL;
   s_ctx.callback_args[resource] = NULL;
   s_ctx.error_callbacks[resource] = NULL;
   s_ctx.error_callback_args[resource] = NULL;
-  dma_channel_unclaim(resource);
+  /* Native SDK reservation stays cached until a task lifecycle operation.
+   * Owner publication is last: no dispatcher touches this resource afterward. */
   atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
-  dma_callbacks_unlock(key);
   return ESY_OK;
+}
+
+esy_err_t esy_hb_dma_retire_from_isr(const void *owner, uint32_t dreq,
+                                   uint8_t channel) {
+  uint8_t resource;
+  if (owner == NULL) return ESY_ERR_INVALID_ARG;
+  esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
+  if (result != ESY_OK) return result;
+  const uint32_t key = save_and_disable_interrupts();
+  bool borrowed = atomic_load_explicit(&s_ctx.dispatch_core, memory_order_acquire) ==
+      (int)get_core_num() &&
+      atomic_load_explicit(&s_ctx.dispatch_exception, memory_order_acquire) ==
+          __get_current_exception();
+  if (!borrowed && atomic_flag_test_and_set_explicit(&s_ctx.dispatch_guard, memory_order_acquire)) {
+    restore_interrupts(key);
+    return ESY_ERR_BUSY;
+  }
+  result = dma_retire_locked(owner, resource);
+  if (!borrowed) atomic_flag_clear_explicit(&s_ctx.dispatch_guard, memory_order_release);
+  restore_interrupts(key);
+  return result;
+}
+
+esy_err_t esy_hb_dma_abort_from_isr(const void *owner, uint32_t dreq,
+                                  uint8_t channel) {
+  uint8_t resource;
+  if (owner == NULL) return ESY_ERR_INVALID_ARG;
+  esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
+  if (result != ESY_OK) return result;
+  const void *current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
+  if (current != owner) return current == NULL ? ESY_OK : ESY_ERR_BUSY;
+  dma_channel_set_irq0_enabled(resource, false);
+  dma_channel_set_irq1_enabled(resource, false);
+  /* Direct abort request avoids SDK's unbounded abort wait. RP2040 E13's
+   * completion IRQ after abort is disabled and cleared by idle retirement. */
+  dma_hw->abort = 1u << resource;
+  for (uint32_t remaining = DMA_ISR_STOP_READ_BUDGET; remaining != 0u; --remaining) {
+    if ((dma_hw->abort & (1u << resource)) == 0u && !dma_channel_is_busy(resource))
+      return esy_hb_dma_retire_from_isr(owner, dreq, channel);
+  }
+  return ESY_ERR_BUSY;
 }
 
 static bool dma_count_valid(size_t count) {
@@ -262,7 +362,10 @@ esy_err_t esy_hb_dma_prepare(const void *owner, const esy_dma_config_t *dma_conf
     return ESY_ERR_INVALID_ARG;
   }
 
-  if (dma_config->circular) return ESY_ERR_NOT_SUPPORTED;
+  /* RP DMA has block-completion/error IRQs, not a half-transfer IRQ. Reject
+   * requested HT notification before taking ownership or touching hardware. */
+  if (dma_config->circular || dma_config->half_callback != NULL)
+    return ESY_ERR_NOT_SUPPORTED;
   if ((dma_config->inner.direction != ESY_DMA_MEM_TO_MEM &&
        dma_config->inner.direction != ESY_DMA_MEM_TO_PERIPH &&
        dma_config->inner.direction != ESY_DMA_PERIPH_TO_MEM) ||
@@ -271,14 +374,21 @@ esy_err_t esy_hb_dma_prepare(const void *owner, const esy_dma_config_t *dma_conf
       (dma_config->inner.direction == ESY_DMA_MEM_TO_PERIPH && dma_config->dst == NULL) ||
       (dma_config->inner.direction == ESY_DMA_PERIPH_TO_MEM && dma_config->src == NULL))
     return ESY_ERR_INVALID_ARG;
-  esy_err_t claim = esy_hb_dma_claim(owner, dma_config->inner.dreq,
-                                    dma_config->inner.channel);
-  if (claim != ESY_OK) return claim;
+  if (owner == NULL) return ESY_ERR_INVALID_ARG;
+  /* Keep one task reservation through preparation and any rollback. A failed
+   * IRQ assembly cannot lose its cleanup turn to a peer native allocator. No
+   * configured transfer can start while this new idle claim is being prepared. */
+  if (!esy_hb_resource_assembly_try_acquire()) return ESY_ERR_BUSY;
+  esy_err_t claim = dma_claim_reserved(owner, dma_config->inner.channel);
+  if (claim != ESY_OK) {
+    esy_hb_resource_assembly_release();
+    return claim;
+  }
   esy_err_t irq_result = dma_prepare_irq(&dma_config->inner);
   if (irq_result != ESY_OK) {
-    (void)esy_hb_dma_release(owner, dma_config->inner.dreq,
-                            dma_config->inner.channel);
-    return irq_result;
+    esy_err_t cleanup = dma_release_reserved(owner, dma_config->inner.channel);
+    esy_hb_resource_assembly_release();
+    return cleanup != ESY_OK ? cleanup : irq_result;
   }
   dma_channel_set_irq0_enabled(dma_config->inner.channel, false);
   dma_channel_set_irq1_enabled(dma_config->inner.channel, false);
@@ -303,10 +413,11 @@ esy_err_t esy_hb_dma_prepare(const void *owner, const esy_dma_config_t *dma_conf
       channel_config_set_read_increment(&c, false);
       channel_config_set_write_increment(&c, dma_config->dst != NULL);
       break;
-    default:
-      (void)esy_hb_dma_release(owner, dma_config->inner.dreq,
-                                dma_config->inner.channel);
-      return ESY_ERR_INVALID_ARG;
+    default: {
+      esy_err_t cleanup = dma_release_reserved(owner, dma_config->inner.channel);
+      esy_hb_resource_assembly_release();
+      return cleanup != ESY_OK ? cleanup : ESY_ERR_INVALID_ARG;
+    }
   }
 
   channel_config_set_dreq(&c, dma_config->inner.dreq);
@@ -334,6 +445,7 @@ esy_err_t esy_hb_dma_prepare(const void *owner, const esy_dma_config_t *dma_conf
     dma_channel_set_irq1_enabled(dma_config->inner.channel, true);
   }
 
+  esy_hb_resource_assembly_release();
   return ESY_OK;
 }
 
@@ -366,10 +478,10 @@ esy_err_t esy_hb_dma_abort(const void *owner, uint32_t dreq, uint8_t channel) {
   if (owner == NULL) return ESY_ERR_INVALID_ARG;
   esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
   if (result != ESY_OK) return result;
+  if (esy_is_in_isr()) return ESY_ERR_NOT_SUPPORTED;
   const void *current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
-  if (current != owner) return current == NULL &&
-      !dma_channel_is_claimed(resource) && !dma_channel_is_busy(resource)
-      ? ESY_OK : ESY_ERR_BUSY;
+  if (current != owner) return current == NULL
+      ? esy_hb_dma_release(owner, dreq, channel) : ESY_ERR_BUSY;
   dma_channel_set_irq0_enabled(channel, false);
   dma_channel_set_irq1_enabled(channel, false);
   dma_channel_abort(channel);

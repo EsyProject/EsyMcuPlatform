@@ -13,7 +13,7 @@ esy_err_t esy_hal_xio_uart_tx_init(
   return ESY_ERR_NOT_SUPPORTED;
 }
 
-void esy_hal_xio_uart_tx_deinit(esy_uart_t *uart) { (void)uart; }
+esy_err_t esy_hal_xio_uart_tx_deinit(esy_uart_t *uart) { (void)uart; return ESY_OK; }
 
 uint8_t esy_hal_xio_uart_tx_pin(esy_uart_t *uart) {
   (void)uart;
@@ -23,10 +23,6 @@ uint8_t esy_hal_xio_uart_tx_pin(esy_uart_t *uart) {
 esy_err_t esy_hal_xio_uart_tx_abort_dma(esy_uart_t *uart) {
   (void)uart;
   return ESY_ERR_NOT_SUPPORTED;
-}
-esy_err_t esy_hal_xio_uart_tx_poll(esy_uart_t *uart) {
-  (void)uart;
-  return ESY_OK;
 }
 
 bool esy_hal_xio_uart_tx_is_busy(esy_uart_t *uart) {

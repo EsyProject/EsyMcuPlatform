@@ -325,3 +325,20 @@ void test_failed_dma_retirement_on_one_uart_keeps_other_uart_running(void) {
   TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_core_init(&first->backend, &first->core_config));
   TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_deinit(&first->backend));
 }
+
+void test_uart_active_dma_retires_automatically_on_native_completion(void) {
+  uart_instance_fixture_t *first = &s_ctx.instances[0];
+  init_instances(false);
+  queue_text(0u, "periodic DMA");
+  kick(0u);
+  TEST_ASSERT_EQUAL_UINT32(10u,
+      esy_logger_backend_uart_core_next_wait_ms(&first->backend));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_core_process(&first->backend, 1u));
+  TEST_ASSERT_TRUE(esy_logger_backend_uart_internal_is_dma_busy(&first->backend));
+  fake_esy_hal_uart_complete_last_dma(&first->uart);
+  TEST_ASSERT_FALSE(esy_logger_backend_uart_internal_is_dma_busy(&first->backend));
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,
+      esy_logger_backend_uart_core_next_wait_ms(&first->backend));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_deinit(&first->backend));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_deinit(&s_ctx.instances[1].backend));
+}

@@ -34,8 +34,10 @@ CHECK(sizeof(((esy_hb_xio_program_t *)0)->backend.bytes) == EXPECTED_PROGRAM_BYT
       "Program backing storage has the wrong capacity");
 CHECK(sizeof(((esy_hb_xio_sm_t *)0)->backend.bytes) == EXPECTED_SM_BYTES,
       "SM backing storage has the wrong capacity");
+#ifdef EXPECTED_UART_BYTES
 CHECK(sizeof(((esy_uart_t *)0)->backend.bytes) == EXPECTED_UART_BYTES,
       "Enclosing UART storage override was discarded");
+#endif
 CHECK(sizeof(((esy_spi_t *)0)->backend.bytes) == EXPECTED_SPI_BYTES,
       "Enclosing SPI storage override was discarded");
 int main(void) {
@@ -52,7 +54,7 @@ int main(void) {
 
 
 class XioStorageContractTests(unittest.TestCase):
-    def layouts(self, program_bytes=64, sm_bytes=64, uart_bytes=448,
+    def layouts(self, program_bytes=64, sm_bytes=64, uart_bytes=None,
                 spi_bytes=256, overrides=()):
         layouts = []
         with tempfile.TemporaryDirectory(prefix="xio storage contract ") as tmp:
@@ -70,9 +72,10 @@ class XioStorageContractTests(unittest.TestCase):
                             f"-I{ROOT / 'esy_common/defs/include'}",
                             f"-DEXPECTED_PROGRAM_BYTES={program_bytes}",
                             f"-DEXPECTED_SM_BYTES={sm_bytes}",
-                            f"-DEXPECTED_UART_BYTES={uart_bytes}",
                             f"-DEXPECTED_SPI_BYTES={spi_bytes}", *overrides,
                             str(source), "-o", str(executable)]
+                if uart_bytes is not None:
+                    command.append(f"-DEXPECTED_UART_BYTES={uart_bytes}")
                 result = subprocess.run(command, capture_output=True, text=True)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                 result = subprocess.run([str(executable)], capture_output=True, text=True)

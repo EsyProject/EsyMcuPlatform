@@ -38,6 +38,9 @@ extern "C" {
  * the borrowed request in result_callback_arg to inspect them. The callback reports terminal
  * completion, including failure, rather than unconditional transfer success.
  * Every accepted request must drain before quiesce or destruction succeeds.
+ * The worker processes active DMA at one-millisecond intervals and sleeps while
+ * idle. Internal notifications wake it for startup, submissions and control.
+ * These notifications are latched across worker wait entry.
 
  * @brief SPI Scheduler middleware interface.
  *

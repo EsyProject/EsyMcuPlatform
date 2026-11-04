@@ -21,11 +21,14 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
 - Enable SPI through the consumer feature import and retain the public blocking,
   write/read DMA and full-duplex DMA calls in the final firmware link. Use real
   Pico SDK 2.1.1 or ESP-IDF 5.3.4 providers for the corresponding build evidence.
-- Allocate naturally aligned buffers with a canary on each side. Record board,
+- Allocate naturally aligned buffers with a canary on each side. ESP32 queued
+  DMA TX uses internal DMA-capable RAM; RX above four bytes additionally needs
+  four-byte address/length alignment. Short RX uses a DMA-capable handle word.
+  Record board,
   firmware, SDK/toolchain, mode, frame width, requested speed and pin routing.
   Capture native error codes, callback order, canaries and wire traces.
 - Keep all buffer and callback storage alive through terminal callback return.
-  ESP32 completes accepted transfers synchronously in the owner caller. This
+  ESP32 queues accepted master DMA and requires owner processing to retire it. This
   plan does not change Pico/STM32 DMA retirement; use the
   [DMA/SPI plan](dma_spi_hil_plan.md) for that lifecycle.
 
@@ -33,7 +36,13 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
 
 1. At 8-bit width, submit full-duplex buffers of 1, 2, 3, 4, 64 and 4092 bytes. Verify
    loopback contents, unchanged canaries, exactly the requested wire length and
-   one inline successful terminal callback with matching TX/RX byte counts.
+   one owner-process successful terminal callback with matching TX/RX byte counts.
+   Delay processing until the final clock: submission must return without waiting
+   for wire completion, `is_busy` must stay true, and no callback runs before
+   owner processing. Deinit, PM suspend and another transfer remain BUSY. Process makes
+   at most one zero-wait native result query, and completion releases CS before
+   callback delivery. Repeat through the SPI scheduler and verify its held
+   device usage reference retires only at the terminal notification.
 2. Submit transmit-only and receive-only requests through both helper APIs and
    full-duplex API calls with one configuration omitted. Verify the absent
    endpoint uses the native SDK's missing-buffer mode, without a NULL-pointer
@@ -54,13 +63,40 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
    transfer APIs at byte and halfword widths. Transmit-only permits 4094 bytes.
    No rejected request may assert CS, clock data,
    touch either buffer, retain a callback or invoke one later.
-5. Force a native transaction failure on the real target. Expect a negative
-   result, idle state and no success callback. Preserve canaries and confirm the
-   next valid transaction succeeds. Repeat accepted and rejected calls while
+5. Force a native queue rejection on the real target. With successful CS release,
+   expect a negative result, idle state and no callback. Fail CS release after
+   rejection: retain the busy handle, endpoints and callback until a retry
+   releases CS. Process then reports BUS_ERROR with zero transferred counts;
+   successful abort suppresses that notification. Force a native result-query
+   error after accepted submission: preserve busy ownership without clearing
+   its descriptor, endpoints or callback, and permit owner retry. Preserve
+   canaries and confirm the next valid transaction succeeds after retirement.
+   Repeat accepted and rejected calls while
    registered with the device graph. Common public descriptor rejections must
    not acquire a usage reference or resume a suspended device. Backend-specific
    size/frame restrictions may be checked after resume; they must release the
    acquired reference without a transfer or callback.
+6. For TX, submit a valid range in flash or non-DMA PSRAM; for long RX use
+   non-DMA memory or a byte/halfword-aligned address lacking four-byte alignment.
+   Also place short-RX handle storage outside DMA-capable internal memory.
+   Require INVALID_ARG before CS assertion or native queueing. Ordinary internal
+   TX needs only its element alignment; byte counts 1, 2, 3 and 4094 remain
+   valid. Use native heap tracing around repeated valid queued transfers and
+   their process retirement: no per-transfer bounce buffer may be allocated.
+   Keep separate evidence for blocking APIs, whose SDK buffer-copying behavior
+   is unchanged. Rejected memory must never trigger an automatic copying path.
+7. At a slow SCK, submit a valid transfer and immediately attempt abort. While
+   unfinished it returns BUSY without freeing its descriptor, CS, endpoints or
+   callback. The SDK continues the wire transfer. After the final clock, retry
+   abort until OK: no callback runs, CS is released, `is_busy` is false, deinit
+   is safe, and the next submission succeeds. Separately, call process after a
+   failed abort and require one normal callback: BUSY did not schedule a later
+   cancellation. Idle master abort is OK; slave DMA remains unsupported.
+8. Withhold processing beyond hardware completion and verify the descriptor and
+   canaries remain valid, CS remains owned and no callback runs. Establish a
+   consumer processing cadence from the slave's maximum CS-low/completion latency.
+   There is no library software timeout or forced master-stop guarantee; a
+   wedged native transfer retains resources for consumer system recovery.
 
 ## Pico Procedure
 
@@ -86,7 +122,7 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
 
 1. Build and final-link a consumer with XIO SPI enabled, native SPI disabled and
    generic DMA disabled. Retain calls to generic SPI blocking, transfer DMA,
-   poll, abort and unregister APIs. No native SPI provider may be required.
+   process, abort and unregister APIs. No native SPI provider may be required.
 2. With a zero handle, valid SCK/MOSI/MISO and a selected SM, request slave mode
    with pin_cs=ESY_PIN_UNUSED in all four modes. Require NOT_SUPPORTED before
    board pin configuration, GPIO/PIO changes or program/SM claims. Hold MOSI high
@@ -130,10 +166,10 @@ establishes buffer bounds or the bytes and clock edges observed on the wire.
    received frame, canaries and exactly the requested clock count, with no
    extra dummy frame carried into the next transaction. The master must provide
    all requested clocks; this does not qualify truncated-frame recovery.
-8. Repeat delayed owner polling for finite slave DMA at 8-bit/8-bit and
+8. Repeat delayed owner processing for finite slave DMA at 8-bit/8-bit and
    16-bit/16-bit widths, with both bit orders and all modes, through TX-only,
-   RX-only and full-duplex APIs. Withhold polling until TX and RX DMA remaining
-   counts are zero and the master has deasserted CS. One owner poll must retire
+   RX-only and full-duplex APIs. Withhold processing until TX and RX DMA remaining
+   counts are zero and the master has deasserted CS. One owner processing must retire
    the completed transaction and deliver exactly one success callback without
    requiring another CS assertion, SCK edge or TXSTALL. Absent memory directions
    still require the matching dummy DMA endpoint to count every wire frame.
@@ -176,8 +212,8 @@ complete public SDK query for a bus without master devices or a slave driver. SP
    controller reservation for system recovery/reset. Ordinary registry teardown
    and unregister remain unavailable in the faulted state.
 5. Keep finite DMA active and then physically complete it while withholding owner
-   polling. Deinit remains BUSY in both states, preserving caller buffers, callback
-   arguments and pending terminal notification. Poll or successfully abort before
+   processing. Deinit remains BUSY in both states, preserving caller buffers, callback
+   arguments and pending terminal notification. Process or successfully abort before
    retrying deinit. Observe no late callback, DMA access or board reset after a
    successful teardown; follow the DMA/SPI plan for stream retirement details.
 6. On ESP32, install an independent native master bus and add a native device

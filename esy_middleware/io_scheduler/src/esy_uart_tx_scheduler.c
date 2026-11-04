@@ -9,7 +9,6 @@
 #include <string.h>
 #include "esy_common/ds/esy_block_ring.h"
 #include "esy_hal/esy_hal_uart.h"
-#include "esy_hal/esy_hal_dma.h"
 
 typedef struct {
   esy_block_ring_t queue;
@@ -25,6 +24,8 @@ typedef struct {
   bool failed_submission;
   esy_err_t submission_error;
 } esy_uart_tx_scheduler_ctx_t;
+
+#define UART_TX_RETRY_MS 1u
 
 enum { TX_PENDING = 0, TX_SUCCESS, TX_FAILURE };
 _Static_assert(sizeof(esy_uart_tx_scheduler_ctx_t) + alignof(esy_uart_tx_scheduler_ctx_t) - 1u
@@ -73,7 +74,7 @@ esy_err_t esy_uart_tx_scheduler_init(esy_uart_tx_scheduler_t *scheduler, esy_uar
 esy_err_t esy_uart_tx_scheduler_submit(esy_uart_tx_scheduler_t *scheduler,
     const esy_uart_tx_scheduler_tx_request_t *request) {
   if (!scheduler || !request || !request->data || !request->length ||
-      request->length > INT32_MAX || !request->on_complete) return ESY_ERR_INVALID_ARG;
+      request->length > INT32_MAX || request->timeout_ms > INT32_MAX || !request->on_complete) return ESY_ERR_INVALID_ARG;
   esy_uart_tx_scheduler_ctx_t *ctx = uart_ctx(scheduler);
   if (!ctx->initialized || ctx->stopping) return ESY_ERR_STATE;
   esy_uart_tx_scheduler_tx_request_t *slot =
@@ -100,7 +101,7 @@ esy_err_t esy_uart_tx_scheduler_process(esy_uart_tx_scheduler_t *scheduler) {
   esy_uart_tx_scheduler_ctx_t *ctx = uart_ctx(scheduler);
   if (!ctx->initialized || ctx->processing) return ESY_ERR_STATE;
   ctx->processing = true;
-  esy_err_t poll_result = esy_hal_uart_poll(ctx->uart);
+
   if (ctx->active && ctx->failed_submission) {
     if (!ctx->abort_succeeded && esy_hal_uart_is_busy(ctx->uart, true)) {
       esy_err_t result = esy_hal_uart_abort_dma(ctx->uart, true);
@@ -117,7 +118,7 @@ esy_err_t esy_uart_tx_scheduler_process(esy_uart_tx_scheduler_t *scheduler) {
       return ESY_OK;
     }
     ctx->processing = false;
-    return poll_result;
+    return ESY_OK;
   }
   if (ctx->active && ctx->abort_current) {
     bool busy = esy_hal_uart_is_busy(ctx->uart, true);
@@ -144,11 +145,7 @@ esy_err_t esy_uart_tx_scheduler_process(esy_uart_tx_scheduler_t *scheduler) {
       return ESY_OK;
     }
     ctx->processing = false;
-    return poll_result;
-  }
-  if (poll_result != ESY_OK) {
-    ctx->processing = false;
-    return poll_result;
+    return ESY_OK;
   }
   if (ctx->active) {
     int terminal = atomic_load_explicit(&ctx->terminal, memory_order_acquire);
@@ -163,20 +160,31 @@ esy_err_t esy_uart_tx_scheduler_process(esy_uart_tx_scheduler_t *scheduler) {
       if (ctx->cancel_queued) {
         uart_finish(ctx, ESY_UART_TX_SCHEDULER_TX_CANCELLED, ESY_OK);
       } else if (!esy_hal_uart_is_busy(ctx->uart, true)) {
-        esy_dma_config_t dma;
-        esy_hal_dma_default_cfg(&dma);
-        dma.src = request->data;
-        dma.length = request->length;
-        dma.transfer_size = ESY_DMA_TRANSFER_SIZE_8;
-        dma.callback = uart_tx_done;
-        dma.callback_arg = ctx;
-        dma.error_callback = uart_tx_error;
-        dma.error_callback_arg = ctx;
+        esy_dma_config_t dma = {
+            .src = request->data,
+            .length = request->length,
+            .transfer_size = ESY_DMA_TRANSFER_SIZE_8,
+            .callback = uart_tx_done,
+            .callback_arg = ctx,
+            .error_callback = uart_tx_error,
+            .error_callback_arg = ctx,
+            .inner = {.direction = ESY_DMA_MEM_TO_MEM},
+        };
         atomic_store_explicit(&ctx->terminal, TX_PENDING, memory_order_relaxed);
         ctx->abort_succeeded = false;
         ctx->active = true;
         esy_err_t err = esy_hal_uart_send_dma(ctx->uart, &dma);
-        if (err != ESY_OK) {
+        if ((err == ESY_ERR_NOT_SUPPORTED || err == ESY_ERR_NOT_IMPLEMENTED) &&
+            !esy_hal_uart_is_busy(ctx->uart, true)) {
+          uint32_t timeout_ms = request->timeout_ms != 0u ? request->timeout_ms
+              : ESY_UART_TX_SCHEDULER_DEFAULT_TIMEOUT_MS;
+          int32_t count = esy_hal_uart_send_timeout(ctx->uart, request->data,
+                                                   request->length, timeout_ms);
+          if (count == (int32_t)request->length)
+            atomic_store_explicit(&ctx->terminal, TX_SUCCESS, memory_order_release);
+          else uart_finish(ctx, ESY_UART_TX_SCHEDULER_TX_ERROR,
+                           count < 0 ? (esy_err_t)count : ESY_ERR_IO);
+        } else if (err != ESY_OK) {
           if (esy_hal_uart_is_busy(ctx->uart, true)) {
             ctx->failed_submission = true;
             ctx->submission_error = err;
@@ -208,6 +216,13 @@ esy_err_t esy_uart_tx_scheduler_request_abort(esy_uart_tx_scheduler_t *scheduler
   ctx->cancel_queued = true;
   ctx->abort_current = true;
   return ESY_OK;
+}
+
+uint32_t esy_uart_tx_scheduler_next_wait_ms(const esy_uart_tx_scheduler_t *scheduler) {
+  const esy_uart_tx_scheduler_ctx_t *ctx = uart_ctx(scheduler);
+  if (!ctx || !ctx->initialized || esy_block_ring_empty(&ctx->queue)) return UINT32_MAX;
+  if (!ctx->active) return 0u;
+  return UART_TX_RETRY_MS;
 }
 
 bool esy_uart_tx_scheduler_is_busy(const esy_uart_tx_scheduler_t *scheduler) {

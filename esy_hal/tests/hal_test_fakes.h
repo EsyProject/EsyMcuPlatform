@@ -59,6 +59,8 @@ enum {
 
 typedef struct {
   esy_adc_t *adc_owners[TEST_DMA_RESOURCE_COUNT];
+  esy_err_t adc_validate_result;
+  uint32_t adc_validate_order;
   uint32_t adc_available_order;
   uint32_t adc_available_calls;
   esy_gpio_irq_config_t gpio_irq_config;
@@ -82,6 +84,7 @@ typedef struct {
   esy_dma_config_t last_spi_tx_dma;
   esy_dma_config_t last_spi_rx_dma;
   bool reject_dma_mapping;
+  bool reject_dma_half_callback;
   bool dma_resource_uses_dreq;
   esy_err_t dma_resource_result;
   esy_err_t dma_start_result;
@@ -105,6 +108,7 @@ typedef struct {
   uint32_t spi_release_order;
   uint32_t spi_abort_calls;
   esy_err_t spi_submit_result;
+  bool spi_submit_retains_borrow;
   esy_err_t adc_submit_result;
   esy_err_t adc_abort_result;
   esy_err_t adc_deinit_result;
@@ -114,9 +118,7 @@ typedef struct {
   esy_err_t pwm_deinit_result;
   esy_err_t pwm_abort_result;
   esy_err_t pwm_dma_result;
-  esy_err_t pwm_poll_result;
   uint32_t pwm_abort_calls;
-  uint32_t pwm_poll_calls;
   esy_err_t pwm_available_result;
   uint32_t pwm_available_calls;
   uint32_t pwm_available_order;
@@ -124,20 +126,25 @@ typedef struct {
   esy_uart_t *uart_owner;
   bool uart_enabled;
   esy_err_t uart_cleanup_result;
+  esy_err_t xio_uart_tx_cleanup_result;
+  esy_err_t xio_uart_rx_cleanup_result;
   uint32_t uart_claim_order;
   uint32_t uart_release_order;
   esy_timer_capture_t *capture_owner;
   bool capture_enabled;
   bool capture_reject_pin;
   esy_err_t capture_cleanup_result;
+  esy_err_t capture_claim_result;
   uint32_t capture_claim_order;
   uint32_t capture_release_order;
   esy_err_t uart_suspend_result;
   esy_err_t uart_resume_result;
   esy_err_t uart_abort_result;
-  esy_err_t uart_poll_result;
+  bool uart_send_timeout_override;
+  int32_t uart_send_timeout_result;
+  uint32_t uart_send_timeout_ms;
+  uint32_t uart_send_timeout_calls;
   uint32_t uart_abort_calls;
-  uint32_t uart_poll_calls;
   bool uart_abort_is_tx;
   esy_err_t uart_stream_start_result;
   esy_err_t uart_stream_stop_result;
@@ -211,6 +218,9 @@ typedef struct {
   uint32_t boot_pending_calls;
   uint32_t boot_confirm_calls;
   esy_err_t low_power_result;
+  uint32_t explicit_sleep_calls;
+  esy_power_sleep_config_t explicit_sleep_config;
+  esy_power_sleep_result_t explicit_sleep_result;
   esy_err_t retention_restore_result;
   uint32_t low_power_supported_mode_mask;
   uint64_t always_on_time_us;
@@ -248,12 +258,6 @@ typedef struct {
   esy_usb_ep_cfg_t last_usb_ep_cfg;
   esy_system_config_t last_system_config;
   const esy_system_context_callbacks_t *system_context_callbacks;
-  esy_err_t adc_validate_result;
-  uint32_t adc_validate_order;
-  uint32_t explicit_sleep_calls;
-  esy_power_sleep_config_t explicit_sleep_config;
-  esy_power_sleep_result_t explicit_sleep_result;
-  esy_err_t capture_claim_result;
 } platform_test_state_t;
 
 extern const platform_test_state_t *platform_test_state(void);
@@ -270,9 +274,12 @@ void platform_test_set_gpio_wakeup_results(esy_err_t enable_result,
                                            bool retain_on_failure);
 void platform_test_set_uart_resume_result(esy_err_t result);
 void platform_test_set_uart_suspend_result(esy_err_t result);
-void platform_test_set_uart_dma_results(esy_err_t abort, esy_err_t poll);
+void platform_test_set_uart_abort_result(esy_err_t abort);
+void platform_test_set_uart_send_timeout_result(int32_t result);
 void platform_test_set_uart_cleanup_result(esy_err_t result);
+void platform_test_set_xio_uart_cleanup_results(esy_err_t tx, esy_err_t rx);
 void platform_test_set_capture_cleanup_result(esy_err_t result);
+void platform_test_set_capture_claim_result(esy_err_t result);
 void platform_test_set_capture_reject_pin(bool reject);
 void platform_test_set_xio_rx_init_result(esy_err_t result);
 void platform_test_set_timer_immediate(bool immediate);
@@ -286,6 +293,7 @@ extern void platform_test_set_flash_query_results(esy_err_t geometry_result,
                                                   esy_err_t sector_result);
 extern void platform_test_reset_order_counters(void);
 extern void platform_test_set_dma_busy(bool busy);
+void platform_test_set_dma_half_supported(bool supported);
 void platform_test_set_uart_busy(bool tx_dma, bool rx_dma, bool wire);
 void platform_test_set_dma_owner(uint8_t resource, const void *owner);
 void platform_test_set_dma_resource_mapping(bool uses_dreq, esy_err_t result);
@@ -293,13 +301,15 @@ void platform_test_set_dma_results(esy_err_t start, esy_err_t abort,
                                    esy_err_t control);
 void platform_test_half_complete_dma(void);
 void platform_test_set_spi_submit_result(esy_err_t result);
+void platform_test_set_spi_submit_retains_borrow(bool retain);
 void platform_test_set_spi_claim_result(esy_err_t result);
 void platform_test_set_spi_cleanup_result(esy_err_t result);
 void platform_test_set_pwm_results(esy_err_t deinit, esy_err_t abort,
-                                  esy_err_t dma, esy_err_t poll);
+                                  esy_err_t dma);
 void platform_test_set_pwm_dma_complete_inline(bool complete_inline);
 void platform_test_set_pwm_available_result(esy_err_t result);
 extern void platform_test_set_adc_busy(bool busy);
+void platform_test_set_adc_validation_result(esy_err_t result);
 void platform_test_set_adc_results(esy_err_t submit, esy_err_t abort,
                                    esy_err_t deinit);
 void platform_test_set_i2c_cleanup_result(esy_err_t result);
@@ -307,6 +317,8 @@ void platform_test_set_i2c_busy(bool busy);
 void platform_test_set_xio_uart_wire_busy(bool busy);
 void platform_test_set_xio_uart_readable(bool readable);
 extern void platform_test_set_low_power_result(esy_err_t result);
+extern void platform_test_set_explicit_sleep_result(
+    esy_power_sleep_result_t result);
 extern void platform_test_set_low_power_supported_mode_mask(uint32_t mode_mask);
 extern void platform_test_set_retention_support(bool supported,
                                                 esy_err_t restore_result);
@@ -323,12 +335,5 @@ void platform_test_set_boot_action_results(esy_err_t pending, esy_err_t confirm)
 extern void platform_test_complete_spi_dma(
     esy_spi_t *spi, esy_spi_dma_transfer_status_t status);
 extern void platform_test_complete_dma(bool error);
-
-void platform_test_set_adc_validation_result(esy_err_t result);
-
-extern void platform_test_set_explicit_sleep_result(
-    esy_power_sleep_result_t result);
-
-void platform_test_set_capture_claim_result(esy_err_t result);
 
 #endif /* ESY_HAL_TESTS_PLATFORM_TEST_FAKES_H */

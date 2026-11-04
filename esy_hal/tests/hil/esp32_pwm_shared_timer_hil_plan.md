@@ -31,8 +31,8 @@ it does not establish waveform timing or successful hardware cleanup.
 ## Native Consumer Build
 
 Compile and link public calls for two handles on one timer, same/conflicting
-frequency init, repeated init, set-wrap, enable, deinit and reinit at a different
-frequency. Include the native `ledc_timer_config` deconfigure field and pause
+frequency init, repeated init, set-wrap, enable, polarity, suspend/resume, deinit
+and reinit at a different frequency. Include the native `ledc_timer_config` deconfigure field and pause
 API in the real SDK build. A dormant compile/link probe must not be reported as
 executed HIL or as verification of the return values below.
 
@@ -85,9 +85,14 @@ executed HIL or as verification of the return values below.
    A subsequent init at a different frequency must succeed. Stopping a channel
    may already have silenced that channel when a later cleanup stage fails;
    failure does not promise rollback of completed hardware cleanup.
-10. Request runtime polarity control and expect NOT_SUPPORTED. Verify that it
-    does not change the configured idle level or the level used by a later
-    disable/enable sequence. No native timer peer may be affected.
+10. Request runtime polarity control and expect OK. A disabled output must
+    select low for `start_low=true` and high for `start_low=false`, without
+    starting pulses. A running output changes inversion without resetting the
+    shared timer. Suspend must silence this channel at its selected idle level
+    while retaining its timer claim. Resume restores the previous enable state
+    and duty; a previously disabled channel remains idle. Repeated suspend,
+    unmatched resume and enable/set-duty while suspended return STATE. Polarity
+    changes remain available while suspended. No native timer peer may be affected.
 11. After init, call set-duty while disabled and require STATE before any
     native duty/update call. Verify the pin remains at the configured idle
     level. Enable at the original duty, disable, attempt a different nonzero
@@ -100,7 +105,7 @@ executed HIL or as verification of the return values below.
 
 Call the public wrap-handler API with a non-NULL callback on an initialized
 channel. Require NOT_SUPPORTED, no callback or native ISR allocation,
-unchanged zero optional capability mask, and unchanged
+an optional capability mask containing only `ESY_PWM_CAP_POLARITY`, and unchanged
 peer output/timer settings. NULL unregister must succeed without changing the
 waveforms. If a native registration is retained by a target fault-injection
 fixture, fail its release: NULL unregister/deinit must retain the resource for
@@ -111,4 +116,4 @@ Keep waveform captures and native-call traces for both channels, especially
 conflict rejection, peer deinit and the final-owner transition. Error injection
 must return before the selected SDK operation mutates hardware; it must not
 simulate a documented pre-mutation failure after actually performing the call.
-DMA, wrap IRQ, complementary output and low-power support are outside this plan.
+DMA, wrap IRQ, complementary output and system sleep are outside this plan.

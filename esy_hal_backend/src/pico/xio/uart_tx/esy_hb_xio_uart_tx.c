@@ -8,6 +8,7 @@
 
 #include <string.h>
 #include <stdalign.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 #include "hardware/clocks.h"
@@ -35,8 +36,8 @@ typedef struct {
   void *dma_complete_arg;
   esy_dma_callback_t dma_error_cb;
   void *dma_error_arg;
-  _Atomic uint32_t dma_events;
-  bool dma_active;
+  atomic_bool dma_active;
+  bool dma_prepared;
   bool tx_pending;
   bool wire_check_started;
 } esy_uart_tx_ctx_t;
@@ -101,7 +102,7 @@ esy_err_t esy_hb_xio_uart_tx_init(esy_uart_t *uart,
 
   esy_uart_tx_ctx_t *tx_ctx = get_tx_ctx_slot(uart);
   memset(tx_ctx, 0, sizeof(*tx_ctx));
-  atomic_init(&tx_ctx->dma_events, 0u);
+  atomic_init(&tx_ctx->dma_active, false);
 
   esy_hb_xio_program_desc_t d = {
       .instructions = NULL,
@@ -190,16 +191,26 @@ int32_t esy_hb_xio_uart_tx_write_blocking(esy_uart_t *uart,
   return (int32_t)len;
 }
 
-enum { XIO_DMA_DONE = 1u, XIO_DMA_ERROR = 2u };
-
-static void uart_tx_dma_complete(void *arg) {
+/* Native completion IRQ retires caller memory before the terminal callback.
+ * Cancellation and lifecycle stay on the serialized control core. */
+static void uart_tx_dma_finish(void *arg, bool error) {
   esy_uart_tx_ctx_t *ctx = arg;
-  atomic_fetch_or_explicit(&ctx->dma_events, XIO_DMA_DONE, memory_order_release);
+  if (!atomic_load_explicit(&ctx->dma_active, memory_order_acquire)) return;
+  esy_err_t result = error
+      ? esy_hb_dma_abort_from_isr(ctx, ctx->dma_dreq, ctx->dma_channel)
+      : esy_hb_dma_retire_from_isr(ctx, ctx->dma_dreq, ctx->dma_channel);
+  if (result != ESY_OK) return; /* Retain storage for explicit abort recovery. */
+  esy_dma_callback_t callback = error ? ctx->dma_error_cb : ctx->dma_complete_cb;
+  void *callback_arg = error ? ctx->dma_error_arg : ctx->dma_complete_arg;
+  if (callback != NULL) callback(callback_arg);
+  ctx->dma_complete_cb = NULL;
+  ctx->dma_complete_arg = NULL;
+  ctx->dma_error_cb = NULL;
+  ctx->dma_error_arg = NULL;
+  atomic_store_explicit(&ctx->dma_active, false, memory_order_release);
 }
-static void uart_tx_dma_error(void *arg) {
-  esy_uart_tx_ctx_t *ctx = arg;
-  atomic_fetch_or_explicit(&ctx->dma_events, XIO_DMA_ERROR, memory_order_release);
-}
+static void uart_tx_dma_complete(void *arg) { uart_tx_dma_finish(arg, false); }
+static void uart_tx_dma_error(void *arg) { uart_tx_dma_finish(arg, true); }
 
 esy_err_t esy_hb_xio_uart_tx_write_dma(esy_uart_t *uart,
                                            esy_dma_config_t *dma_cfg) {
@@ -224,15 +235,21 @@ esy_err_t esy_hb_xio_uart_tx_write_dma(esy_uart_t *uart,
   transfer.callback_arg = tx_ctx;
   transfer.error_callback = uart_tx_dma_error;
   transfer.error_callback_arg = tx_ctx;
+  if (tx_ctx->dma_prepared) {
+    esy_err_t release = esy_hb_dma_release(tx_ctx, tx_ctx->dma_dreq,
+                                           tx_ctx->dma_channel);
+    if (release != ESY_OK) return release;
+    tx_ctx->dma_prepared = false;
+  }
   esy_err_t result = esy_hb_dma_prepare(tx_ctx, &transfer);
   if (result != ESY_OK) return result;
+  tx_ctx->dma_prepared = true;
   tx_ctx->dma_dreq = dma_cfg->inner.dreq;
   tx_ctx->dma_channel = dma_cfg->inner.channel;
   tx_ctx->dma_complete_cb = dma_cfg->callback;
   tx_ctx->dma_complete_arg = dma_cfg->callback_arg;
   tx_ctx->dma_error_cb = dma_cfg->error_callback;
   tx_ctx->dma_error_arg = dma_cfg->error_callback_arg;
-  atomic_store_explicit(&tx_ctx->dma_events, 0u, memory_order_release);
   tx_ctx->dma_active = true;
   tx_ctx->tx_pending = true;
   tx_ctx->wire_check_started = false;
@@ -258,26 +275,6 @@ esy_err_t esy_hb_xio_uart_tx_abort_dma(esy_uart_t *uart) {
   return ESY_OK;
 }
 
-esy_err_t esy_hb_xio_uart_tx_poll(esy_uart_t *uart) {
-  if (uart == NULL) return ESY_ERR_INVALID_ARG;
-  esy_uart_tx_ctx_t *ctx = uart->ctx[0];
-  if (ctx == NULL || !ctx->dma_active) return ESY_OK;
-  uint32_t events = atomic_load_explicit(&ctx->dma_events, memory_order_acquire);
-  if (events == 0u) return ESY_OK;
-  esy_dma_callback_t complete_cb = ctx->dma_complete_cb;
-  void *complete_arg = ctx->dma_complete_arg;
-  esy_dma_callback_t error_cb = ctx->dma_error_cb;
-  void *error_arg = ctx->dma_error_arg;
-  esy_err_t result = esy_hb_xio_uart_tx_abort_dma(uart);
-  if (result != ESY_OK) return result;
-  events = atomic_load_explicit(&ctx->dma_events, memory_order_acquire);
-  esy_dma_callback_t callback = (events & XIO_DMA_ERROR) != 0u
-      ? error_cb : complete_cb;
-  void *arg = (events & XIO_DMA_ERROR) != 0u
-      ? error_arg : complete_arg;
-  if (callback != NULL) callback(arg);
-  return ESY_OK;
-}
 
 uint8_t esy_hb_xio_uart_tx_get_pin(esy_uart_t *uart) {
   if (!uart) return ESY_PIN_UNUSED;
@@ -286,17 +283,26 @@ uint8_t esy_hb_xio_uart_tx_get_pin(esy_uart_t *uart) {
   return tx_ctx ? tx_ctx->tx_pin : ESY_PIN_UNUSED;
 }
 
-void esy_hb_xio_uart_tx_deinit(esy_uart_t *uart) {
-  if (!uart) return;
+esy_err_t esy_hb_xio_uart_tx_deinit(esy_uart_t *uart) {
+  if (!uart) return ESY_OK;
 
   esy_uart_tx_ctx_t *tx_ctx = (esy_uart_tx_ctx_t *)uart->ctx[0];
-  if (!tx_ctx) return;
-  if (esy_hb_xio_uart_tx_is_busy(uart)) return;
+  if (!tx_ctx) return ESY_OK;
+  if (esy_hb_xio_uart_tx_is_busy(uart)) return ESY_ERR_BUSY;
 
+  if (tx_ctx->dma_prepared) {
+    esy_err_t result = esy_hb_dma_release(tx_ctx, tx_ctx->dma_dreq,
+                                        tx_ctx->dma_channel);
+    if (result != ESY_OK) return result;
+    tx_ctx->dma_prepared = false;
+  }
   (void)esy_hb_xio_sm_stop(&tx_ctx->sm);
   (void)esy_hb_xio_sm_release(&tx_ctx->sm);
+  if (tx_ctx->sm.claimed) return ESY_ERR_BUSY;
   (void)esy_hb_xio_program_deinit(&tx_ctx->prog);
+  if (tx_ctx->prog.initialized) return ESY_ERR_BUSY;
 
   memset(tx_ctx, 0, sizeof(*tx_ctx));
   uart->ctx[0] = NULL;
+  return ESY_OK;
 }

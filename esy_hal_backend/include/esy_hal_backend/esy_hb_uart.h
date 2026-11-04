@@ -93,8 +93,7 @@ extern esy_err_t esy_hb_uart_init(esy_uart_t *uart,
  * and retains ctx until board pins are reset and esy_hb_uart_release succeeds.
  * @param[in,out] uart Reserved UART handle.
  * @return ESY_OK, INVALID_ARG, STATE for a foreign handle, BUSY for live work,
- * or a native cleanup error. ESP32 has no platform-owned RX worker: the owner
- * must complete/abort finite RX before cleanup, and callbacks run from poll.
+ * or a native cleanup error. Native DMA callbacks must retire before cleanup.
  */
 extern esy_err_t esy_hb_uart_deinit(esy_uart_t *uart);
 
@@ -111,11 +110,23 @@ extern esy_err_t esy_hb_uart_deinit(esy_uart_t *uart);
 extern int32_t esy_hb_uart_send_blocking(esy_uart_t *uart,
                                              const uint8_t *data, size_t len);
 
+/** @brief Copy TX bytes using a finite task-context timeout.
+ * @param uart Initialized native UART handle.
+ * @param data Borrowed only for this call; no later DMA access is permitted.
+ * @param len Number of bytes, representable by the selected port.
+ * @param timeout_ms Finite 1..INT32_MAX millisecond execution budget.
+ * @return Copied bytes, a partial count on expiry, or a negative error.
+ * Native bytes may remain on the wire after return; query is_transmitting.
+ * Never call from ISR, callbacks, or concurrently with TX/lifecycle.
+ */
+int32_t esy_hb_uart_send_timeout(esy_uart_t *uart, const uint8_t *data,
+                                size_t len, uint32_t timeout_ms);
+
 /**
  * @brief Receive data in blocking mode.
  *
  * This call blocks until the requested number of bytes is received
- * or an error occurs. Pico and STM32F4 reject active ordinary RX DMA or a
+ * or an error occurs. Pico, STM32F4 and ESP32 reject active ordinary RX DMA or a
  * continuous RX stream with ESY_ERR_BUSY before reading the peripheral.
  *
  * @param[in]  uart UART handle
@@ -129,13 +140,13 @@ extern int32_t esy_hb_uart_receive_blocking(esy_uart_t *uart, uint8_t *data,
                                                 size_t len);
 
 /**
- * @brief Transmit through the port's optional DMA-style interface.
- *
- * Pico and STM32F4 start an asynchronous transfer. ESP32 uses a synchronous
- * emulation: this call waits for physical TX completion and invokes the terminal
- * callback inline before returning ESY_OK. It has no bounded completion timeout.
- * Call from the serialized task owner, and include the selected port's blocking
- * behavior and inline callback in the caller's execution and lifetime contract.
+ * @brief Start finite native TX DMA with automatic source-retirement callback.
+ * Pico delivers completion from DMA IRQ after source and native DMA retirement;
+ * UART FIFO/shifter bytes may remain. STM32F4 additionally waits for UART TC IRQ
+ * after the final stop bit. Query is_transmitting for physical drain. ESP32
+ * returns NOT_SUPPORTED without borrowing data; io_scheduler supplies its
+ * asynchronous task delivery over bounded synchronous TX. No backend creates an
+ * OS worker or requires a caller progress operation.
  *
  * @param[in] uart       UART handle
  * @param[in] dma_config DMA transmit configuration
@@ -161,28 +172,23 @@ extern esy_err_t esy_hb_uart_receive_dma(esy_uart_t *uart,
 /** @brief Retire one DMA direction from its serialized task owner.
  * Success disables its UART requests and retires DMA, queued callbacks and
  * buffer access without invoking a terminal callback. Failure preserves the
- * request for poll/abort retry. No ISR or callback reentry is permitted.
+ * request for abort retry. No ISR or callback reentry is permitted.
+ * ESP32 accepts no DMA requests: an owned handle returns ESY_OK without
+ * changing synchronous FIFO traffic, including after DMA submission rejection.
  */
 esy_err_t esy_hb_uart_abort_dma(esy_uart_t *uart, bool is_tx);
-
-/** @brief Advance bounded task-owned DMA retirement for at most two directions.
- * Pico/STM32 IRQs publish events only. SDK abort time contributes to this call;
- * failed retirement retains buffers and callbacks for a later poll/abort.
- * ESP32 advances at most 1024 RX bytes and one terminal callback per poll;
- * the caller must poll often enough for its configured line rate and buffering.
- */
-esy_err_t esy_hb_uart_poll(esy_uart_t *uart);
 
 /** @brief Native direction/callback access remains active until false. */
 bool esy_hb_uart_is_dma_busy(const esy_uart_t *uart, bool is_tx);
 
-/** @brief Borrow caller RX storage and publish stream events from the IRQ.
+/** @brief Borrow caller RX storage and publish stream events from native IRQs.
  * Pico's first successful stream start on each core fixes that core's UART RX
  * IRQ priority until reset, because static dispatchers stay installed after
  * stop. Every stream started there must request the same board-provided
  * priority; a conflict returns BUSY before borrowing storage/callbacks or
  * changing hardware. Native users must not change the owned IRQ priorities.
  * Stream lifecycle is serialized by the task owner; callbacks never reenter it.
+ * ESP32 returns NOT_SUPPORTED without borrowing storage or callback context.
  */
 extern esy_err_t esy_hb_uart_rx_stream_start(
     esy_uart_t *uart, uint8_t *storage, size_t storage_size,
@@ -213,6 +219,7 @@ extern void esy_hb_uart_handle_irq(uint8_t phys_index);
  *
  * Remaining counts are reported in DMA transfer units (not bytes). For
  * single-direction DMA usage, either output pointer may be NULL.
+ * ESP32 returns NOT_SUPPORTED because public UART DMA is unavailable.
  *
  * @param[in]  uart               UART handle
  * @param[out] out_tx_remaining   Remaining TX transfer count (units), may be
@@ -243,7 +250,7 @@ extern bool esy_hb_uart_is_transmitting(const esy_uart_t *uart);
  *
  * Typically used for low-power modes.
  * Serialize lifecycle and I/O on the owner task after asynchronous work and
- * callbacks retire. ESP32 returns BUSY for an active RX callback/transfer or
+ * callbacks retire. ESP32 returns BUSY for
  * undrained physical TX. It gates RX data interrupts while retaining the native
  * SDK driver and RX/TX ring buffers until final deinit. This retains SDK
  * buffers and clocks; it is not a claim of deep-sleep or clock-gating support.
@@ -303,7 +310,7 @@ extern esy_err_t esy_hb_uart_set_baudrate(esy_uart_t *uart,
  *
  * Uses @ref esy_uart_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits represent native asynchronous transfer.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  uart     UART handle

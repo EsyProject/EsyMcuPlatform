@@ -16,7 +16,7 @@
 #include "esy_common/defs/base/esy_common_defs.h"
 #include "esy_common/ds/esy_block_ring.h"
 #include "esy_hal/esy_hal_spi.h"
-#include "esy_hal/esy_hal_dma.h"
+#include "esy_common/defs/peripheral/esy_dma_defs.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -183,7 +183,8 @@ void esy_spi_scheduler_core_default_cfg(esy_spi_scheduler_core_config_t *cfg);
 /**
  * @brief Create a caller-driven instance with no worker task.
  * @note One non-ISR owner serializes create/process/destroy and producer calls.
- * DMA callbacks only publish completion. Keep SPI, requests, payloads and callback
+ * DMA callbacks only publish completion. Drive processing regularly while work
+ * remains active. Keep SPI, requests, payloads and callback
  * contexts alive until destroy succeeds. All application callbacks run inside
  * process; do not recursively process/destroy the instance from them.
  * @param spi Initialized, borrowed SPI handle with exclusive transport ownership.
@@ -204,13 +205,14 @@ esy_err_t esy_spi_scheduler_core_create(esy_spi_t *spi,
  * @note May also complete that next request synchronously. Provider calls,
  * including hardware cleanup/abort, blocking fallback and callbacks determine
  * call duration: this is a
- * request budget, not a time deadline. Poll regularly to retire DMA and meet
- * transport latency. No delay, wait or OS operation is performed by the engine.
+ * request budget, not a time deadline. Each active turn services HAL retirement
+ * once. Use next_wait_ms to pace subsequent turns. No delay, wait or OS
+ * operation is performed by the engine.
  * Returns OK for a valid idle/quiesced instance; STATE for an OS-owned instance
  * or reentrant call. During a BUSY destroy, continue processing to drain active
  * I/O, then retry destroy. Every accepted request must finish before stop is accepted.
  * A failed DMA submission that remains busy retains its buffers, prepared
- * resources and queue slot. Later steps poll for terminal retirement, then try
+ * resources and queue slot. Later steps process terminal retirement, then try
  * abort once if no terminal callback arrived. Failed cleanup retains ownership;
  * successful abort cancels silently and completes the request with its submit
  * error. Only an idle unsupported rejection may use the blocking fallback.
@@ -220,6 +222,18 @@ esy_err_t esy_spi_scheduler_core_create(esy_spi_t *spi,
  * @retval ESY_ERR_STATE Inactive, OS-owned or reentrant instance.
  */
 esy_err_t esy_spi_scheduler_core_process(esy_spi_scheduler_t *gw);
+/**
+ * @brief Query the serialized owner's next relative wait in milliseconds.
+ * @return Zero for queued work ready to start, one millisecond while a transfer
+ * remains active, or UINT32_MAX while idle. NULL/inactive instances return MAX.
+ * @note Query only in the execution owner, outside process/callbacks. A finite
+ * result is a relative scheduling interval, not a stored deadline. Requery
+ * after each process call; completed work never rearms itself. Active processing
+ * collects DMA/native results, waits for physical wire completion and retries
+ * failed cleanup while retaining ownership. The provider and owner determine
+ * retry duration. Caller-driven owners arrange their own submission scheduling.
+ */
+uint32_t esy_spi_scheduler_next_wait_ms(const esy_spi_scheduler_t *gw);
 /**
  * @brief Destroy an SPI Scheduler instance.
  *
@@ -283,28 +297,6 @@ extern esy_err_t esy_spi_scheduler_submit(esy_spi_scheduler_t *gw,
 /* -------------------------------------------------------------------------- */
 
 /**
- * @brief Get pre-allocated TX/RX buffers and return an error status.
- *
- * If the scheduler instance (identified by @p arg) is configured with pre-allocated
- * buffers, this function returns pointers that the caller can fill directly.
- *
- * @param[out] tx_buf Returned TX buffer pointer (may be NULL if TX is not allocated).
- * @param[out] rx_buf Returned RX buffer pointer (may be NULL if RX is not allocated).
- * @param[in]  arg    User argument that associates the call with an internal
- *                    scheduler instance (multi-instance support is implementation-defined).
- *
- * @retval ESY_OK              Writable block reserved successfully.
- * @retval ESY_ERR_INVALID_ARG Invalid scheduler or output pointer arguments.
- * @retval ESY_ERR_STATE       A writable block is already reserved and must be
- *                             submitted first.
- * @retval ESY_ERR_BUSY        No writable block is currently available.
- */
-extern esy_err_t esy_spi_scheduler_get_write_buffer_with_arg(
-    uint8_t **tx_buf,
-    uint8_t **rx_buf,
-    void *arg);
-
-/**
  * @brief Reserve full-duplex buffers after checking both writable capacities.
  *
  * Use this adapter for sized touch-provider callbacks. It checks the scheduler's
@@ -331,7 +323,7 @@ extern esy_err_t esy_spi_scheduler_get_read_write_buffer_with_arg(
 /** @brief Queue a byte transfer, including RX-only/full duplex.
  * done is required; uses the same buffer reservation and ownership rules.
  * Accepted requests receive exactly one terminal callback, including failure.
- * A failed DMA submit that stays busy delays this callback until poll retirement
+ * A failed DMA submit that stays busy delays this callback until process retirement
  * or successful abort; buffers/context remain borrowed throughout cleanup.
  * Destroy/quiesce return BUSY until these requests drain. Errors returned
  * directly retain no internally reserved block. Buffers/context remain borrowed

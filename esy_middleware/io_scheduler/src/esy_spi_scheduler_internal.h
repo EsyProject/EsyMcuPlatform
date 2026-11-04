@@ -25,6 +25,7 @@ struct esy_spi_scheduler_s {
   atomic_bool quiesced;                ///< PM transition blocks new transfers.
   atomic_bool ready;
   atomic_bool dma_done;
+  atomic_uint notifying;              ///< Completions still using this context.
   bool wire_pending;
   bool failed_submit;
   esy_spi_scheduler_request_t *write_req; ///< Currently borrowed write block.

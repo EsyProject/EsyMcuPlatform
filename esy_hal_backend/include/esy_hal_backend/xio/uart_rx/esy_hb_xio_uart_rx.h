@@ -39,7 +39,7 @@ extern "C" {
  * and brings up the backend resources. No dynamic memory allocation is performed.
  * Initialize the complete handle with {0} before its first direction init.
  * RX and TX may then own separate slots of the same handle. One task/core owner
- * serializes init/deinit, I/O and polling for both directions. Never copy or
+ * serializes init/deinit, I/O for both directions. Never copy or
  * clear live storage or callbacks. A repeated RX init returns STATE unchanged.
  * A failed first RX init retains no program/SM and may be retried. The pin must
  * exist on the selected chip and lie in GPIO 0..31.
@@ -79,6 +79,10 @@ int32_t esy_hb_xio_uart_rx_read_blocking(esy_uart_t *uart,
  * This function does not allocate memory.
  *
  * @param[in] uart     UART handle
+ * Completion/error is delivered automatically from a native IRQ after memory
+ * access retires. No caller progress function or OS dependency is required.
+ * Callbacks are bounded/nonblocking and cannot reenter I/O or lifecycle.
+ *
  * @param[in] dma_cfg  DMA configuration (board mapping typically fills dreq/channel/irq/priority, etc.)
  * @retval ESY_OK  Successfully started
  * @retval <0      Error code
@@ -109,22 +113,18 @@ uint8_t esy_hb_xio_uart_rx_get_pin(esy_uart_t *uart);
  *
  * @param[in,out] uart  UART handle (private backend context is cleared/reset)
  * @note Stop producers and finish callback retirement before this task-owner
- * call. Active DMA leaves the direction unchanged: complete owner polling or
+ * call. Active DMA leaves the direction unchanged: await IRQ completion or
  * abort successfully before retrying. Otherwise cleanup clears only the RX
  * slot, preserves TX, and permits RX reinitialization. An unused RX is a no-op.
+ * @return OK after complete cleanup; BUSY or native failure retains the
+ * direction and backing storage for retry. Never clear retained context.
  */
-void esy_hb_xio_uart_rx_deinit(esy_uart_t *uart);
+esy_err_t esy_hb_xio_uart_rx_deinit(esy_uart_t *uart);
 
 /** @brief Task-owner cancellation; success retires native DMA and callbacks.
  * Failure retains caller storage for retry. Received PIO bytes remain buffered.
  */
 esy_err_t esy_hb_xio_uart_rx_abort_dma(esy_uart_t *uart);
-
-/** @brief Retire published terminal IRQ events before notifying the owner.
- * One direction is checked per call; SDK abort and callback time contribute.
- * Never call from ISR or callbacks. Unconfigured directions are harmless.
- */
-esy_err_t esy_hb_xio_uart_rx_poll(esy_uart_t *uart);
 
 #ifdef __cplusplus
 }

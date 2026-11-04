@@ -59,13 +59,14 @@ typedef struct esy_i2c_s esy_i2c_t;
  * Bits describe implemented operations for the current handle/role, subject to
  * board resources, configuration limits and normal runtime errors. A set bit
  * neither reserves a resource nor guarantees every parameter combination.
- * DMA-named bits describe the corresponding API, not native DMA or asynchronous
- * completion. Unknown bits must be ignored; zero is a valid capability mask.
+ * DMA capabilities require native hardware DMA and asynchronous completion;
+ * synchronous software substitutes must not set them. Unknown bits must be
+ * ignored; zero is a valid capability mask.
  */
 typedef enum {
   ESY_I2C_CAP_MASTER_TRANSFER = 1u << 0, /**< Master blocking write/read/transfer entry points. */
   ESY_I2C_CAP_REPEATED_START = 1u << 1, /**< Combined master write/read without an intervening STOP. */
-  ESY_I2C_CAP_DMA_TRANSFER = 1u << 2, /**< Master write_dma/read_dma entry points; may complete synchronously. */
+  ESY_I2C_CAP_DMA_TRANSFER = 1u << 2, /**< Native asynchronous master write_dma/read_dma entry points. */
   ESY_I2C_CAP_RECOVERY = 1u << 3, /**< Master recover_bus entry point; may reset only the controller/driver. */
 } esy_i2c_cap_t;
 

@@ -28,7 +28,6 @@ typedef struct {
     uint8_t phys_index;
     bool enabled;
     bool transfer_active;
-    bool callback_active;
     bool cleanup_pending;
 } esp32_i2c_ctx_t;
 
@@ -90,7 +89,7 @@ esy_err_t esy_hb_i2c_claim(esy_i2c_t *i2c, uint8_t phys_index) {
 bool esy_hb_i2c_is_busy(const esy_i2c_t *i2c) {
     const esp32_i2c_ctx_t *context = i2c_context(i2c);
     return context != NULL &&
-           (context->transfer_active || context->callback_active);
+           (context->transfer_active);
 }
 
 static bool i2c_pins_are_valid(const esy_i2c_inner_config_t *inner) {
@@ -308,28 +307,14 @@ int32_t esy_hb_i2c_read_blocking(esy_i2c_t *i2c, uint16_t addr,
 
 esy_err_t esy_hb_i2c_write_dma(esy_i2c_t *i2c, uint16_t addr,
                               esy_dma_config_t *dma_config) {
-    if (dma_config == NULL) return ESY_ERR_INVALID_ARG;
-    int32_t result = esy_hb_i2c_write_blocking(
-        i2c, addr, dma_config->src, dma_config->length);
-    if (result < 0) return (esy_err_t)result;
-    esp32_i2c_ctx_t *context = i2c_context(i2c);
-    context->callback_active = true;
-    if (dma_config->callback != NULL) dma_config->callback(dma_config->callback_arg);
-    context->callback_active = false;
-    return ESY_OK;
+    (void)i2c; (void)addr; (void)dma_config;
+    return ESY_ERR_NOT_SUPPORTED;
 }
 
 esy_err_t esy_hb_i2c_read_dma(esy_i2c_t *i2c, uint16_t addr,
                              esy_dma_config_t *dma_config) {
-    if (dma_config == NULL) return ESY_ERR_INVALID_ARG;
-    int32_t result = esy_hb_i2c_read_blocking(
-        i2c, addr, dma_config->dst, dma_config->length);
-    if (result < 0) return (esy_err_t)result;
-    esp32_i2c_ctx_t *context = i2c_context(i2c);
-    context->callback_active = true;
-    if (dma_config->callback != NULL) dma_config->callback(dma_config->callback_arg);
-    context->callback_active = false;
-    return ESY_OK;
+    (void)i2c; (void)addr; (void)dma_config;
+    return ESY_ERR_NOT_SUPPORTED;
 }
 
 esy_err_t esy_hb_i2c_set_speed(esy_i2c_t *i2c, uint32_t speed_hz) {
@@ -359,7 +344,7 @@ esy_err_t esy_hb_i2c_get_caps(const esy_i2c_t *i2c, uint32_t *out_caps) {
     const esp32_i2c_ctx_t *context = i2c_context(i2c);
     if (context == NULL || !context->enabled) return ESY_ERR_STATE;
     *out_caps = ESY_I2C_CAP_MASTER_TRANSFER | ESY_I2C_CAP_REPEATED_START |
-                ESY_I2C_CAP_DMA_TRANSFER | ESY_I2C_CAP_RECOVERY;
+                ESY_I2C_CAP_RECOVERY;
     return ESY_OK;
 }
 

@@ -18,8 +18,10 @@
  *
  * Concurrency & context:
  * - Most APIs are synchronous configuration calls.
- * - One owner serializes all calls, including poll, abort and deinit. DMA IRQs
- *   only publish events; the owner must call poll to retire DMA and notify users.
+ * - One owner serializes configuration, submission, abort and deinit. Native
+ *   DMA IRQs automatically retire finite/error transfers and deliver callbacks.
+ *   Circular/half callbacks retain ownership. No OS or caller progress hook is
+ *   required. Callbacks must not reenter PWM control/lifecycle.
  * - Callbacks registered here may run in interrupt context; blocking operations
  *   are not allowed inside callbacks.
  *
@@ -77,6 +79,17 @@
  *   retains the claim and handle for deinit retry; do not use or discard that
  *   handle until cleanup succeeds. A timer awaiting final cleanup rejects new
  *   channel claims even at the same frequency.
+ * - Polarity controls only the channel's GPIO-matrix inversion. Disabled and
+ *   suspended outputs stay at the selected idle level (start_low selects low);
+ *   changing polarity while running may change the level within a period.
+ *   It does not reset, pause or reconfigure the shared timer.
+ * - Suspend silences one output while retaining its timer claim, duty and
+ *   enable state. Resume restores a previously enabled output and leaves a
+ *   previously disabled output idle. Repeated suspend or unmatched resume
+ *   returns STATE. Enable and set-duty return STATE while suspended; polarity
+ *   and the shared-frequency ownership rules remain available. Failed native
+ *   suspend/resume retains the previous software state for retry. Channel
+ *   suspension does not enter system sleep or release the LEDC clock claim.
  */
 
 #ifndef ESY_HAL_PWM_H
@@ -162,6 +175,8 @@ extern esy_err_t esy_hal_pwm_deinit(esy_pwm_t *pwm);
  * @retval ESY_ERR_STATE        PWM not initialized or not enabled.
  * @retval ESY_ERR_NOT_SUPPORTED Duty endpoint cannot be represented by this period.
  * @retval ESY_ERR_FAIL         Other failure.
+ * @note ESP32 also rejects set-duty while the channel is suspended. Nonfinite
+ * duty requests are invalid and leave the accepted duty unchanged.
  */
 extern esy_err_t esy_hal_pwm_set_duty(esy_pwm_t *pwm, float duty_cycle);
 
@@ -194,6 +209,7 @@ extern esy_err_t esy_hal_pwm_set_wrap(esy_pwm_t *pwm, uint32_t freq_hz);
  * @retval ESY_ERR_INVALID_ARG  Invalid arguments.
  * @retval ESY_ERR_STATE        PWM not initialized.
  * @retval ESY_ERR_FAIL         Other failure.
+ * @note ESP32 enable/disable returns STATE while the channel is suspended.
  */
 extern esy_err_t esy_hal_pwm_enable(esy_pwm_t *pwm, bool enable);
 
@@ -239,14 +255,14 @@ extern esy_err_t esy_hal_pwm_enable_trigger_output(esy_pwm_t *pwm,
  * generic DMA provider rejects circular mode. Pico also requires sole slice
  * ownership, including disabled peers. ESP32 DMA remains unsupported.
  * @note Either loop or dma_cfg.circular requests circular operation. Finite
- * completion/error and circular cycle/half notifications are delivered only by
- * esy_hal_pwm_poll on the owner. Circular notifications may coalesce between
- * polls. Keep buffers, handle and callback arguments alive until a terminal
+ * completion/error and circular cycle/half notifications run automatically in
+ * native IRQ context, without an OS or caller progress hook. Keep buffers,
+ * handle and callback arguments alive until a terminal
  * callback returns or abort succeeds; hardware idle or an IRQ is insufficient.
  * Submission/cleanup failure can retain a borrow: retry abort before reuse.
  * While DMA/callback work is pending, control calls return BUSY; deinit first
  * attempts retirement and retains ownership if cleanup fails.
- * Callbacks must not reenter PWM calls or release handle/binding storage.
+ * Callbacks must not reenter PWM calls or release handle/context storage.
  *
  * @param[in] pwm     PWM handle.
  * @param[in] dma_cfg DMA configuration describing the transfer.
@@ -274,21 +290,15 @@ extern esy_err_t esy_hal_pwm_dma_output(esy_pwm_t *pwm,
  */
 extern esy_err_t esy_hal_pwm_abort_dma(esy_pwm_t *pwm);
 
-/**
- * @brief Advance retirement and deliver at most one notification of each kind.
- * @param[in,out] pwm Initialized PWM handle.
- * @return ESY_OK, or a provider cleanup error with DMA ownership retained.
- * @note Call regularly from the serialized owner until finite completion/error
- * is delivered, and while circular notifications are desired. No fixed period
- * is imposed: polling cadence bounds notification latency, not waveform timing.
- * Terminal work retires hardware and callbacks before notifying the caller.
- * Finite completion reports consumed DMA elements and leaves PWM enabled,
- * holding the final compare after its next hardware preload update. It does
- * not promise the end of that output period. Explicitly disable ordinary output
- * before runtime suspension. Error/abort stops output instead.
- * Cleanup may wait in the provider; user callback duration is part of this call.
+
+/** @brief Query software output/DMA ownership from the serialized owner.
+ * True means an initialized handle has no enabled output, active DMA or running
+ * callback. Hardware counter idleness alone does not retire borrowed storage.
+ * NULL/uninitialized handles return false; never call concurrently with PWM
+ * lifecycle/data operations. This query does not access the backend or hardware.
  */
-extern esy_err_t esy_hal_pwm_poll(esy_pwm_t *pwm);
+bool esy_hal_pwm_is_idle(const esy_pwm_t *pwm);
+
 
 /**
  * @brief Register a wrap (period) interrupt callback.
@@ -325,6 +335,9 @@ extern esy_err_t esy_hal_pwm_set_wrap_handler(esy_pwm_t *pwm,
 
 /**
  * @brief Suspend a PWM instance for low-power operation (optional).
+ * @note ESP32 stops this channel only and preserves its shared timer ownership
+ * and enable intent. A second suspend returns STATE. Registered instances use
+ * their device lifecycle instead of calling this direct API.
  *
  * @param[in] pwm PWM handle.
  *
@@ -338,6 +351,8 @@ extern esy_err_t esy_hal_pwm_suspend(esy_pwm_t *pwm);
 
 /**
  * @brief Resume a previously suspended PWM instance (optional).
+ * @note ESP32 restores output only if it was enabled before suspension. An
+ * unmatched resume returns STATE; failure keeps the channel suspended for retry.
  *
  * @param[in] pwm PWM handle.
  *
@@ -384,7 +399,7 @@ extern esy_err_t esy_hal_pwm_set_clock_source(esy_pwm_t *pwm,
  *
  * Uses @ref esy_pwm_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  pwm      PWM handle.

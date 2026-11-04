@@ -49,11 +49,11 @@ static void spi_dma_complete(esy_spi_t *spi,
 
   binding->async_complete_cb = NULL;
   binding->async_user_data = NULL;
-  binding->async_ref_held = false;
   if (complete_cb != NULL) {
     complete_cb(spi, result, complete_arg);
   }
   (void)esy_device_put_from_isr(esy_hal_spi_runtime(spi)->device);
+  atomic_store_explicit(&binding->async_ref_held, false, memory_order_release);
 }
 
 esy_err_t esy_hal_spi_unregister_device(
@@ -257,7 +257,7 @@ extern esy_err_t esy_hal_spi_transfer_dma(
     return spi->ops->transfer_dma(spi, tx_dma_cfg, rx_dma_cfg, complete_cb,
                                  user_data);
   }
-  if (binding->async_ref_held) {
+  if (binding->async_ref_held || esy_hal_spi_is_busy(spi)) {
     return ESY_ERR_BUSY;
   }
   ret = spi_acquire(spi);
@@ -342,10 +342,4 @@ extern esy_err_t esy_hal_spi_get_phys_index(const esy_spi_t *spi,
   if (!spi || !out_index) return ESY_ERR_INVALID_ARG;
   if (spi->ops == NULL || spi->ops->get_phys_index == NULL) return ESY_ERR_NOT_IMPLEMENTED;
   return spi->ops->get_phys_index(spi, out_index);
-}
-
-esy_err_t esy_hal_spi_poll(esy_spi_t *spi) {
-  if (!spi) return ESY_ERR_INVALID_ARG;
-  if (spi->ops == NULL || spi->ops->poll == NULL) return ESY_ERR_STATE;
-  return spi->ops->poll(spi);
 }

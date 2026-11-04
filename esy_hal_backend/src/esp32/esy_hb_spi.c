@@ -33,11 +33,6 @@ typedef struct {
     uint8_t mode;
     uint32_t cs_pin;
     
-    bool dma_in_progress;
-    spi_transaction_t dma_transaction;
-    esy_dma_callback_t dma_callback;
-    void *dma_callback_arg;
-    
     esy_spi_t *bound_handle;
 } esp32_spi_ctx_t;
 
@@ -129,7 +124,7 @@ esy_err_t esy_hb_spi_claim(esy_spi_t *spi, const esy_spi_config_t *cfg) {
     if (spi->ctx != NULL) {
         esp32_spi_ctx_t *c = spi_context(spi);
         return c != NULL && c->phys_index == cfg->phys_index &&
-                       !c->bus_owned && !c->slave_owned && !c->dma_in_progress
+                       !c->bus_owned && !c->slave_owned
                    ? ESY_OK : ESY_ERR_STATE;
     }
     esy_spi_t *expected = NULL;
@@ -157,8 +152,7 @@ esy_err_t esy_hb_spi_release(esy_spi_t *spi) {
     if (spi->ctx == NULL) return ESY_OK;
     esp32_spi_ctx_t *c = spi_context(spi);
     if (c == NULL) return ESY_ERR_STATE;
-    if (c->bus_owned || c->slave_owned || c->device_handle != NULL ||
-        c->dma_in_progress) return ESY_ERR_BUSY;
+    if (c->bus_owned || c->slave_owned || c->device_handle != NULL) return ESY_ERR_BUSY;
     uint8_t index = c->phys_index;
     memset(c, 0, sizeof(*c));
     spi->ctx = NULL;
@@ -183,9 +177,6 @@ esy_err_t esy_hb_spi_init(esy_spi_t *spi, const esy_spi_config_t *cfg) {
     c->is_msb_first = cfg->is_msb_first;
     c->mode = cfg->mode & 0x3u;
     c->cs_pin = cfg->inner.cs_pin;
-    c->dma_in_progress = false;
-    c->dma_callback = NULL;
-    c->dma_callback_arg = NULL;
 
     esp_err_t ret;
     
@@ -204,6 +195,8 @@ esy_err_t esy_hb_spi_init(esy_spi_t *spi, const esy_spi_config_t *cfg) {
             .quadwp_io_num = -1,
             .quadhd_io_num = -1,
             .max_transfer_sz = ESP32_SPI_MAX_TRANSFER_BYTES,
+            /* Native transaction resources remain private to synchronous calls. */
+            .intr_flags = 0,
         };
 
         ret = spi_slave_initialize(c->host_id, &bus_config, &slave_config, ESP32_SPI_DMA_CHAN);
@@ -217,6 +210,8 @@ esy_err_t esy_hb_spi_init(esy_spi_t *spi, const esy_spi_config_t *cfg) {
             .quadwp_io_num = -1,
             .quadhd_io_num = -1,
             .max_transfer_sz = ESP32_SPI_MAX_TRANSFER_BYTES,
+            /* Native transaction resources remain private to synchronous calls. */
+            .intr_flags = 0,
         };
 
         ret = spi_bus_initialize(c->host_id, &bus_config, ESP32_SPI_DMA_CHAN);
@@ -260,7 +255,6 @@ esy_err_t esy_hb_spi_deinit(esy_spi_t *spi) {
     if (spi->ctx == NULL) return ESY_OK;
     esp32_spi_ctx_t *c = spi_context(spi);
     if (c == NULL) return ESY_ERR_STATE;
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
     if (c->slave_owned) {
         if (spi_slave_free(c->host_id) != ESP_OK) return ESY_ERR_FAIL;
         c->slave_owned = false;
@@ -288,7 +282,6 @@ int32_t esy_hb_spi_write_blocking(esy_spi_t *spi, const uint8_t *tx_buf, size_t 
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
     spi_transaction_t trans = {0};
     trans.length = len * 8;
@@ -310,7 +303,6 @@ int32_t esy_hb_spi_read_blocking(esy_spi_t *spi, uint8_t *rx_buf, size_t len) {
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
     spi_transaction_t trans = {0};
     trans.length = len * 8;
@@ -335,7 +327,6 @@ int32_t esy_hb_spi_transfer_blocking(esy_spi_t *spi, const uint8_t *tx_buf,
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
     spi_transaction_t trans = {0};
     trans.length = len * 8;
@@ -360,7 +351,6 @@ int32_t esy_hb_spi_write16_blocking(esy_spi_t *spi, const uint16_t *tx_buf, size
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
     spi_transaction_t trans = {0};
     trans.length = len * 16;
@@ -383,7 +373,6 @@ int32_t esy_hb_spi_read16_blocking(esy_spi_t *spi, uint16_t *rx_buf, size_t len)
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
     spi_transaction_t trans = {0};
     trans.length = len * 16;
@@ -408,7 +397,6 @@ int32_t esy_hb_spi_transfer16_blocking(esy_spi_t *spi, const uint16_t *tx_buf,
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
     spi_transaction_t trans = {0};
     trans.length = len * 16;
@@ -426,70 +414,9 @@ esy_err_t esy_hb_spi_transfer_dma(esy_spi_t *spi, esy_dma_config_t *tx_dma_confi
                                      esy_dma_config_t *rx_dma_config,
                                      esy_spi_dma_complete_cb_t complete_cb,
                                      void *user_data) {
-    if (!spi || !spi_context(spi)) {
-        return ESY_ERR_INVALID_ARG;
-    }
-    
-    esp32_spi_ctx_t *c = spi_context(spi);
-    if (!c->enabled || c->role == ESY_SPI_ROLE_SLAVE) {
-        return ESY_ERR_STATE;
-    }
-
-    if (c->dma_in_progress) {
-        return ESY_ERR_BUSY;
-    }
-
-    const void *tx_memory = tx_dma_config ? tx_dma_config->src : NULL;
-    void *rx_memory = rx_dma_config ? rx_dma_config->dst : NULL;
-    if (tx_memory == NULL && rx_memory == NULL) {
-        return ESY_ERR_INVALID_ARG;
-    }
-    const esy_dma_config_t *active_config = tx_memory ? tx_dma_config : rx_dma_config;
-    const size_t transfer_len = active_config->length;
-    if (transfer_len == 0u || transfer_len > ESP32_SPI_MAX_TRANSFER_BYTES ||
-        transfer_len > SIZE_MAX / 8u) {
-        return ESY_ERR_INVALID_ARG;
-    }
-    const esy_dma_config_t *configs[2] = {tx_dma_config, rx_dma_config};
-    const esy_dma_transfer_size_t expected_width = c->data_bits > 8u
-        ? ESY_DMA_TRANSFER_SIZE_16 : ESY_DMA_TRANSFER_SIZE_8;
-    const size_t unit_bytes = expected_width == ESY_DMA_TRANSFER_SIZE_16
-                                 ? sizeof(uint16_t) : sizeof(uint8_t);
-    if (transfer_len % unit_bytes != 0u) return ESY_ERR_INVALID_ARG;
-    for (size_t i = 0u; i < 2u; ++i) {
-        const esy_dma_config_t *config = configs[i];
-        if (config == NULL) continue;
-        if (config->length != transfer_len) return ESY_ERR_INVALID_ARG;
-        if (config->circular) return ESY_ERR_NOT_SUPPORTED;
-        if (config->transfer_size != expected_width) return ESY_ERR_NOT_SUPPORTED;
-    }
-    if ((tx_memory != NULL && (uintptr_t)tx_memory % unit_bytes != 0u) ||
-        (rx_memory != NULL && (uintptr_t)rx_memory % unit_bytes != 0u)) {
-        return ESY_ERR_INVALID_ARG;
-    }
-
-    memset(&c->dma_transaction, 0, sizeof(c->dma_transaction));
-    c->dma_transaction.length = transfer_len * 8;
-    c->dma_transaction.rxlength = rx_memory ? transfer_len * 8u : 0u;
-    c->dma_transaction.tx_buffer = tx_memory;
-    c->dma_transaction.rx_buffer = rx_memory;
-    c->dma_transaction.user = c;
-
-    c->dma_in_progress = true;
-    esy_err_t ret = spi_transmit(c, &c->dma_transaction);
-    c->dma_in_progress = false;
-    if (ret != ESY_OK) return ret;
-
-    if (complete_cb) {
-        const esy_spi_dma_transfer_result_t result = {
-            .status = ESY_SPI_DMA_TRANSFER_OK,
-            .tx_transferred = tx_memory ? transfer_len : 0u,
-            .rx_transferred = rx_memory ? transfer_len : 0u,
-        };
-        complete_cb(spi, &result, user_data);
-    }
-
-    return ESY_OK;
+    (void)spi; (void)tx_dma_config; (void)rx_dma_config;
+    (void)complete_cb; (void)user_data;
+    return ESY_ERR_NOT_SUPPORTED;
 }
 
 esy_err_t esy_hb_spi_get_dma_trans_count_remaining(const esy_spi_t *spi,
@@ -521,24 +448,13 @@ esy_err_t esy_hb_spi_set_speed(esy_spi_t *spi, uint32_t speed_hz) {
         return ESY_ERR_STATE;
     }
 
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
 
-    c->speed_hz = speed_hz;
     return ESY_ERR_NOT_SUPPORTED;
 }
 
 esy_err_t esy_hb_spi_abort(esy_spi_t *spi) {
-    if (!spi || !spi_context(spi)) {
-        return ESY_ERR_INVALID_ARG;
-    }
-    
-    esp32_spi_ctx_t *c = spi_context(spi);
-    if (!c->enabled) {
-        return ESY_ERR_STATE;
-    }
-
-    if (c->dma_in_progress) return ESY_ERR_BUSY;
-    return ESY_ERR_NOT_SUPPORTED;
+    if (spi_context(spi) == NULL) return ESY_ERR_INVALID_ARG;
+    return ESY_OK;
 }
 
 esy_err_t esy_hb_spi_get_caps(const esy_spi_t *spi, uint32_t *out_caps) {
@@ -546,7 +462,7 @@ esy_err_t esy_hb_spi_get_caps(const esy_spi_t *spi, uint32_t *out_caps) {
     const esp32_spi_ctx_t *c = spi_context(spi);
     if (!c->enabled) return ESY_ERR_STATE;
     *out_caps = c->role != ESY_SPI_ROLE_SLAVE
-                    ? (ESY_SPI_CAP_DMA_TRANSFER | ESY_SPI_CAP_TRANSFER16)
+                    ? ESY_SPI_CAP_TRANSFER16
                     : 0u;
     return ESY_OK;
 }
@@ -565,10 +481,7 @@ void esy_hb_spi_handle_irq(esy_spi_t *spi) {
     (void)spi;
 }
 
-esy_err_t esy_hb_spi_poll(esy_spi_t *spi) {
-    return spi_context(spi) != NULL ? ESY_OK : ESY_ERR_INVALID_ARG;
-}
 bool esy_hb_spi_is_busy(esy_spi_t *spi) {
-    esp32_spi_ctx_t *c = spi_context(spi);
-    return c != NULL && c->dma_in_progress;
+    (void)spi;
+    return false;
 }

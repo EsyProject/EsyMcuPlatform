@@ -18,13 +18,12 @@
 
 #define STM32F4_UART_MAX 4u
 
-enum { UART_DMA_DONE = 1u, UART_DMA_ERROR = 2u, UART_DMA_HALF = 4u };
-
 typedef struct {
   esy_uart_t *owner;
   esy_dma_config_t config;
-  _Atomic uint32_t events;
-  bool active;
+  esy_dma_inner_config_t route;
+  atomic_bool active;
+  bool waiting_tc;
   bool is_tx;
 } stm32_uart_dma_t;
 
@@ -78,20 +77,42 @@ static void uart_dma_requests(USART_TypeDef *instance, bool is_tx, bool enable) 
   __set_PRIMASK(key);
 }
 
-static void uart_dma_publish(stm32_uart_dma_t *direction, uint32_t event) {
+/* Finite completion is interrupt driven. RX retires at DMA completion; TX
+ * retains its callback until the UART TC IRQ confirms the final stop bit. */
+static void uart_dma_deliver(stm32_uart_dma_t *direction, bool error) {
+  esy_dma_config_t completed = direction->config;
+  esy_dma_callback_t callback = error ? completed.error_callback : completed.callback;
+  void *arg = error ? completed.error_callback_arg : completed.callback_arg;
+  if (callback != NULL) callback(arg);
+  memset(&direction->config, 0, sizeof(direction->config));
+  direction->waiting_tc = false;
+  /* Publish retirement only after callback return; lifecycle may then reclaim. */
+  atomic_store_explicit(&direction->active, false, memory_order_release);
+}
+static void uart_dma_finish(stm32_uart_dma_t *direction, bool error) {
+  if (!atomic_load_explicit(&direction->active, memory_order_acquire)) return;
   stm32f4_uart_ctx_t *c = direction->owner->ctx[0];
-  if (event != UART_DMA_HALF)
-    uart_dma_requests(c->instance, direction->is_tx, false);
-  atomic_fetch_or_explicit(&direction->events, event, memory_order_release);
+  uart_dma_requests(c->instance, direction->is_tx, false);
+  esy_err_t result = error
+      ? esy_hb_dma_abort_from_isr(direction, direction->config.inner.dreq,
+                                 direction->config.inner.channel)
+      : esy_hb_dma_retire_from_isr(direction, direction->config.inner.dreq,
+                                  direction->config.inner.channel);
+  if (result != ESY_OK) return; /* Explicit abort recovers a stuck native DMA. */
+  if (!error && direction->is_tx) {
+    direction->waiting_tc = true;
+    __HAL_UART_ENABLE_IT(&c->huart, UART_IT_TC);
+    return;
+  }
+  uart_dma_deliver(direction, error);
 }
-static void uart_dma_complete_callback(void *arg) {
-  uart_dma_publish(arg, UART_DMA_DONE);
-}
-static void uart_dma_error_callback(void *arg) {
-  uart_dma_publish(arg, UART_DMA_ERROR);
-}
+static void uart_dma_complete_callback(void *arg) { uart_dma_finish(arg, false); }
+static void uart_dma_error_callback(void *arg) { uart_dma_finish(arg, true); }
 static void uart_dma_half_callback(void *arg) {
-  uart_dma_publish(arg, UART_DMA_HALF);
+  stm32_uart_dma_t *direction = arg;
+  if (!atomic_load_explicit(&direction->active, memory_order_acquire)) return;
+  if (direction->config.half_callback != NULL)
+    direction->config.half_callback(direction->config.half_callback_arg);
 }
 
 static IRQn_Type uart_irqn(uint8_t phys_index) {
@@ -254,8 +275,8 @@ esy_err_t esy_hb_uart_claim(esy_uart_t *uart, uint8_t phys_index) {
   memset(c, 0, sizeof(*c));
   c->phys_index = phys_index;
   c->bound_handle = uart;
-  atomic_init(&c->tx_dma.events, 0u);
-  atomic_init(&c->rx_dma.events, 0u);
+  atomic_init(&c->tx_dma.active, false);
+  atomic_init(&c->rx_dma.active, false);
   uart->ctx[0] = c;
   return ESY_OK;
 }
@@ -381,6 +402,23 @@ extern int32_t esy_hb_uart_send_blocking(esy_uart_t *uart,
     return (int32_t)len;
 }
 
+int32_t esy_hb_uart_send_timeout(esy_uart_t *uart, const uint8_t *data,
+                                size_t len, uint32_t timeout_ms) {
+  if (uart_context(uart) == NULL || data == NULL || len == 0u ||
+      len > UINT16_MAX || timeout_ms == 0u || timeout_ms > INT32_MAX)
+    return ESY_ERR_INVALID_ARG;
+  stm32f4_uart_ctx_t *c = uart_context(uart);
+  if (!c->enabled || c->suspended) return ESY_ERR_STATE;
+  if (c->tx_dma.active) return ESY_ERR_BUSY;
+  /* HAL's running 32-bit millisecond tick uses unsigned elapsed subtraction.
+   * The maximum interval is below half-range; the tick must remain running. */
+  HAL_StatusTypeDef result = HAL_UART_Transmit(&c->huart, (uint8_t *)data,
+                                               (uint16_t)len, timeout_ms);
+  if (result == HAL_OK) return (int32_t)len;
+  if (result == HAL_TIMEOUT) return (int32_t)(len - c->huart.TxXferCount);
+  return result == HAL_BUSY ? ESY_ERR_BUSY : ESY_ERR_IO;
+}
+
 extern int32_t esy_hb_uart_receive_blocking(esy_uart_t *uart,
                                                 uint8_t *data, size_t len)
 {
@@ -414,20 +452,25 @@ static esy_err_t uart_start_dma(esy_uart_t *uart, esy_dma_config_t *config,
   transfer.callback_arg = direction;
   transfer.error_callback = uart_dma_error_callback;
   transfer.error_callback_arg = direction;
-  transfer.half_callback = uart_dma_half_callback;
-  transfer.half_callback_arg = direction;
+  transfer.half_callback = config->half_callback != NULL ? uart_dma_half_callback : NULL;
+  transfer.half_callback_arg = config->half_callback != NULL ? direction : NULL;
   esy_err_t result = esy_hb_dma_prepare(direction, &transfer);
   if (result != ESY_OK) return result;
   direction->owner = uart;
   direction->config = *config;
+  direction->route = config->inner;
   direction->is_tx = is_tx;
-  atomic_store_explicit(&direction->events, 0u, memory_order_release);
+  direction->waiting_tc = false;
+  if (is_tx) __HAL_UART_CLEAR_FLAG(&c->huart, UART_FLAG_TC);
   direction->active = true;
   result = esy_hb_dma_start(direction, 1u << config->inner.dreq);
   if (result != ESY_OK) {
     esy_err_t cleanup = esy_hb_uart_abort_dma(uart, is_tx);
     return cleanup != ESY_OK ? cleanup : result;
   }
+  HAL_NVIC_SetPriority(uart_irqn(c->phys_index), c->irq_priority, 0u);
+  HAL_NVIC_EnableIRQ(uart_irqn(c->phys_index));
+  if (is_tx) __HAL_UART_DISABLE_IT(&c->huart, UART_IT_TC);
   uart_dma_requests(c->instance, is_tx, true);
   return ESY_OK;
 }
@@ -445,10 +488,12 @@ esy_err_t esy_hb_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
   stm32_uart_dma_t *direction = is_tx ? &c->tx_dma : &c->rx_dma;
   if (!direction->active) return ESY_OK;
   uart_dma_requests(c->instance, is_tx, false);
-  esy_err_t result = esy_hb_dma_abort(direction, direction->config.inner.dreq,
-                                    direction->config.inner.channel);
+  if (is_tx) __HAL_UART_DISABLE_IT(&c->huart, UART_IT_TC);
+  esy_err_t result = esy_hb_dma_abort(direction, direction->route.dreq,
+                                    direction->route.channel);
   if (result != ESY_OK) return result;
-  direction->active = false;
+  direction->waiting_tc = false;
+  atomic_store_explicit(&direction->active, false, memory_order_release);
   memset(&direction->config, 0, sizeof(direction->config));
   return ESY_OK;
 }
@@ -459,37 +504,6 @@ bool esy_hb_uart_is_dma_busy(const esy_uart_t *uart, bool is_tx) {
   return is_tx ? c->tx_dma.active : c->rx_dma.active;
 }
 
-esy_err_t esy_hb_uart_poll(esy_uart_t *uart) {
-  if (uart_context(uart) == NULL) return ESY_ERR_INVALID_ARG;
-  stm32f4_uart_ctx_t *c = uart_context(uart);
-  esy_err_t first_error = ESY_OK;
-  for (unsigned i = 0u; i < 2u; ++i) {
-    stm32_uart_dma_t *direction = i == 0u ? &c->tx_dma : &c->rx_dma;
-    if (!direction->active) continue;
-    uint32_t events = atomic_load_explicit(&direction->events, memory_order_acquire);
-    if ((events & (UART_DMA_DONE | UART_DMA_ERROR)) != 0u) {
-      if ((events & UART_DMA_ERROR) == 0u && direction->is_tx &&
-          __HAL_UART_GET_FLAG(&c->huart, UART_FLAG_TC) == RESET) continue;
-      esy_dma_config_t completed = direction->config;
-      esy_err_t result = esy_hb_uart_abort_dma(uart, direction->is_tx);
-      if (result != ESY_OK) {
-        if (first_error == ESY_OK) first_error = result;
-        continue;
-      }
-      events = atomic_load_explicit(&direction->events, memory_order_acquire);
-      esy_dma_callback_t callback = (events & UART_DMA_ERROR) != 0u
-          ? completed.error_callback : completed.callback;
-      void *arg = (events & UART_DMA_ERROR) != 0u
-          ? completed.error_callback_arg : completed.callback_arg;
-      if (callback != NULL) callback(arg);
-    } else if ((events & UART_DMA_HALF) != 0u) {
-      atomic_fetch_and_explicit(&direction->events, ~UART_DMA_HALF, memory_order_acq_rel);
-      if (direction->config.half_callback != NULL)
-        direction->config.half_callback(direction->config.half_callback_arg);
-    }
-  }
-  return first_error;
-}
 
 extern esy_err_t esy_hb_uart_rx_stream_start(
     esy_uart_t *uart, uint8_t *storage, size_t storage_size,
@@ -624,7 +638,7 @@ extern esy_err_t esy_hb_uart_rx_stream_stop(esy_uart_t *uart) {
   if (err != ESY_OK) return err;
   irqn = uart_irqn(c->phys_index);
   if (irqn != NonMaskableInt_IRQn) {
-    HAL_NVIC_DisableIRQ(irqn);
+    if (!c->tx_dma.active) HAL_NVIC_DisableIRQ(irqn);
   }
 
   c->rx_stream_callback = NULL;
@@ -645,9 +659,14 @@ extern void esy_hb_uart_handle_irq(uint8_t phys_index) {
   uart = s_ctx.bound_uarts[phys_index];
   if (!uart || uart_context(uart) == NULL) return;
   c = uart_context(uart);
-  if (!c->rx_stream_active) return;
-
   status = c->huart.Instance->SR;
+  if (c->tx_dma.waiting_tc && c->tx_dma.active &&
+      (status & USART_SR_TC) != 0u &&
+      __HAL_UART_GET_IT_SOURCE(&c->huart, UART_IT_TC) != RESET) {
+    __HAL_UART_DISABLE_IT(&c->huart, UART_IT_TC);
+    uart_dma_deliver(&c->tx_dma, false);
+  }
+  if (!c->rx_stream_active) return;
   if ((status & (USART_SR_PE | USART_SR_FE | USART_SR_NE | USART_SR_ORE)) !=
       0u) {
     uart_clear_rx_flags(&c->huart);

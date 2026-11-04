@@ -21,7 +21,7 @@ extern "C" {
  * reused for another handle; rejection preserves the original binding.
  * Registration may adopt a controller with an accepted DMA transfer. Such a
  * transfer continues to own its buffers; runtime/system suspend returns BUSY
- * until native work retires through owner poll or successful abort. Serialize
+ * until native work retires through owner processing or successful abort. Serialize
  * registration, graph transitions and I/O on the same owner context.
  * Use esy_hal_spi_unregister_device() for serialized cleanup before graph start
  * or after quiescent registry deinit, then deinitialize the XIO SPI handle.

@@ -149,11 +149,18 @@ if(ENABLE_ESY_I2C)
 endif()
 
 if(ENABLE_ESY_UART)
+    if(NOT TARGET idf::esp_hw_support)
+        message(FATAL_ERROR "ESP32 UART event retirement requires idf::esp_hw_support")
+    endif()
+    list(APPEND MODULE_DEPS idf::esp_hw_support)
     if(NOT TARGET idf::esp_driver_uart)
         message(FATAL_ERROR
             "ESP32 UART requires the native idf::esp_driver_uart component")
     endif()
-    list(APPEND MODULE_DEPS idf::esp_driver_uart)
+    if(NOT TARGET esy_common_ds)
+        message(FATAL_ERROR "ENABLE_ESY_UART requires ENABLE_ESY_COMMON_DS for RX stream support")
+    endif()
+    list(APPEND MODULE_DEPS idf::esp_driver_uart esy_common_ds)
     list(APPEND MODULE_SRCS esy_hb_uart.c)
 endif()
 
@@ -166,7 +173,11 @@ if(ENABLE_ESY_SPI)
         message(FATAL_ERROR
             "ESP32 SPI chip-select control requires idf::esp_driver_gpio")
     endif()
-    list(APPEND MODULE_DEPS idf::esp_driver_spi idf::esp_driver_gpio)
+    if(NOT TARGET idf::esp_hw_support)
+        message(FATAL_ERROR
+            "ESP32 SPI DMA buffer validation requires idf::esp_hw_support")
+    endif()
+    list(APPEND MODULE_DEPS idf::esp_driver_spi idf::esp_driver_gpio idf::esp_hw_support)
     list(APPEND MODULE_SRCS esy_hb_spi.c)
 endif()
 

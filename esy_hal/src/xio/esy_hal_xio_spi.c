@@ -121,6 +121,12 @@ static esy_hal_xio_spi_device_ctx_t *xio_spi_device_ctx(
   return (esy_hal_xio_spi_device_ctx_t *)(void *)binding->backend.bytes;
 }
 
+static esy_err_t vt_get_caps(const esy_spi_t *spi, uint32_t *caps) {
+  if (spi == NULL || caps == NULL) return ESY_ERR_INVALID_ARG;
+  *caps = ESY_SPI_CAP_DMA_TRANSFER | ESY_SPI_CAP_TRANSFER16;
+  return ESY_OK;
+}
+
 static const esy_spi_vtable_t k_xio_spi_ops = {
     .write_blocking = esy_hb_xio_spi_write_blocking,
     .read_blocking = esy_hb_xio_spi_read_blocking,
@@ -130,9 +136,9 @@ static const esy_spi_vtable_t k_xio_spi_ops = {
     .read16_blocking = esy_hb_xio_spi_read16_blocking,
     .transfer16_blocking = esy_hb_xio_spi_transfer16_blocking,
     .transfer_dma = vt_transfer_dma,
-    .poll = esy_hb_xio_spi_poll,
     .abort = esy_hb_xio_spi_abort,
     .is_busy = esy_hb_xio_spi_is_busy,
+    .get_caps = vt_get_caps,
 };
 
 static esy_err_t xio_spi_hardware_init(esy_spi_t *spi,
@@ -176,7 +182,10 @@ static esy_err_t xio_spi_transition(esy_spi_device_binding_t *binding,
           esy_hb_xio_spi_is_busy(binding->spi)) {
         return ESY_ERR_BUSY;
       }
-      esy_hb_xio_spi_deinit(binding->spi);
+      {
+        esy_err_t ret = esy_hb_xio_spi_deinit(binding->spi);
+        if (ret != ESY_OK) return ret;
+      }
       ctx->suspended = true;
       return ESY_OK;
 
@@ -255,18 +264,14 @@ esy_err_t esy_hal_xio_spi_register_device(
   return ret;
 }
 
-void esy_hal_xio_spi_deinit(esy_spi_t *spi) {
-  if (!spi || (esy_hal_spi_runtime(spi)->device != NULL)) return;
-
-  if (esy_hb_xio_spi_is_busy(spi)) return;
-  esy_hb_xio_spi_deinit(spi);
+esy_err_t esy_hal_xio_spi_deinit(esy_spi_t *spi) {
+  if (spi == NULL) return ESY_ERR_INVALID_ARG;
+  if (esy_hal_spi_runtime(spi)->device != NULL) return ESY_ERR_STATE;
+  if (spi->ops == NULL && spi->ctx == NULL) return ESY_OK;
+  if (spi->ops != &k_xio_spi_ops) return ESY_ERR_STATE;
+  if (esy_hb_xio_spi_is_busy(spi)) return ESY_ERR_BUSY;
+  esy_err_t ret = esy_hb_xio_spi_deinit(spi);
+  if (ret != ESY_OK) return ret;
   memset(spi, 0, sizeof(*spi));
-}
-
-/* XIO and native handles share descriptor validation and async PM ownership. */
-esy_err_t esy_hal_xio_spi_transfer_dma(
-    esy_spi_t *spi, esy_dma_config_t *tx_dma_cfg, esy_dma_config_t *rx_dma_cfg,
-    esy_spi_dma_complete_cb_t complete_cb, void *user_data) {
-  return esy_hal_spi_transfer_dma(spi, tx_dma_cfg, rx_dma_cfg, complete_cb,
-                                 user_data);
+  return ESY_OK;
 }

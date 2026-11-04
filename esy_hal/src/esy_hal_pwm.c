@@ -52,7 +52,7 @@ static void pwm_release_dma(esy_pwm_t *pwm) {
   runtime->dma_error_arg = NULL;
   if (binding != NULL && binding->dma_ref_held) {
     binding->dma_ref_held = false;
-    pwm_release(pwm);
+    (void)esy_device_put_from_isr(runtime->device);
   }
 }
 
@@ -63,8 +63,8 @@ static void pwm_dma_complete(void *arg) {
   runtime->callback_running = true;
   if (runtime->dma_complete_cb != NULL)
     runtime->dma_complete_cb(runtime->dma_complete_arg);
-  runtime->callback_running = false;
   if (!runtime->dma_circular) pwm_release_dma(pwm);
+  runtime->callback_running = false;
 }
 
 static void pwm_dma_half(void *arg) {
@@ -83,8 +83,8 @@ static void pwm_dma_error(void *arg) {
   pwm_set_output_state(pwm, false);
   runtime->callback_running = true;
   if (runtime->dma_error_cb != NULL) runtime->dma_error_cb(runtime->dma_error_arg);
-  runtime->callback_running = false;
   pwm_release_dma(pwm);
+  runtime->callback_running = false;
 }
 
 /* ================= vt_*: sole ops implementation =================
@@ -184,7 +184,6 @@ static const esy_pwm_vtable_t k_pwm_ops = {
     .enable_trigger_output = vt_enable_trigger_output,
     .dma_output = vt_dma_output,
     .abort_dma = esy_hb_pwm_abort_dma,
-    .poll = esy_hb_pwm_poll,
     .set_wrap_handler = vt_set_wrap_handler,
     .suspend = vt_suspend,
     .resume = vt_resume,
@@ -277,6 +276,10 @@ extern esy_err_t esy_hal_pwm_init(esy_pwm_t *pwm,
   esy_err_t ret = esy_hb_pwm_check_available(config->phys_index);
   if (ret != ESY_OK) return ret;
 
+  atomic_init(&runtime->output_enabled, false);
+  atomic_init(&runtime->dma_active, false);
+  atomic_init(&runtime->callback_running, false);
+
   esy_pwm_config_t local = *config;
   config = &local;
 
@@ -331,6 +334,8 @@ esy_err_t esy_hal_pwm_register_device(
   if (binding->pwm != NULL) return ESY_ERR_STATE;
   if (pwm_dma_is_busy(pwm)) return ESY_ERR_BUSY;
   memset(binding, 0, sizeof(*binding));
+  atomic_init(&binding->dma_ref_held, false);
+  atomic_init(&binding->output_enabled, false);
   binding->pwm = pwm;
   binding->output_enabled = runtime->output_enabled;
   config.name = device_config->name;
@@ -477,8 +482,8 @@ extern esy_err_t esy_hal_pwm_dma_output(esy_pwm_t *pwm,
   transfer.circular = runtime->dma_circular;
   transfer.callback = pwm_dma_complete;
   transfer.callback_arg = pwm;
-  transfer.half_callback = pwm_dma_half;
-  transfer.half_callback_arg = pwm;
+  transfer.half_callback = dma_config->half_callback != NULL ? pwm_dma_half : NULL;
+  transfer.half_callback_arg = dma_config->half_callback != NULL ? pwm : NULL;
   transfer.error_callback = pwm_dma_error;
   transfer.error_callback_arg = pwm;
   /* Publish before submission: a provider may finish synchronously. */
@@ -507,13 +512,12 @@ extern esy_err_t esy_hal_pwm_abort_dma(esy_pwm_t *pwm) {
   return ESY_OK;
 }
 
-extern esy_err_t esy_hal_pwm_poll(esy_pwm_t *pwm) {
-  esy_hal_pwm_runtime_t *runtime = esy_hal_pwm_runtime(pwm);
-  if (pwm == NULL) return ESY_ERR_INVALID_ARG;
-  if (runtime->callback_running) return ESY_ERR_BUSY;
-  return pwm->ops != NULL && pwm->ops->poll != NULL
-             ? pwm->ops->poll(pwm) : ESY_ERR_NOT_SUPPORTED;
+bool esy_hal_pwm_is_idle(const esy_pwm_t *pwm) {
+  if (pwm == NULL || pwm->ops == NULL) return false;
+  const esy_hal_pwm_runtime_t *runtime = esy_hal_pwm_runtime((esy_pwm_t *)pwm);
+  return !runtime->dma_active && !runtime->callback_running && !runtime->output_enabled;
 }
+
 
 /* ================= IRQ and power wrappers ================= */
 

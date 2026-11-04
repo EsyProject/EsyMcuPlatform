@@ -52,7 +52,7 @@ static void uart_dma_release(esy_uart_dma_runtime_t *runtime) {
   atomic_store_explicit(&runtime->state, UART_DMA_IDLE, memory_order_release);
 }
 
-static void uart_dma_notify(esy_uart_dma_runtime_t *runtime,
+static void uart_dma_dispatch(esy_uart_dma_runtime_t *runtime,
                             bool error, bool half) {
   uint32_t expected = UART_DMA_ACTIVE;
   if (!atomic_compare_exchange_strong_explicit(&runtime->state, &expected,
@@ -69,9 +69,9 @@ static void uart_dma_notify(esy_uart_dma_runtime_t *runtime,
   }
 }
 
-static void uart_dma_complete(void *arg) { uart_dma_notify(arg, false, false); }
-static void uart_dma_half(void *arg) { uart_dma_notify(arg, false, true); }
-static void uart_dma_error(void *arg) { uart_dma_notify(arg, true, false); }
+static void uart_dma_complete(void *arg) { uart_dma_dispatch(arg, false, false); }
+static void uart_dma_half(void *arg) { uart_dma_dispatch(arg, false, true); }
+static void uart_dma_error(void *arg) { uart_dma_dispatch(arg, true, false); }
 
 /* ================ blocking I/O ================ */
 
@@ -84,6 +84,22 @@ extern int32_t esy_hal_uart_send_blocking(esy_uart_t *uart, const uint8_t *data,
   esy_err_t ret = uart_acquire(uart);
   if (ret != ESY_OK) return ret;
   int32_t count = uart->ops->send_blocking(uart, data, len);
+  uart_release(uart);
+  return count;
+}
+
+/* The timeout bounds task execution, not physical transmission after return. */
+extern int32_t esy_hal_uart_send_timeout(esy_uart_t *uart, const uint8_t *data,
+                                       size_t len, uint32_t timeout_ms) {
+  if (uart == NULL || data == NULL || len == 0u || len > INT32_MAX ||
+      timeout_ms == 0u || timeout_ms > INT32_MAX) return ESY_ERR_INVALID_ARG;
+  if (atomic_load_explicit(&esy_hal_uart_runtime(uart)->tx_dma.state,
+      memory_order_acquire) != UART_DMA_IDLE) return ESY_ERR_BUSY;
+  if (uart->ops == NULL || uart->ops->send_timeout == NULL)
+    return ESY_ERR_NOT_SUPPORTED;
+  esy_err_t result = uart_acquire(uart);
+  if (result != ESY_OK) return result;
+  int32_t count = uart->ops->send_timeout(uart, data, len, timeout_ms);
   uart_release(uart);
   return count;
 }
@@ -133,8 +149,8 @@ static esy_err_t uart_submit_dma(esy_uart_t *uart,
   esy_dma_config_t transfer = *config;
   transfer.callback = uart_dma_complete;
   transfer.callback_arg = runtime;
-  transfer.half_callback = uart_dma_half;
-  transfer.half_callback_arg = runtime;
+  transfer.half_callback = config->half_callback != NULL ? uart_dma_half : NULL;
+  transfer.half_callback_arg = config->half_callback != NULL ? runtime : NULL;
   transfer.error_callback = uart_dma_error;
   transfer.error_callback_arg = runtime;
   atomic_store_explicit(&runtime->state, UART_DMA_ACTIVE, memory_order_release);
@@ -252,14 +268,6 @@ extern esy_err_t esy_hal_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
   return ESY_OK;
 }
 
-esy_err_t esy_hal_uart_poll(esy_uart_t *uart) {
-  if (uart == NULL) return ESY_ERR_INVALID_ARG;
-  if (atomic_load_explicit(&esy_hal_uart_runtime(uart)->tx_dma.state, memory_order_acquire) == UART_DMA_CALLBACK ||
-      atomic_load_explicit(&esy_hal_uart_runtime(uart)->rx_dma.state, memory_order_acquire) == UART_DMA_CALLBACK)
-    return ESY_ERR_BUSY;
-  if (uart->ops == NULL || uart->ops->poll == NULL) return ESY_ERR_STATE;
-  return uart->ops->poll(uart);
-}
 
 extern esy_err_t esy_hal_uart_get_dma_trans_count_remaining(
     const esy_uart_t *uart, size_t *out_tx_remaining,

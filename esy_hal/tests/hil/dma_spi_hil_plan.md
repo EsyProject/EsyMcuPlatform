@@ -25,9 +25,9 @@ facade fakes do not establish physical DMA bounds, stream requests or wire timin
   CCM. Use a loopback fixture or known SPI slave and a logic analyzer on SCLK,
   CS and data. Start with software-controlled CS inactive.
 - Serialize prepare/start/abort and peripheral lifecycle on one task/startup
-  owner. Generic public DMA callbacks are delivered by esy_hal_dma_poll();
-  backend/peripheral IRQ callbacks only notify their owner. Drive generic DMA
-  poll or SPI poll until the corresponding request retires.
+  owner. Generic public DMA callbacks are delivered automatically by IRQ;
+  backend/peripheral IRQ callbacks only publish internal state. Drive generic DMA
+  no HAL process/poll entry is needed for successful completion.
   Keep clocks fixed and keep buffers, handles and callback arguments alive while
   busy, including after a submission or cleanup failure that still reports busy.
 
@@ -38,7 +38,7 @@ registers, canaries, wire traces, callback order and optional graph usage counts
 ## Target Build Checks
 
 Compile DMA, SPI and ADC with the real ARM toolchain and SDK headers, with
-warnings as errors. Link a consumer that retains the transfer, abort and poll
+warnings as errors. Link a consumer that retains the transfer, abort and process
 APIs and the real DMA vectors. Check ADC separately because it uses the same
 generic prepare but passes a sample count to its native ADC start operation.
 Use at least one ADC1-only and one multi-ADC device when claiming both.
@@ -56,13 +56,13 @@ Do not use a backend host fake to establish these register semantics.
    requested beat count even if the live counter is zero. Start through
    `esy_hb_dma_start()` and require success, exact copied contents, untouched
    canaries and one completion. Repeat through a real SPI consumer and verify
-   data/SCLK activity and successful owner poll retirement; a prepared channel
+   data/SCLK activity and successful IRQ retirement; a prepared channel
    with zero live count must not produce a rejected-start error.
 2. Retain the prepared backend claim after completion. Confirm live count is
    zero and the reload value is unchanged. Restore both endpoints without a
    trigger, then start the same channel again. Require another complete bounded
    transfer and one additional completion; repeat with a mask containing two
-   channels. Do not bypass the public generic HAL's owner-poll retirement flow
+   channels. Do not bypass the public generic HAL's automatic IRQ retirement flow
    to retain a claim: use an explicitly owned native backend fixture here.
 3. Restore both endpoints and repeat using a triggering read-address update,
    then a triggering write-address update. Both must accept a valid reload with
@@ -112,7 +112,7 @@ Do not use a backend host fake to establish these register semantics.
    changed endpoints and count without reading or writing outside their buffers.
 5. Run SPI full-duplex loopback at 8-bit and 16-bit widths with equal byte lengths.
    Confirm requested data, NDTR and canaries. Delay delivery of either DMA IRQ:
-   SPI poll must not release CS, report terminal success or release a graph lease
+   SPI process must not release CS, report terminal success or release a graph lease
    until both terminal events and physical BSY clearance have been observed.
    Confirm one terminal result, exact byte counts and no late callback/write.
 6. Run SPI transmit-only and receive-only buffers of at least 64 bytes at both
@@ -129,8 +129,8 @@ Do not use a backend host fake to establish these register semantics.
    request; the other owner continues undisturbed.
 8. Inject first/second prepare and start failure on target. Rejection with busy
    false must retain no callbacks/buffers. If hardware cleanup fails, preserve the
-   original request and graph lease, observe busy, and continue poll or retry
-   abort. Poll must deliver one terminal error only after all owned streams and
+   original request and graph lease, observe busy, and continue process or retry
+   abort. Process must deliver one terminal error only after all owned streams and
    wire activity retire. No result may report success for an injected DMA error.
 9. Abort during finite SPI DMA and during an error-retirement retry. Verify that
    new DMA requests stop, both owned stream callbacks retire, and successful
@@ -144,9 +144,9 @@ Do not use a backend host fake to establish these register semantics.
     matching sample count, including the maximum supported buffer length.
 
 11. Run generic public DMA both registered with the device graph and unregistered.
-    Mask task polling after physical completion: no user callback may execute,
+    Mask task processing after physical completion: no user callback may execute,
     busy stays true, prepare/deinit/controls must reject reuse, and a registered
-    route retains its usage reference. Poll from its serialized owner; verify
+    route retains its usage reference. Process from its serialized owner; verify
     native abort detaches pending IRQ/callback access before notification, exactly
     one terminal callback runs in that task, and the usage reference stays held
     inside the callback and drops after it returns. Repeat without user callbacks.
@@ -154,17 +154,17 @@ Do not use a backend host fake to establish these register semantics.
     the same stream IRQ snapshot. The STM32F4 single-buffer dispatcher must report
     error only, mask stream interrupts, clear pending flags and request EN clear.
     Measure IRQ duration: it must never wait for EN to clear. Stall or fail the
-    task-side abort and verify poll returns failure without notifying/releasing
-    storage or a graph lease; retry poll or abort to retire safely. A later IRQ
+    task-side abort and verify process returns failure without notifying/releasing
+    storage or a graph lease; retry process or abort to retire safely. A later IRQ
     must not enter the vendor TE busy-wait or produce duplicate error/success.
 13. Repeat finite and circular native ADC completion/half/error through the
     shared DMA owner: HAL_ADC_Start_DMA replaces native DMA callback pointers.
     Verify native ADC Parent/State/Lock and error codes still transition correctly,
-    adc poll/abort can stop conversions and retire the same DMA handle, and no
+    DMA processing/abort can stop conversions and retire the same handle, and no
     ADC callback runs after successful task abort. The backend configures only
     single-buffer DMA; do not install native double-buffer or M1 callbacks.
-14. For generic circular DMA, delay owner polling across multiple HT/TC events.
-    Expect at most one half and one cycle notification per poll, rather than an
+14. For generic circular DMA, delay application consumption across multiple HT/TC events.
+    Expect at most one half and one cycle notification per process call, rather than an
     exact event count. The request/lease stays live until error retirement or
     successful abort; clients needing lossless sample accounting need their own
     buffer/protocol arrangement. A terminal error suppresses co-pending success.
@@ -180,7 +180,7 @@ Do not use a backend host fake to establish these register semantics.
     addresses, count and callbacks. Start A and prove only A's buffer and callback
     are used. B's backend start/abort/address/count operations with its own token
     must return BUSY without modifying A, including while A is physically idle
-    but awaits owner polling. After A retires, prepare/start B successfully.
+    but the IRQ callback is still executing. After A retires, prepare/start B successfully.
     Repeat with different STM32 request selectors aliasing the same stream.
 17. Repeat the conflict with generic DMA versus enabled SPI, UART TX/RX/stream,
     PWM and ADC providers, and between two native providers. Attempt the conflict
@@ -218,11 +218,39 @@ Every programmed memory access stays within the caller's byte range or the
 fixed dummy word. Logical route masks address the intended exclusive streams.
 Successful SPI completion follows both stream and wire retirement; successful
 abort leaves no asynchronous access, and failed cleanup preserves ownership.
-Generic DMA notification follows hardware/callback retirement and registered
-leases outlive the user terminal callback. Poll visits a bounded route count,
+Generic DMA terminal callbacks follow hardware/callback retirement and registered
+leases outlive the user terminal callback. Process visits a bounded route count,
 but provider abort, peer-core callback exclusion and user callback execution
 contribute to its duration; it has no promised wall-clock bound.
 
 Measure real IRQ delivery, canaries and CS/SCLK timing on the selected board.
 Slave wire idle can depend on the external master; a failed abort does not
 permit storage reuse.
+
+## Generic DMA Completion Ownership
+
+1. Submit a finite transfer and publish DMA completion without running process.
+   Confirm that no user callback runs and storage remains borrowed. Process from
+   the serialized owner and confirm exactly one terminal callback after retirement.
+2. On STM32F4, publish half/circular events repeatedly before process. Confirm
+   coalescing, continued storage ownership and explicit abort for cancellation.
+3. Combine error and completion, then fail native retirement. Confirm error
+   priority, no early callback, retained storage and successful later process or
+   explicit abort without requiring another IRQ.
+4. After completion or successful abort, inject a late IRQ and confirm it cannot
+   access released callback context. Include peer-core dispatch retirement.
+
+## SPI Completion Ownership
+
+- Delay one DMA direction, physical wire idle and native result readiness
+  independently. CS and buffers remain borrowed until safe terminal retirement.
+- Complete before the first processing turn. Repeated process calls deliver one
+  terminal callback, without a separate wake callback or event capability.
+- While the SPI worker owns an active transfer, confirm finite relative waits;
+  idle waits resume only for queued work or control requests.
+- On ESP32, publish `post_cb` before result-queue readiness. A first BUSY result
+  retains descriptor/CS/buffers; a later process retires once without another IRQ.
+- Inject errors, partial-start cleanup failure and stop/destroy attempts. Failed
+  cleanup retains callback context and scheduler storage until successful retirement.
+- Caller-driven schedulers use their existing process and next-wait APIs without
+  OS objects or notification bindings.

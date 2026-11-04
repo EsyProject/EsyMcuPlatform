@@ -46,7 +46,6 @@ static void inspect_callback(void *arg) {
   ++probe->calls;
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_dma_active(probe->pwm));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_abort_dma(probe->pwm));
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_poll(probe->pwm));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_deinit(probe->pwm));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_enable(probe->pwm, false));
 }
@@ -62,7 +61,6 @@ void test_fake_pwm_lifecycle_matches_status_deinit_and_reinitialization(void) {
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_initialized(&pwm));
   TEST_ASSERT_EQUAL_FLOAT(0.5f, fake_esy_hal_pwm_get_duty(&pwm));
   TEST_ASSERT_NOT_NULL(pwm.ops->abort_dma);
-  TEST_ASSERT_NOT_NULL(pwm.ops->poll);
   TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_pwm_init(&pwm, &config));
   uint8_t index = 0u;
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_get_phys_index(&pwm, &index));
@@ -87,27 +85,24 @@ void test_fake_pwm_registered_handle_cannot_be_destroyed(void) {
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_deinit(&pwm));
 }
 
-void test_fake_pwm_idle_poll_abort_are_defined_and_dma_remains_opt_in(void) {
+void test_fake_pwm_idle_abort_are_defined_and_dma_remains_opt_in(void) {
   esy_pwm_t pwm = {0};
   uint16_t sample = 2u;
   esy_dma_config_t dma = {.src = &sample, .length = sizeof(sample),
                           .transfer_size = ESY_DMA_TRANSFER_SIZE_16};
   TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_pwm_abort_dma(NULL));
-  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_pwm_poll(NULL));
   TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_pwm_abort_dma(&pwm));
-  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_pwm_poll(&pwm));
   init_pwm(&pwm);
   TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_pwm_dma_output(&pwm, &dma, false));
   TEST_ASSERT_FALSE(fake_esy_hal_pwm_is_dma_active(&pwm));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_enable(&pwm, true));
-  TEST_ASSERT_EQUAL(ESY_OK, pwm.ops->poll(&pwm));
   TEST_ASSERT_EQUAL(ESY_OK, pwm.ops->abort_dma(&pwm));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_enabled(&pwm));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_enabled(&pwm));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_deinit(&pwm));
 }
 
-void test_fake_pwm_finite_poll_retires_dma_after_callback_and_holds_output(void) {
+void test_fake_pwm_finite_irq_retires_dma_after_callback_and_holds_output(void) {
   esy_pwm_t pwm = {0};
   uint16_t samples[2] = {1u, 2u};
   callback_probe_t probe = {.pwm = &pwm};
@@ -119,17 +114,13 @@ void test_fake_pwm_finite_poll_retires_dma_after_callback_and_holds_output(void)
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_dma_output(&pwm, &dma, false));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_dma_active(&pwm));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_set_duty(&pwm, 0.25f));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_poll(&pwm));
   TEST_ASSERT_EQUAL_UINT(0u, probe.calls);
   TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
-  TEST_ASSERT_EQUAL_UINT(0u, probe.calls);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_poll(&pwm));
   TEST_ASSERT_EQUAL_UINT(1u, probe.calls);
   TEST_ASSERT_FALSE(fake_esy_hal_pwm_is_dma_active(&pwm));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_enabled(&pwm));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_enabled(&pwm));
   TEST_ASSERT_EQUAL(ESY_ERR_STATE, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_poll(&pwm));
   TEST_ASSERT_EQUAL_UINT(1u, probe.calls);
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_dma_output(&pwm, &dma, false));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_enable(&pwm, false));
@@ -143,24 +134,23 @@ void test_fake_pwm_circular_notifications_repeat_and_error_wins(void) {
   esy_dma_config_t dma = {.src = &sample, .length = sizeof(sample),
       .transfer_size = ESY_DMA_TRANSFER_SIZE_16, .circular = true,
       .callback = count_notification, .callback_arg = &cycles,
-      .error_callback = count_notification, .error_callback_arg = &errors};
+      .error_callback = count_notification, .error_callback_arg = &errors,
+  };
   init_pwm(&pwm);
   fake_esy_hal_pwm_set_dma_result(ESY_OK);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_dma_output(&pwm, &dma, false));
   for (unsigned i = 0u; i < 2u; ++i) {
     TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
-    TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_poll(&pwm));
+    TEST_ASSERT_EQUAL_UINT(i + 1u, cycles);
     TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_dma_active(&pwm));
   }
   TEST_ASSERT_EQUAL_UINT(2u, cycles);
-  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, true));
-  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
   fake_esy_hal_pwm_set_cleanup_results(ESY_ERR_BUSY, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_poll(&pwm));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, fake_esy_hal_pwm_queue_dma_event(&pwm, true));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_dma_active(&pwm));
   TEST_ASSERT_EQUAL_UINT(0u, errors);
   fake_esy_hal_pwm_set_cleanup_results(ESY_OK, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_poll(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, true));
   TEST_ASSERT_EQUAL_UINT(1u, errors);
   TEST_ASSERT_EQUAL_UINT(2u, cycles);
   TEST_ASSERT_FALSE(fake_esy_hal_pwm_is_dma_active(&pwm));
@@ -174,7 +164,8 @@ void test_fake_pwm_failed_cleanup_retains_handle_and_abort_suppresses_callbacks(
   unsigned notifications = 0u;
   esy_dma_config_t dma = {.src = &sample, .length = sizeof(sample),
       .transfer_size = ESY_DMA_TRANSFER_SIZE_16,
-      .callback = count_notification, .callback_arg = &notifications};
+      .callback = count_notification, .callback_arg = &notifications,
+  };
   init_pwm(&pwm);
   fake_esy_hal_pwm_set_dma_result(ESY_ERR_IO);
   fake_esy_hal_pwm_set_cleanup_results(ESY_ERR_BUSY, ESY_OK);
@@ -183,12 +174,11 @@ void test_fake_pwm_failed_cleanup_retains_handle_and_abort_suppresses_callbacks(
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_pwm_deinit(&pwm));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_initialized(&pwm));
   TEST_ASSERT_NOT_NULL(pwm.ops);
-  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
   fake_esy_hal_pwm_set_cleanup_results(ESY_OK, ESY_ERR_IO);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_abort_dma(&pwm));
   TEST_ASSERT_FALSE(fake_esy_hal_pwm_is_dma_active(&pwm));
   TEST_ASSERT_FALSE(fake_esy_hal_pwm_is_enabled(&pwm));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_poll(&pwm));
   TEST_ASSERT_EQUAL_UINT(0u, notifications);
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_pwm_deinit(&pwm));
   TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_initialized(&pwm));
@@ -196,4 +186,60 @@ void test_fake_pwm_failed_cleanup_retains_handle_and_abort_suppresses_callbacks(
   fake_esy_hal_pwm_set_cleanup_results(ESY_OK, ESY_OK);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_deinit(&pwm));
   TEST_ASSERT_NULL(pwm.ops);
+}
+
+void test_fake_pwm_half_and_idle_query_match_public_contract(void) {
+  esy_pwm_t pwm = {0};
+  uint16_t sample = 1u;
+  unsigned halves = 0u;
+  TEST_ASSERT_FALSE(esy_hal_pwm_is_idle(NULL));
+  TEST_ASSERT_FALSE(esy_hal_pwm_is_idle(&pwm));
+  init_pwm(&pwm);
+  TEST_ASSERT_TRUE(esy_hal_pwm_is_idle(&pwm));
+  fake_esy_hal_pwm_set_dma_result(ESY_OK);
+  uint32_t caps = 0u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_get_caps(&pwm, &caps));
+  esy_dma_config_t dma = {.src = &sample, .length = sizeof(sample),
+      .transfer_size = ESY_DMA_TRANSFER_SIZE_16, .circular = true,
+      .half_callback = count_notification, .half_callback_arg = &halves};
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_dma_output(&pwm, &dma, true));
+  TEST_ASSERT_FALSE(esy_hal_pwm_is_idle(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_half_event(&pwm));
+  TEST_ASSERT_EQUAL_UINT(1u, halves);
+  TEST_ASSERT_TRUE(fake_esy_hal_pwm_is_dma_active(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_abort_dma(&pwm));
+  TEST_ASSERT_TRUE(esy_hal_pwm_is_idle(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_enable(&pwm, true));
+  fake_esy_hal_pwm_set_disable_result(ESY_ERR_IO);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_pwm_enable(&pwm, false));
+  TEST_ASSERT_FALSE(esy_hal_pwm_is_idle(&pwm));
+  fake_esy_hal_pwm_set_disable_result(ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_enable(&pwm, false));
+  TEST_ASSERT_TRUE(esy_hal_pwm_is_idle(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_deinit(&pwm));
+}
+
+void test_fake_pwm_without_half_irq_support_preserves_terminal_only_dma(void) {
+  esy_pwm_t pwm = {0};
+  uint16_t sample = 1u;
+  unsigned notifications = 0u;
+  init_pwm(&pwm);
+  fake_esy_hal_pwm_set_dma_result(ESY_OK);
+  fake_esy_hal_pwm_set_half_supported(false);
+  esy_dma_config_t transfer = {
+      .src = &sample, .length = sizeof(sample),
+      .transfer_size = ESY_DMA_TRANSFER_SIZE_16,
+      .callback = count_notification, .callback_arg = &notifications,
+      .half_callback = count_notification, .half_callback_arg = &notifications,
+  };
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_pwm_dma_output(&pwm, &transfer, false));
+  TEST_ASSERT_TRUE(esy_hal_pwm_is_idle(&pwm));
+  transfer.half_callback = NULL;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_dma_output(&pwm, &transfer, false));
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, fake_esy_hal_pwm_queue_half_event(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, fake_esy_hal_pwm_queue_dma_event(&pwm, false));
+  TEST_ASSERT_EQUAL_UINT(1u, notifications);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_enable(&pwm, false));
+  TEST_ASSERT_TRUE(esy_hal_pwm_is_idle(&pwm));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_pwm_deinit(&pwm));
 }

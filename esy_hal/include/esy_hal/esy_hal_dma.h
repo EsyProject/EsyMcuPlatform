@@ -26,20 +26,29 @@
  *   channel selectors may repeat on different streams. The route count must not
  *   exceed @ref ESY_HAL_DMA_MAX_TRACKED_CHANNELS. Routing metadata stays immutable
  *   and borrowed until deinit.
- * - Prepare/start/poll/abort/control require one serialized task owner. IRQs only
- *   publish events. Drive poll until terminal retirement; callbacks run in that
- *   task, must be bounded, and must not reenter this controller's APIs.
+ * - Prepare/start/abort/control require one serialized non-ISR owner. Pico and
+ *   STM32F4 complete automatically in native IRQ context, without process/poll
+ *   calls or an OS dependency. Completion/half/error callbacks must be bounded,
+ *   nonblocking and must not reenter this controller's mutating/lifecycle APIs.
  * - Prepare borrows buffers/callback arguments until successful abort or terminal
  *   callback return. Failed start retains the prepared request for retry/abort.
- *   Failed retirement retains ownership and any graph lease; continue poll or
- *   retry abort before freeing storage. Half/circular callbacks are nonterminal.
+ *   Terminal callbacks run only after DMA and pending native access retire. A
+ *   hardware fault that cannot stop within the fixed ISR budget retains storage
+ *   and any graph lease without terminal notification; explicit task abort is
+ *   required before reuse. Half/circular callbacks retain ownership.
+ * - Pico has no native half-transfer IRQ and rejects a non-NULL half_callback
+ *   with NOT_SUPPORTED before claiming hardware. Leave it NULL for ordinary
+ *   finite completion/error notifications. STM32F4 supports half notifications.
  * - Init validates routes without reserving hardware. Prepare exclusively claims
  *   each physical resource across controllers and peripheral DMA users. A second
  *   prepare returns BUSY, even before the first transfer starts or after hardware
  *   completion while retirement remains pending. Abort/control/start cannot
  *   modify another owner's transfer. Keep the controller at a stable address
  *   until every accepted request has retired; never copy a live handle.
- * - On Pico, claims also reserve channels in the native SDK claim table. The
+ * - On Pico, claims also reserve channels in the native SDK claim table. ISR
+ *   completion caches that SDK reservation for task-side reuse; task abort or
+ *   controller deinit releases idle cached reservations. Logical HAL ownership
+ *   is released before terminal notification. The
  *   built-in Wi-Fi provider shares a nonblocking assembly guard with HAL DMA;
  *   contention returns BUSY or is retried by that provider. Direct external SDK
  *   allocators must be serialized with HAL/peripheral DMA claim/release because
@@ -94,11 +103,11 @@ typedef struct {
   uint32_t dreq;
   uint8_t channel;
   uint8_t resource_id; /**< Backend physical channel/stream identity. */
-  esy_device_atomic_u32_t events; /**< Internal IRQ-to-owner event publication. */
-  bool ref_held;
+  esy_device_atomic_u32_t ref_held; /**< Internal ISR/task lease ownership. */
   bool circular;
-  bool prepared;
-  bool started;
+  esy_device_atomic_u32_t prepared;
+  esy_device_atomic_u32_t started;
+  esy_device_atomic_u32_t callback_running; /**< Internal native IRQ callback exclusion. */
 } esy_dma_channel_runtime_t;
 
 /** @brief Caller-owned DMA-controller handle. */
@@ -134,8 +143,10 @@ esy_err_t esy_hal_dma_init(esy_dma_t *dma,
 
 /**
  * @brief Deinitialize an idle, unregistered DMA handle.
- * Other controllers' activity on overlapping routes does not prevent deinit;
- * this operation neither stops hardware nor releases another owner's claim.
+ * Configured physical resources must be idle and available for task-side SDK
+ * reservation release. A foreign owner or cleanup contention returns BUSY and
+ * preserves the initialized handle for retry. This operation never stops or
+ * releases another owner's transfer.
  */
 esy_err_t esy_hal_dma_deinit(esy_dma_t *dma);
 
@@ -221,26 +232,6 @@ extern esy_err_t esy_hal_dma_abort(esy_dma_t *dma, uint32_t dreq,
                                         uint8_t channel);
 
 /**
- * @brief Retire pending DMA events and deliver callbacks from the owner task.
- *
- * Visits at most channel_count routes. Terminal error takes priority over full
- * completion; hardware and backend callback access retire before notification.
- * Retirement may wait for SDK hardware abort and a peer-core callback. Only the
- * route count is bounded: provider and user callback time contributes to poll,
- * and this interface promises no wall-clock execution limit. A failed route
- * retains its events/storage/lease for retry while independent routes progress.
- * Half and circular-cycle events coalesce between polls and retain ownership.
- * Call even when hardware is idle; busy remains true until terminal retirement.
- * No callback may reenter this controller's lifecycle, poll or transfer APIs.
- *
- * @param[in,out] dma Initialized caller-owned controller.
- * @retval ESY_OK All currently observed events handled or no event pending.
- * @retval ESY_ERR_INVALID_ARG Invalid controller.
- * @retval <0 A retirement failed; keep storage alive and retry poll/abort.
- */
-esy_err_t esy_hal_dma_poll(esy_dma_t *dma);
-
-/**
  * @brief Query whether a DMA channel is busy.
  *
  * @param[in] dreq    DMA request source identifier (platform-defined).
@@ -251,6 +242,15 @@ esy_err_t esy_hal_dma_poll(esy_dma_t *dma);
  */
 extern bool esy_hal_dma_is_busy(const esy_dma_t *dma, uint32_t dreq,
                                      uint8_t channel);
+
+/** @brief Query controller-wide quiescence before transferring exclusive ownership.
+ * Unlike is_busy, this includes prepared routes, native callbacks and
+ * retained device leases. Every configured native route must also be idle;
+ * activity from another physical-resource owner may conservatively return false.
+ * Query from the serialized non-ISR owner. NULL/uninitialized handles and calls
+ * from a DMA callback return false. No resource is acquired or released.
+ */
+bool esy_hal_dma_is_idle(const esy_dma_t *dma);
 
 /**
  * @brief Bind a DMA IRQ line to a specific CPU core (multi-core platforms).

@@ -142,10 +142,10 @@ esy_err_t esy_logger_backend_uart_core_init(esy_logger_backend_t *backend,
  * including blocking UART short sends.
  * Call often enough to avoid queue exhaustion. BUSY sends retain the unsent tail
  * and retry no sooner than 10 ms, measured with the HAL millisecond tick; keep
- * tick gaps below half its range. Active DMA is polled before further sends;
+ * tick gaps below half its range. Active DMA events are processed before further sends;
  * completion can recycle storage here or in the port's callback context.
  * A failed submission that remains busy retains its pool block and queue head.
- * Later processing polls and attempts at most one abort per call; retirement
+ * Later calls process events and attempt at most one abort; retirement
  * discards that failed log without retransmission. Cleanup failure never makes
  * the block available to producers. Each retirement attempt ends that slice,
  * even when the supplied block budget allows more work.
@@ -156,6 +156,13 @@ esy_err_t esy_logger_backend_uart_core_init(esy_logger_backend_t *backend,
  * deinit without clearing storage. Shutdown processing starts no queued output.
  */
 esy_err_t esy_logger_backend_uart_core_process(esy_logger_backend_t *backend, size_t block_budget);
+/** @brief Caller-driven owner wait in milliseconds after process: zero for
+ * queued work, UINT32_MAX when idle, or up to 10 ms for active DMA and retry.
+ * Call from the same serialized owner. Continue processing at that finite
+ * interval while DMA is active; hardware events do not invoke a wake callback.
+ * Tick gaps must stay below half the HAL millisecond counter range. No state or
+ * time advances merely by querying. Invalid/OS-mode handles return UINT32_MAX. */
+uint32_t esy_logger_backend_uart_core_next_wait_ms(const esy_logger_backend_t *backend);
 /** @brief Detach and stop; BUSY retains outstanding leases/I/O for owner retry.
  * Success also requires physical UART TX idle, including FIFO/shift-register
  * drain after DMA source retirement. Source buffers are released independently.

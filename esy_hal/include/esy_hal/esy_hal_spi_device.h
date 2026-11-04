@@ -38,7 +38,7 @@ typedef struct esy_spi_device_binding_s {
   esy_spi_device_transition_fn_t transition;
   esy_spi_dma_complete_cb_t async_complete_cb;
   void *async_user_data;
-  bool async_ref_held;
+  esy_device_atomic_u32_t async_ref_held; /**< Atomic IRQ/task borrow flag. */
   ESY_ALIGNED_STORAGE(backend, ESY_SPI_DEVICE_BACKEND_BYTES);
 } esy_spi_device_binding_t;
 

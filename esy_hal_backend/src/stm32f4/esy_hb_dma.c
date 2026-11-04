@@ -15,6 +15,7 @@
 
 #define MAX_DMA_DREQ 16u
 #define DMA_RESOURCE_MASK ((1u << MAX_DMA_DREQ) - 1u)
+#define DMA_ISR_STOP_READ_BUDGET 64u
 
 typedef struct {
   DMA_TypeDef *controller;
@@ -35,6 +36,7 @@ typedef struct {
   void *half_callback_args[MAX_DMA_DREQ];
   esy_dma_callback_t error_callbacks[MAX_DMA_DREQ];
   void *error_callback_args[MAX_DMA_DREQ];
+  atomic_uint irq_exception[MAX_DMA_DREQ];
 } esy_hb_dma_ctx_t;
 
 static const dma_stream_info_t k_dma_stream_table[] = {
@@ -213,6 +215,8 @@ esy_err_t esy_hb_dma_release(const void *owner, uint32_t dreq, uint8_t channel) 
   if ((s_ctx.stream_table[resource].stream->CR & DMA_SxCR_EN) != 0u)
     return ESY_ERR_BUSY;
   if (current == NULL) return ESY_OK;
+  if (s_ctx.irq_exception[resource] != 0u &&
+      s_ctx.irq_exception[resource] != __get_IPSR()) return ESY_ERR_BUSY;
   /* Release is also used after bounded native ISR retirement. Its owner has
    * detached native callbacks; publication is the last resource-state write. */
   s_ctx.configured[resource] = false;
@@ -224,6 +228,57 @@ esy_err_t esy_hb_dma_release(const void *owner, uint32_t dreq, uint8_t channel) 
   s_ctx.error_callback_args[resource] = NULL;
   atomic_store_explicit(&s_ctx.owners[resource], NULL, memory_order_release);
   return ESY_OK;
+}
+
+esy_err_t esy_hb_dma_retire_from_isr(const void *owner, uint32_t dreq,
+                                   uint8_t channel) {
+  uint8_t resource;
+  if (owner == NULL) return ESY_ERR_INVALID_ARG;
+  esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
+  if (result != ESY_OK) return result;
+  const void *current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
+  if (current != NULL && current != owner) return ESY_ERR_BUSY;
+  if ((s_ctx.stream_table[resource].stream->CR & DMA_SxCR_EN) != 0u)
+    return ESY_ERR_BUSY;
+  if (current == NULL) return ESY_OK;
+  /* A higher-priority peripheral IRQ cannot detach a stream whose lower
+   * priority dispatcher is still paused inside its callback. */
+  if (s_ctx.irq_exception[resource] != 0u &&
+      s_ctx.irq_exception[resource] != __get_IPSR()) return ESY_ERR_BUSY;
+  DMA_HandleTypeDef *handle = &s_ctx.handles[resource];
+  if (handle->Instance == NULL) return ESY_ERR_STATE;
+  dma_disable_all_interrupts(handle);
+  dma_clear_all_flags(handle);
+  HAL_NVIC_ClearPendingIRQ(s_ctx.stream_table[resource].irq);
+  handle->XferCpltCallback = NULL;
+  handle->XferHalfCpltCallback = NULL;
+  handle->XferErrorCallback = NULL;
+  handle->XferAbortCallback = NULL;
+  handle->Parent = NULL;
+  handle->State = HAL_DMA_STATE_READY;
+  __HAL_UNLOCK(handle);
+  return esy_hb_dma_release(owner, dreq, channel);
+}
+
+esy_err_t esy_hb_dma_abort_from_isr(const void *owner, uint32_t dreq,
+                                  uint8_t channel) {
+  uint8_t resource;
+  if (owner == NULL) return ESY_ERR_INVALID_ARG;
+  esy_err_t result = esy_hb_dma_get_resource_id(dreq, channel, &resource);
+  if (result != ESY_OK) return result;
+  const void *current = atomic_load_explicit(&s_ctx.owners[resource], memory_order_acquire);
+  if (current != owner) return current == NULL ? ESY_OK : ESY_ERR_BUSY;
+  if (s_ctx.irq_exception[resource] != 0u &&
+      s_ctx.irq_exception[resource] != __get_IPSR()) return ESY_ERR_BUSY;
+  DMA_HandleTypeDef *handle = &s_ctx.handles[resource];
+  if (handle->Instance == NULL) return ESY_ERR_STATE;
+  dma_disable_all_interrupts(handle);
+  __HAL_DMA_DISABLE(handle);
+  for (uint32_t remaining = DMA_ISR_STOP_READ_BUDGET; remaining != 0u; --remaining) {
+    if ((handle->Instance->CR & DMA_SxCR_EN) == 0u)
+      return esy_hb_dma_retire_from_isr(owner, dreq, channel);
+  }
+  return ESY_ERR_BUSY;
 }
 
 esy_err_t esy_hb_dma_prepare(const void *owner, const esy_dma_config_t *config) {
@@ -412,6 +467,7 @@ esy_err_t esy_hb_dma_start_single(const void *owner, const esy_dma_config_t *tra
 
 esy_err_t esy_hb_dma_abort(const void *owner, uint32_t dreq, uint8_t channel) {
   if (owner == NULL || dreq >= MAX_DMA_DREQ || channel > 7u) return ESY_ERR_INVALID_ARG;
+  if (__get_IPSR() != 0u) return ESY_ERR_NOT_SUPPORTED;
   const void *current = atomic_load_explicit(&s_ctx.owners[dreq], memory_order_acquire);
   if (current != owner) return current == NULL &&
       (s_ctx.stream_table[dreq].stream->CR & DMA_SxCR_EN) == 0u ? ESY_OK : ESY_ERR_BUSY;
@@ -532,7 +588,8 @@ esy_err_t esy_hb_dma_chain_to(const void *owner, uint32_t dreq, uint8_t channel,
 
 /* Only single-buffer streams are configured by this backend, including ADC's
  * native HAL_DMA_Start_IT path. Preserve native callback/State/Lock semantics
- * without the vendor IRQ's TE shutdown wait. Task abort owns final retirement. */
+ * without the vendor IRQ's TE shutdown wait. Bounded native IRQ helpers retire
+ * normal/error paths; a hardware stop fault retains storage for task abort. */
 void esy_hb_dma_handle_irq(uint32_t dreq, uint8_t channel) {
   /* IRQ vectors identify the physical stream; their channel placeholder is
    * independent of the request selector chosen when that stream was prepared. */
@@ -540,6 +597,7 @@ void esy_hb_dma_handle_irq(uint32_t dreq, uint8_t channel) {
   if (dreq >= MAX_DMA_DREQ) return;
   DMA_HandleTypeDef *handle = &s_ctx.handles[dreq];
   if (handle->Instance == NULL) return;
+  s_ctx.irq_exception[dreq] = __get_IPSR();
   const uint32_t status =
       *(volatile uint32_t *)(uintptr_t)handle->StreamBaseAddress >>
       handle->StreamIndex;
@@ -563,11 +621,13 @@ void esy_hb_dma_handle_irq(uint32_t dreq, uint8_t channel) {
       __HAL_UNLOCK(handle);
     }
     if (handle->XferErrorCallback != NULL) handle->XferErrorCallback(handle);
+    s_ctx.irq_exception[dreq] = 0u;
     return;
   }
   if (handle->ErrorCode != HAL_DMA_ERROR_NONE) {
     dma_disable_all_interrupts(handle);
     dma_clear_all_flags(handle);
+    s_ctx.irq_exception[dreq] = 0u;
     return;
   }
   if ((status & DMA_FLAG_HTIF0_4) && (control & DMA_IT_HT)) {
@@ -584,4 +644,5 @@ void esy_hb_dma_handle_irq(uint32_t dreq, uint8_t channel) {
     }
     if (handle->XferCpltCallback != NULL) handle->XferCpltCallback(handle);
   }
+  s_ctx.irq_exception[dreq] = 0u;
 }

@@ -19,7 +19,6 @@ typedef struct {
   esy_spi_dma_complete_cb_t callback;
   void *callback_arg;
   esy_err_t submit_result;
-  esy_err_t poll_result;
   esy_err_t abort_result;
   esy_err_t completed_result;
   uint8_t *completed_rx;
@@ -29,7 +28,6 @@ typedef struct {
   unsigned prepared;
   unsigned prepared_done;
   bool busy;
-  bool retire;
 } spi_hal_consumer_ctx_t;
 
 static spi_hal_consumer_ctx_t s_ctx;
@@ -61,8 +59,8 @@ static esy_err_t provider_submit(esy_spi_t *spi, esy_dma_config_t *tx,
   return s_ctx.submit_result;
 }
 
-static esy_err_t provider_poll(esy_spi_t *spi) {
-  if (s_ctx.busy && s_ctx.retire) {
+static void provider_complete(esy_spi_t *spi) {
+  if (s_ctx.busy && s_ctx.callback != NULL) {
     esy_spi_dma_complete_cb_t callback = s_ctx.callback;
     void *arg = s_ctx.callback_arg;
     const esy_spi_dma_transfer_result_t result = {
@@ -77,7 +75,6 @@ static esy_err_t provider_poll(esy_spi_t *spi) {
     s_ctx.rx = NULL;
     callback(spi, &result, arg);
   }
-  return s_ctx.poll_result;
 }
 
 static esy_err_t provider_abort(esy_spi_t *spi) {
@@ -113,7 +110,6 @@ static void prepared_done(esy_err_t result, void *arg) {
 
 static const esy_spi_vtable_t k_provider_ops = {
     .transfer_dma = provider_submit,
-    .poll = provider_poll,
     .abort = provider_abort,
     .is_busy = provider_is_busy,
 };
@@ -157,7 +153,6 @@ static int exercise(bool rx_only, esy_dma_transfer_size_t width,
   CHECK(s_ctx.prepared == (use_prepare ? 1u : 0u));
   CHECK(esy_spi_scheduler_destroy(scheduler) == ESY_ERR_BUSY);
   if (fail_submit) {
-    s_ctx.poll_result = ESY_ERR_BUSY;
     for (unsigned i = 0u; i < 2u; ++i) {
       CHECK(esy_spi_scheduler_core_process(scheduler) == ESY_OK);
       CHECK(s_ctx.completed == 0u && s_ctx.prepared_done == 0u);
@@ -168,9 +163,8 @@ static int exercise(bool rx_only, esy_dma_transfer_size_t width,
     }
     CHECK(s_ctx.aborted == 2u);
   }
-  s_ctx.poll_result = ESY_OK;
-  s_ctx.retire = !silent_abort;
   if (silent_abort) s_ctx.abort_result = ESY_OK;
+  else provider_complete(&spi);
   CHECK(esy_spi_scheduler_core_process(scheduler) == ESY_OK);
   CHECK(!s_ctx.busy && s_ctx.tx == NULL && s_ctx.rx == NULL);
   CHECK(s_ctx.completed_result == (fail_submit ? ESY_ERR_IO : ESY_OK));

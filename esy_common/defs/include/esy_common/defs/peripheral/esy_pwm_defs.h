@@ -54,8 +54,9 @@ typedef struct esy_pwm_s esy_pwm_t;
  * Bits describe implemented operations for the current handle/role, subject to
  * board resources, configuration limits and normal runtime errors. A set bit
  * neither reserves a resource nor guarantees every parameter combination.
- * DMA-named bits describe the corresponding API, not native DMA or asynchronous
- * completion. Unknown bits must be ignored; zero is a valid capability mask.
+ * DMA capabilities require native hardware DMA and asynchronous completion;
+ * synchronous software substitutes must not set them. Unknown bits must be
+ * ignored; zero is a valid capability mask.
  */
 typedef enum {
   ESY_PWM_CAP_DMA_OUTPUT = 1u << 0, /**< DMA-driven duty sample output entry point. */
@@ -174,7 +175,6 @@ typedef struct {
   esy_err_t (*abort_dma)(esy_pwm_t *pwm);
 
   /** @brief Deliver bounded pending DMA notifications on the owner context. */
-  esy_err_t (*poll)(esy_pwm_t *pwm);
 
   /**
    * @brief Configure the wrap/period interrupt handler.

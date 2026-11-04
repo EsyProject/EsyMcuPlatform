@@ -8,8 +8,10 @@
 
 #include <string.h>
 
-static fake_esy_hal_uart_slot_t
-    s_slots[FAKE_ESY_HAL_UART_MAX_INSTANCES];
+typedef struct {
+  fake_esy_hal_uart_slot_t slots[FAKE_ESY_HAL_UART_MAX_INSTANCES];
+} fake_esy_hal_uart_ctx_t;
+static fake_esy_hal_uart_ctx_t s_ctx;
 
 static fake_esy_hal_uart_slot_t *fake_esy_hal_uart_get_slot(
     esy_uart_t *uart, bool create_if_missing) {
@@ -18,8 +20,8 @@ static fake_esy_hal_uart_slot_t *fake_esy_hal_uart_get_slot(
   }
 
   for (uint32_t i = 0u; i < FAKE_ESY_HAL_UART_MAX_INSTANCES; i++) {
-    if (s_slots[i].used && s_slots[i].uart == uart) {
-      return &s_slots[i];
+    if (s_ctx.slots[i].used && s_ctx.slots[i].uart == uart) {
+      return &s_ctx.slots[i];
     }
   }
 
@@ -28,19 +30,19 @@ static fake_esy_hal_uart_slot_t *fake_esy_hal_uart_get_slot(
   }
 
   for (uint32_t i = 0u; i < FAKE_ESY_HAL_UART_MAX_INSTANCES; i++) {
-    if (!s_slots[i].used) {
-      memset(&s_slots[i], 0, sizeof(s_slots[i]));
-      s_slots[i].used = true;
-      s_slots[i].uart = uart;
-      s_slots[i].send_dma_result = ESY_ERR_NOT_SUPPORTED;
-      return &s_slots[i];
+    if (!s_ctx.slots[i].used) {
+      memset(&s_ctx.slots[i], 0, sizeof(s_ctx.slots[i]));
+      s_ctx.slots[i].used = true;
+      s_ctx.slots[i].uart = uart;
+      s_ctx.slots[i].send_dma_result = ESY_ERR_NOT_SUPPORTED;
+      return &s_ctx.slots[i];
     }
   }
 
   return NULL;
 }
 
-void fake_esy_hal_uart_reset(void) { memset(s_slots, 0, sizeof(s_slots)); }
+void fake_esy_hal_uart_reset(void) { memset(s_ctx.slots, 0, sizeof(s_ctx.slots)); }
 
 fake_esy_hal_uart_slot_t *fake_esy_hal_uart_find(esy_uart_t *uart) {
   return fake_esy_hal_uart_get_slot(uart, false);
@@ -204,6 +206,18 @@ int32_t esy_hal_uart_send_blocking(esy_uart_t *uart, const uint8_t *data,
   return slot->override_send_result ? slot->send_result : (int32_t)len;
 }
 
+int32_t esy_hal_uart_send_timeout(esy_uart_t *uart, const uint8_t *data,
+                                 size_t len, uint32_t timeout_ms) {
+  if (uart == NULL || data == NULL || len == 0u || len > INT32_MAX ||
+      timeout_ms == 0u || timeout_ms > INT32_MAX) return ESY_ERR_INVALID_ARG;
+  fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_get_slot(uart, true);
+  if (slot == NULL) return ESY_ERR_INVALID_ARG;
+  if (slot->dma_pending) return ESY_ERR_BUSY;
+  slot->send_timeout_count++;
+  slot->last_timeout_ms = timeout_ms;
+  return esy_hal_uart_send_blocking(uart, data, len);
+}
+
 int32_t esy_hal_uart_receive_blocking(esy_uart_t *uart, uint8_t *data,
                                            size_t len) {
   fake_esy_hal_uart_slot_t *slot =
@@ -251,13 +265,6 @@ esy_err_t esy_hal_uart_receive_dma(esy_uart_t *uart,
   return ESY_ERR_NOT_SUPPORTED;
 }
 
-esy_err_t esy_hal_uart_poll(esy_uart_t *uart) {
-  fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_get_slot(uart, true);
-  if (slot == NULL) return ESY_ERR_INVALID_ARG;
-  slot->poll_count++;
-  if (slot->poll_result == ESY_OK && slot->poll_hook != NULL) slot->poll_hook(uart);
-  return slot->poll_result;
-}
 
 esy_err_t esy_hal_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
   fake_esy_hal_uart_slot_t *slot =

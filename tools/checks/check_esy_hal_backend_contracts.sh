@@ -163,6 +163,36 @@ def body(source, name):
     errors.append(f'unclosed function body: {name}')
     return ''
 
+removed_io_api = re.compile(
+    r'\besy_(?:hal|hb)_(?:dma|spi|uart|pwm|xio_spi)_(?:process|poll|service)\b'
+    r'|\besy_hal_xio_spi_transfer_dma\b')
+for area in ('esy_hal', 'esy_hal_backend'):
+    for directory in ('include', 'src'):
+        for path in (root.parent / area / directory).rglob('*'):
+            if path.suffix not in ('.c', '.h'):
+                continue
+            match = removed_io_api.search(path.read_text())
+            require(match is None,
+                    f'{path.relative_to(root.parent)} retains a removed I/O API'
+                    + (f': {match.group()}' if match else ''))
+
+for peripheral in ('spi', 'uart', 'pwm'):
+    defs = (root.parent / f'esy_common/defs/include/esy_common/defs/peripheral/esy_{peripheral}_defs.h').read_text()
+    require(re.search(r'\(\*(?:process|poll|service)\)', defs) is None,
+            f'{peripheral}: DMA completion must not require a public progress hook')
+
+# Native SDK kernel internals are provider-owned; platform backends must not
+# import a platform OS abstraction or a native RTOS header directly.
+for path in root.rglob('*'):
+    if path.suffix not in ('.c', '.h', '.txt') or 'build' in path.parts:
+        continue
+    source = path.read_text()
+    require(re.search(r'#\s*include\s*[<"](?:esy_middleware/os/|freertos/|FreeRTOS\.h|task\.h|queue\.h|semphr\.h)', source) is None,
+            f'{path.relative_to(root)} directly imports an OS dependency')
+    if path.name == 'CMakeLists.txt':
+        require(re.search(r'\besy_os\b|FreeRTOS-Kernel', source) is None,
+                f'{path.relative_to(root)} links a platform OS dependency')
+
 for port in ('pico', 'stm32f4', 'esp32'):
     system_source = (root / f'src/{port}/esy_hb_system.c').read_text()
     boot_source = (root / f'src/{port}/esy_hb_boot.c').read_text()
@@ -226,6 +256,49 @@ require('clock_get_hz(clk_peri)' in spi and
         not re.search(r'spi_init\([^;]*:\s*0u?\s*\)', spi),
         'Pico SPI slave SDK initialization requires a valid nonzero divider')
 
+spi_set_speed = body((root / 'src/esp32/esy_hb_spi.c').read_text(),
+                     'esy_hb_spi_set_speed')
+require('ESY_ERR_NOT_SUPPORTED' in spi_set_speed and
+        not re.search(r'\bc->\w+\s*=(?!=)', spi_set_speed),
+        'ESP32 unsupported SPI speed changes must preserve the live configuration')
+
+uart = (root / 'src/esp32/esy_hb_uart.c').read_text()
+require('ESY_ERR_NOT_SUPPORTED' in body(uart, 'esy_hb_uart_send_dma') and
+        'ESY_ERR_NOT_SUPPORTED' in body(uart, 'esy_hb_uart_receive_dma') and
+        'ESY_ERR_NOT_SUPPORTED' in body(uart, 'esy_hb_uart_rx_stream_start') and
+        '*out_caps = 0u' in body(uart, 'esy_hb_uart_get_caps'),
+        'ESP32 UART must expose synchronous HAL operations without DMA/stream callbacks')
+uart_abort = body(uart, 'esy_hb_uart_abort_dma')
+require('uart_context(uart)' in uart_abort and 'return ESY_OK;' in uart_abort and
+        'ESY_ERR_NOT_SUPPORTED' not in uart_abort,
+        'ESP32 UART empty DMA abort must validate ownership and release rejected HAL requests')
+spi_esp32 = (root / 'src/esp32/esy_hb_spi.c').read_text()
+require('ESY_ERR_NOT_SUPPORTED' in body(spi_esp32, 'esy_hb_spi_transfer_dma') and
+        'ESY_SPI_CAP_DMA_TRANSFER' not in body(spi_esp32, 'esy_hb_spi_get_caps') and
+        'spi_device_queue_trans' not in spi_esp32,
+        'ESP32 SPI must not expose a deferred public DMA path')
+i2c_esp32 = (root / 'src/esp32/esy_hb_i2c.c').read_text()
+require('ESY_ERR_NOT_SUPPORTED' in body(i2c_esp32, 'esy_hb_i2c_write_dma') and
+        'ESY_ERR_NOT_SUPPORTED' in body(i2c_esp32, 'esy_hb_i2c_read_dma') and
+        'ESY_I2C_CAP_DMA_TRANSFER' not in body(i2c_esp32, 'esy_hb_i2c_get_caps'),
+        'ESP32 I2C must not advertise synchronous callback shims as DMA')
+
+wifi = (root / 'src/esp32/esy_hb_wifi.c').read_text()
+require('driver_config.nvs_enable = false' in wifi and
+        'WIFI_STORAGE_RAM' in wifi and
+        not re.search(r'\b(?:nvs_flash_(?:init|erase)|esp_netif_init|'
+                      r'esp_event_loop_(?:create|delete)_default)\s*\(', wifi),
+        'ESP32 Wi-Fi must borrow shared bootstrap and avoid changing native NVS')
+wifi_process = body(wifi, 'esy_hb_wifi_process_sta')
+require('!s_ctx.connect_active' in wifi_process and
+        wifi_process.index('!s_ctx.connect_active') <
+        wifi_process.index('esp_timer_get_time()') and
+        's_ctx.connect_active = false' in body(wifi, 'finish_attempt'),
+        'ESP32 Wi-Fi terminal attempts must stay inactive until explicit restart')
+require('cleanup_required = true' in body(wifi, 'esy_hb_wifi_deinit') and
+        re.search(r'\besy_err_t\s+esy_hb_wifi_deinit\s*\(', wifi) is not None,
+        'ESP32 Wi-Fi cleanup must return status and retain incomplete ownership')
+
 gpio = body((root / 'src/esp32/esy_hb_gpio.c').read_text(), 'esy_hb_gpio_init')
 require('s_ctx.handlers[pin] != NULL' in gpio and
         gpio.index('return ESY_ERR_BUSY') < gpio.index('gpio_config(&io_conf)'),
@@ -239,6 +312,60 @@ adc_init = body(adc_source, 'esy_hb_adc_init')
 require('esy_hb_adc_check_available(config->phys_index)' in adc_init and
         adc_init.index('if (available != ESY_OK) return available') < adc_init.index('memset(slot'),
         'ADC native init must recheck availability before changing its physical slot')
+
+# Native instance capability boundaries must reject impossible hardware before mutation.
+pwm_stm32 = (root / 'src/stm32f4/esy_hb_pwm.c').read_text()
+pwm_caps = body(pwm_stm32, 'esy_hb_pwm_get_caps')
+require('IS_TIM_CCDMA_INSTANCE(c->htim.Instance)' in pwm_caps and
+        re.search(r'if\s*\(IS_TIM_CCDMA_INSTANCE[^\n]*\)\s*\*out_caps\s*\|=\s*ESY_PWM_CAP_DMA_OUTPUT',
+                  pwm_caps) is not None,
+        'STM32F4 PWM DMA capability must follow the selected timer, including TIM9 exclusion')
+trigger = body(pwm_stm32, 'esy_hb_pwm_enable_trigger_output')
+require('IS_TIM_MASTER_INSTANCE(c->htim.Instance)' in trigger and
+        trigger.index('IS_TIM_MASTER_INSTANCE') < trigger.index('HAL_TIMEx_MasterConfigSynchronization'),
+        'STM32F4 non-master timers must reject TRGO before native register writes')
+channel = body(adc_source, 'validate_channel')
+require(all(device in channel for device in ('STM32F405xx', 'STM32F407xx',
+                                            'STM32F415xx', 'STM32F417xx')) and
+        'instance != ADC1 && channel >= ADC_CHANNEL_16' in channel and
+        'ESY_ERR_NOT_SUPPORTED' in channel,
+        'Verified RM0090 internal ADC channels must reject ADC2/ADC3 without changing other F4 maps')
+require('validate_channel(decode_adc(config->phys_index), config->inner.channel)' in
+        body(adc_source, 'esy_hb_adc_validate_config'),
+        'STM32F4 ADC init preflight must validate the physical channel against its ADC instance')
+sequence = body(adc_source, 'configure_sequence')
+require('validate_channel(hadc->Instance, channels[i])' in sequence and
+        sequence.index('validate_channel(') < sequence.index('HAL_ADC_Stop(') and
+        'validate_channel(slot->hadc.Instance, channels[i])' in body(adc_source, 'start_dma'),
+        'STM32F4 ADC scan/DMA channels must be validated before stopping or configuring hardware')
+spi_stm32 = (root / 'src/stm32f4/esy_hb_spi.c').read_text()
+prescaler = body(spi_stm32, 'calc_prescaler')
+require('(uint64_t)target_hz * k_spi_prescalers[i].divider >= pclk' in prescaler and
+        'return ESY_ERR_NOT_SUPPORTED' in prescaler and
+        'return SPI_BAUDRATEPRESCALER_256' not in prescaler,
+        'STM32F4 SPI must reject an unrepresentable low speed instead of overspeed fallback')
+claim = body(spi_stm32, 'esy_hb_spi_claim')
+require('calc_prescaler(' in claim and
+        claim.index('calc_prescaler(') < claim.index('atomic_compare_exchange_strong_explicit('),
+        'STM32F4 SPI clock preflight must precede controller reservation and board setup')
+speed = body(spi_stm32, 'esy_hb_spi_set_speed')
+require('calc_prescaler(' in speed and
+        speed.index('if (result != ESY_OK) return result') < speed.index('h->Init.BaudRatePrescaler ='),
+        'STM32F4 SPI runtime clock rejection must preserve the live native configuration')
+
+esp32_adc = (root / 'src/esp32/esy_hb_adc.c').read_text()
+adc_validate = body(esp32_adc, 'esy_hb_adc_validate_config')
+require('ESY_ADC_SAMPLETIME_DEFAULT' in adc_validate and
+        'ESP32_ADC_PHYSICAL_INDEX' in adc_validate and
+        'ESY_ERR_NOT_SUPPORTED' in adc_validate,
+        'ESP32 ADC must explicitly reject unsupported units and sample profiles')
+require('ADC_UNIT_1' in body(esp32_adc, 'esy_hb_adc_init') and
+        'adc_oneshot_read' in body(esp32_adc, 'esy_hb_adc_sample_once') and
+        'adc_oneshot_del_unit' in body(esp32_adc, 'esy_hb_adc_deinit') and
+        'cleanup_pending' in body(esp32_adc, 'esy_hb_adc_deinit'),
+        'ESP32 ADC oneshot lifetime must retain failed native cleanup for retry')
+require('*caps = 0u' in body(esp32_adc, 'esy_hb_adc_get_caps'),
+        'ESP32 ADC oneshot must not advertise DMA, scan or external triggers')
 
 xio_spi = (root / 'src/pico/xio/spi/esy_hb_xio_spi.c').read_text()
 xio_pio = (root / 'src/pico/xio/spi/esy_hb_xio_spi.pio').read_text()
@@ -266,10 +393,8 @@ for name in ('esy_hb_xio_spi_transfer_blocking', 'esy_hb_xio_spi_transfer16_bloc
             'const uint32_t wrx = pio->rxf[smi]' in transfer and
             'if (rx_buf) rx_buf[i]' in transfer,
             f'{name}: slave TX-only must retire received frames without waiting for another CS')
-poll = body(xio_spi, 'esy_hb_xio_spi_poll')
-require('if (is_master(c) && c->pin_trigger != ESY_PIN_UNUSED)' in poll and
-        'else if (is_master(c))' in poll,
-        'Pico XIO slave DMA retirement must not wait for a future CS/TXSTALL')
+require('esy_hb_xio_spi_process' not in xio_spi,
+        'Pico XIO SPI must complete without a public processing call')
 
 dma = body((root / 'src/stm32f4/esy_hb_dma.c').read_text(), 'esy_hb_dma_prepare')
 guard = re.search(r'ESY_DMA_MEM_TO_MEM\s*&&\s*map->controller\s*!=\s*DMA2\)\s*'
@@ -283,6 +408,49 @@ require('defined(DBGMCU_APB1_FZ_DBG_IWDG_STOP)' in watchdog and
         '__HAL_DBGMCU_UNFREEZE_IWDG();' in watchdog and
         'defined(DBGMCU_APB1_FZ_IWDG_STOP)' not in watchdog,
         'STM32F4 watchdog must apply both supported debug-freeze policies')
+
+pico_dma_source = (root / 'src/pico/esy_hb_dma.c').read_text()
+pico_dma_prepare = body(pico_dma_source, 'esy_hb_dma_prepare')
+half_guard = re.search(r'if\s*\([^)]*dma_config->half_callback\s*!=\s*NULL\)\s*'
+                       r'return ESY_ERR_NOT_SUPPORTED;', pico_dma_prepare)
+require(half_guard is not None and
+        half_guard.start() < pico_dma_prepare.index('dma_claim_reserved('),
+        'Pico DMA must reject requested half-transfer callbacks before claiming hardware')
+pico_dma_claim = body(pico_dma_source, 'esy_hb_dma_claim')
+pico_dma_release = body(pico_dma_source, 'esy_hb_dma_release')
+require(pico_dma_claim.index('esy_hb_resource_assembly_try_acquire()') <
+        pico_dma_claim.index('dma_claim_reserved(') and
+        pico_dma_release.index('esy_hb_resource_assembly_try_acquire()') <
+        pico_dma_release.index('dma_release_reserved('),
+        'Pico cached DMA claim and release must share task assembly exclusion')
+require(pico_dma_prepare.index('esy_hb_resource_assembly_try_acquire()') <
+        pico_dma_prepare.index('dma_claim_reserved(') <
+        pico_dma_prepare.index('dma_prepare_irq(') and
+        'esy_err_t cleanup = dma_release_reserved(owner, dma_config->inner.channel);'
+        in pico_dma_prepare and '(void)esy_hb_dma_release(' not in pico_dma_prepare,
+        'Pico DMA prepare must retain assembly through rejected-IRQ rollback')
+for operation in ('esy_hb_dma_retire_from_isr', 'esy_hb_dma_abort_from_isr'):
+    require('esy_hb_resource_assembly_try_acquire' not in body(pico_dma_source, operation),
+            f'{operation}: Pico ISR retirement must not acquire task assembly')
+for peripheral in ('adc', 'i2c', 'pwm', 'spi', 'timer_capture'):
+    defs = (root.parent / 'esy_common/defs/include/esy_common/defs/peripheral' /
+            f'esy_{peripheral}_defs.h').read_text()
+    require('not native DMA' not in defs and 'may complete synchronously' not in defs,
+            f'{peripheral}: capability definitions must not permit software DMA substitutes')
+
+esp32_capture = (root / 'src/esp32/esy_hb_timer_capture.c').read_text()
+require('mcpwm_new_capture_timer(' in esp32_capture and
+        'mcpwm_new_capture_channel(' in esp32_capture and
+        'event->cap_value' in esp32_capture and
+        '(uint32_t)(ticks - c->previous_ticks) / c->ticks_per_us' in esp32_capture and
+        'ESY_TIMER_CAPTURE_CAP_HARDWARE_LATCH' in
+        body(esp32_capture, 'esy_hb_timer_capture_get_caps') and
+        'esp_timer_get_time(' not in esp32_capture and 'esy_hb_gpio_' not in esp32_capture,
+        'ESP32 capture must use native MCPWM latches and subtract raw wrapped ticks before scaling')
+pico_capture = (root / 'src/pico/esy_hb_timer_capture.c').read_text()
+require('ESY_ERR_NOT_SUPPORTED' in body(pico_capture, 'esy_hb_timer_capture_claim') and
+        'time_us_32(' not in pico_capture and 'esy_hb_gpio_' not in pico_capture,
+        'Pico capture must reject before board setup instead of using GPIO ISR timestamps')
 
 for error in errors:
     print(f'error: {error}', file=sys.stderr)

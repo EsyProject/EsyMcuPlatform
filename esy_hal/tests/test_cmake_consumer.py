@@ -4,6 +4,7 @@
 
 """Exercise real platform feature assembly and link without disabled providers."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -78,7 +79,7 @@ class FeatureAssembly(unittest.TestCase):
 
     def build(self, features, source='int main(void) { return 0; }',
               error=None, expected=(), absent=(), fake=True, platform='PICO2_W',
-              omit_pico_multicore=False, omit_pico_rand=False):
+              omit_pico_multicore=False, omit_pico_rand=False, process_exports=()):
         with tempfile.TemporaryDirectory(prefix='esy-platform-cmake-') as temp:
             root = Path(temp)
             (root / 'CMakeLists.txt').write_text(PROJECT)
@@ -105,6 +106,17 @@ class FeatureAssembly(unittest.TestCase):
                                      '--target', 'consumer', '-j2'],
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            archives = sorted((root / 'out').rglob('libesy_hal*.a'))
+            self.assertTrue(archives, 'The consumer did not build a HAL archive')
+            symbols = subprocess.run(['nm', '-g'] + [str(path) for path in archives],
+                                     text=True, capture_output=True)
+            self.assertEqual(0, symbols.returncode, symbols.stdout + symbols.stderr)
+            self.assertNotRegex(symbols.stdout,
+                r'\besy_(?:hal|hb)_(?:dma|spi|uart|pwm|xio_spi)_(?:process|poll|service)\b')
+            self.assertNotIn('esy_hal_xio_spi_transfer_dma', symbols.stdout)
+            defined = set(re.findall(r'\b[TW]\s+(esy_[A-Za-z0-9_]+)\b', symbols.stdout))
+            for api in process_exports:
+                self.assertIn(api, defined)
             result = subprocess.run([str(root / 'out/consumer')], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -161,6 +173,18 @@ class FeatureAssembly(unittest.TestCase):
                    'int main(void) { esy_dma_config_t c; esy_hal_dma_default_cfg(&c); return 0; }',
                    expected=('esy_hal_dma.c', 'esy_hb_dma.c'))
 
+    def test_automatic_dma_apis_do_not_export_progress_entry_points(self):
+        self.build('set(ENABLE_ESY_DMA ON)\nset(ENABLE_ESY_SPI ON)\n'
+                   'set(ENABLE_ESY_UART ON)\nset(ENABLE_ESY_PWM ON)\n'
+                   'set(ENABLE_ESY_XIO ON)\nset(ENABLE_ESY_XIO_SPI ON)\n'
+                   'set(ENABLE_ESY_COMMON_DS ON)',
+                   '#include "esy_hal/esy_hal_dma.h"\n'
+                   '#include "esy_hal/esy_hal_spi.h"\n'
+                   '#include "esy_hal/esy_hal_uart.h"\n'
+                   '#include "esy_hal/esy_hal_pwm.h"\n'
+                   'int main(void) { return 0; }')
+
+
     def test_uart_and_capture_status_lifecycles_link_through_public_target(self):
         self.build('set(ENABLE_ESY_UART ON)\nset(ENABLE_ESY_TIMER_CAPTURE ON)\n'
                    'set(ENABLE_ESY_COMMON_DS ON)\nset(ENABLE_ESY_DMA OFF)\n'
@@ -177,8 +201,8 @@ class FeatureAssembly(unittest.TestCase):
                    'if (esy_hal_uart_deinit(&u)) return 3;'
                    'return esy_hal_timer_capture_deinit(&c); }',
                    expected=('esy_hal_uart.c', 'esy_hal_timer_capture.c',
-                             'esy_hb_gpio.c', 'ENABLE_ESY_DMA=OFF'),
-                   absent=('esy_hal_dma.c', 'esy_hal_gpio.c'))
+                             'esy_hb_timer_capture.c', 'ENABLE_ESY_DMA=OFF'),
+                   absent=('esy_hal_dma.c', 'esy_hal_gpio.c', 'esy_hb_gpio.c'))
 
     def test_spi_status_lifecycle_links_without_the_generic_dma_facade(self):
         self.build('set(ENABLE_ESY_SPI ON)\nset(ENABLE_ESY_DMA OFF)',
@@ -206,8 +230,7 @@ class FeatureAssembly(unittest.TestCase):
                    'if (esy_hal_spi_read_blocking(&s, rx, 2u) != 2) return 3;'
                    'if (esy_hal_spi_transfer_blocking(&s, tx, rx, 2u) != 2) return 4;'
                    'if (esy_hal_spi_transfer_dma(&s, &d, 0, 0, 0)) return 5;'
-                   'if (esy_hal_xio_spi_transfer_dma(&s, &d, 0, 0, 0)) return 6;'
-                   'if (esy_hal_spi_poll(&s) || esy_hal_spi_abort(&s)) return 7;'
+                   'if (esy_hal_spi_abort(&s)) return 6;'
                    'esy_hal_xio_spi_deinit(&s); return 0; }',
                    expected=('esy_hal_xio_spi.c', 'esy_hal_spi_io.c',
                              'esy_hb_dma.c', 'ENABLE_ESY_DMA=OFF'),
@@ -273,10 +296,12 @@ class FeatureAssembly(unittest.TestCase):
                    absent=('esy_hal_can.c', 'esy_hb_can.c'))
 
     def test_can_rejects_unsupported_backends(self):
-        for platform in ('PICO2_W', 'ESP32'):
+        for platform in ('PICO2_W',):
             with self.subTest(platform=platform):
                 self.build('set(ENABLE_ESY_CAN ON)', platform=platform,
                            error='ENABLE_ESY_CAN has no backend')
+        self.build('set(ENABLE_ESY_CAN ON)', platform='ESP32',
+                   error='ESP32 CAN requires the native idf::driver')
         self.build('set(ENABLE_ESY_CAN ON)', platform='STM32F401RE',
                    error='ENABLE_ESY_CAN requires a verified STM32F405/407/415/417')
 

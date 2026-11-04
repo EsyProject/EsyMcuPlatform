@@ -36,8 +36,6 @@ typedef struct {
   esy_proto_bin_tp_event_t events[TEST_EVENT_COUNT];
   uint32_t event_ids[TEST_EVENT_COUNT];
   bool try_deinit_on_event;
-  uint32_t deferred_start_poll;
-  esy_err_t deferred_poll_result;
   uint8_t payload[TEST_RX_PAYLOAD_MAX];
   uint32_t payload_len;
 } test_ctx_t;
@@ -143,15 +141,6 @@ static void receive_ack(uint8_t sequence) {
       fake_esy_hal_uart_push_rx_stream(&s_ctx.uart, frame.buf, frame.len));
 }
 
-static void defer_queued_start(esy_uart_t *uart) {
-  fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(uart);
-  if (slot->poll_count == s_ctx.deferred_start_poll) {
-    slot->poll_hook = NULL;
-    slot->poll_result = s_ctx.deferred_poll_result != ESY_OK
-        ? s_ctx.deferred_poll_result : ESY_ERR_BUSY;
-  }
-}
-
 void setUp(void) {
   memset(&s_ctx, 0, sizeof(s_ctx));
   fake_esy_hal_system_reset();
@@ -221,11 +210,6 @@ void test_poll_restarts_stream_after_overflow(void) {
   TEST_ASSERT_EQUAL_UINT(0u, slot->rx_stream_used);
 }
 
-static void retire_uart_during_poll(esy_uart_t *uart) {
-  fake_esy_hal_uart_find(uart)->poll_hook = NULL;
-  fake_esy_hal_uart_complete_last_dma(uart);
-}
-
 void test_ack_timeout_starts_after_uart_dma_completes(void) {
   esy_proto_bin_uart_channel_config_t config;
   esy_proto_bin_session_t *transport;
@@ -248,8 +232,8 @@ void test_ack_timeout_starts_after_uart_dma_completes(void) {
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   TEST_ASSERT_EQUAL_UINT32(0u, s_ctx.event_count);
 
-  fake_esy_hal_uart_find(&s_ctx.uart)->poll_hook = retire_uart_during_poll;
   fake_esy_hal_system_set_tick(10u);
+  fake_esy_hal_uart_complete_last_dma(&s_ctx.uart);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   fake_esy_hal_system_set_tick(19u);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
@@ -261,7 +245,7 @@ void test_ack_timeout_starts_after_uart_dma_completes(void) {
   TEST_ASSERT_EQUAL(ESY_PROTO_BIN_TP_EVENT_TIMEOUT, s_ctx.last_event);
 }
 
-void test_failed_uart_poll_retains_channel_and_dma_until_retry(void) {
+void test_native_completion_keeps_protocol_callbacks_in_the_owner_poll(void) {
   esy_proto_bin_uart_channel_config_t config;
   fill_config(&config);
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_init(&s_ctx.channel, &config));
@@ -272,21 +256,18 @@ void test_failed_uart_poll_retains_channel_and_dma_until_retry(void) {
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_session_commit_tx(transport, 1u, NULL));
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&s_ctx.uart);
-  slot->poll_result = ESY_ERR_IO;
-  slot->poll_hook = retire_uart_during_poll;
-  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
-  TEST_ASSERT_TRUE(slot->tx_busy);
+  fake_esy_hal_uart_complete_last_dma(&s_ctx.uart);
+  TEST_ASSERT_FALSE(slot->tx_busy);
   TEST_ASSERT_NOT_NULL(esy_proto_bin_uart_channel_get_session(&s_ctx.channel));
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
   TEST_ASSERT_EQUAL_UINT32(0u, s_ctx.event_count);
-  slot->poll_result = ESY_OK;
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
-  TEST_ASSERT_FALSE(slot->tx_busy);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
+  TEST_ASSERT_EQUAL_UINT32(0u, s_ctx.event_count);
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_deinit(&s_ctx.channel));
 }
 
-void test_failed_submit_preserves_work_buffer_until_poll_or_abort_recovery(void) {
+void test_failed_submit_preserves_work_buffer_until_process_or_abort_recovery(void) {
   esy_proto_bin_uart_channel_config_t config;
   fill_config(&config);
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_init(&s_ctx.channel, &config));
@@ -323,7 +304,7 @@ void test_failed_submit_preserves_work_buffer_until_poll_or_abort_recovery(void)
   TEST_ASSERT_EQUAL_MEMORY(borrowed, s_ctx.storage.tx_work_buf, sizeof(borrowed));
   slot->send_dma_result = ESY_OK;
   slot->retain_failed_submission = false;
-  slot->poll_hook = retire_uart_during_poll;
+  fake_esy_hal_uart_complete_last_dma(&s_ctx.uart);
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   TEST_ASSERT_EQUAL_UINT32(3u, slot->abort_count);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
@@ -518,19 +499,16 @@ void test_scheduler_queue_acceptance_remains_borrowed_and_deinit_cancels_before_
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_init(&s_ctx.channel, &config));
   esy_proto_bin_session_t *session = esy_proto_bin_uart_channel_get_session(&s_ctx.channel);
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&s_ctx.uart);
-  s_ctx.deferred_start_poll = slot->poll_count + 2u;
-  slot->poll_hook = defer_queued_start;
+  slot->tx_busy = true;
   (void)queue_payload(0x51u);
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   TEST_ASSERT_FALSE(esy_proto_bin_session_is_idle(session));
   TEST_ASSERT_EQUAL(0u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(0u, s_ctx.event_count);
   uint8_t borrowed[sizeof(s_ctx.storage.tx_work_buf)];
   memcpy(borrowed, s_ctx.storage.tx_work_buf, sizeof(borrowed));
-  slot->poll_result = ESY_OK;
-  uint32_t polls = slot->poll_count;
+  slot->tx_busy = false;
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_deinit(&s_ctx.channel));
-  TEST_ASSERT_EQUAL(polls + 1u, slot->poll_count);
   TEST_ASSERT_EQUAL(0u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(0u, slot->abort_count);
   TEST_ASSERT_EQUAL(0u, s_ctx.event_count);
@@ -623,9 +601,7 @@ void test_scheduler_retained_failed_submit_keeps_frame_until_abort_and_preserves
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   uint8_t borrowed[sizeof(s_ctx.storage.tx_work_buf)];
   memcpy(borrowed, s_ctx.storage.tx_work_buf, sizeof(borrowed));
-  uint32_t polls = slot->poll_count;
   TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
-  TEST_ASSERT_EQUAL(polls + 1u, slot->poll_count);
   TEST_ASSERT_EQUAL(1u, slot->abort_count);
   TEST_ASSERT_EQUAL(1u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(0u, s_ctx.event_count);
@@ -633,9 +609,7 @@ void test_scheduler_retained_failed_submit_keeps_frame_until_abort_and_preserves
   slot->abort_result = ESY_OK;
   slot->send_dma_result = ESY_OK;
   slot->retain_failed_submission = false;
-  polls = slot->poll_count;
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
-  TEST_ASSERT_EQUAL(polls + 1u, slot->poll_count);
   TEST_ASSERT_EQUAL(2u, slot->abort_count);
   TEST_ASSERT_EQUAL(1u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(1u, s_ctx.event_count);
@@ -663,9 +637,7 @@ void test_scheduler_deinit_abort_failure_closes_admission_and_poll_only_retries_
   slot->abort_result = ESY_ERR_IO;
   uint8_t borrowed[sizeof(s_ctx.storage.tx_work_buf)];
   memcpy(borrowed, s_ctx.storage.tx_work_buf, sizeof(borrowed));
-  uint32_t polls = slot->poll_count;
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_deinit(&s_ctx.channel));
-  TEST_ASSERT_EQUAL(polls + 1u, slot->poll_count);
   TEST_ASSERT_EQUAL(1u, slot->abort_count);
   TEST_ASSERT_NULL(esy_proto_bin_uart_channel_get_session(&s_ctx.channel));
   TEST_ASSERT_NOT_NULL(slot->last_dma_callback_arg);
@@ -675,9 +647,7 @@ void test_scheduler_deinit_abort_failure_closes_admission_and_poll_only_retries_
   build_data_frame(frame, sizeof(frame), &payload, 1u, &frame_length);
   TEST_ASSERT_EQUAL_size_t(frame_length,
       fake_esy_hal_uart_push_rx_stream(&s_ctx.uart, frame, frame_length));
-  polls = slot->poll_count;
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
-  TEST_ASSERT_EQUAL(polls + 1u, slot->poll_count);
   TEST_ASSERT_EQUAL(2u, slot->abort_count);
   TEST_ASSERT_EQUAL(0u, s_ctx.data_count);
   TEST_ASSERT_EQUAL(0u, s_ctx.event_count);
@@ -759,9 +729,9 @@ void test_scheduler_immediate_backend_rejection_is_returned_to_owner_with_matchi
   fill_config(&config);
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_init(&s_ctx.channel, &config));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&s_ctx.uart);
-  slot->send_dma_result = ESY_ERR_NOT_SUPPORTED;
+  slot->send_dma_result = ESY_ERR_IO;
   uint32_t failed = queue_payload(0x51u);
-  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   TEST_ASSERT_EQUAL(1u, s_ctx.event_count);
   TEST_ASSERT_EQUAL(ESY_PROTO_BIN_TP_EVENT_IO_ERROR, s_ctx.events[0]);
   TEST_ASSERT_EQUAL(failed, s_ctx.event_ids[0]);
@@ -779,19 +749,15 @@ void test_scheduler_delayed_start_then_idle_rejection_cannot_start_two_frames_in
   fill_config(&config);
   TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_init(&s_ctx.channel, &config));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&s_ctx.uart);
-  s_ctx.deferred_start_poll = slot->poll_count + 2u;
-  s_ctx.deferred_poll_result = ESY_ERR_IO;
-  slot->poll_hook = defer_queued_start;
+  slot->tx_busy = true;
   uint32_t first = queue_payload(0x51u);
   uint32_t second = queue_payload(0x72u);
-  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   TEST_ASSERT_EQUAL(0u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(0u, s_ctx.event_count);
-  slot->poll_result = ESY_OK;
-  slot->send_dma_result = ESY_ERR_NOT_SUPPORTED;
-  uint32_t polls = slot->poll_count;
-  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
-  TEST_ASSERT_EQUAL(polls + 1u, slot->poll_count);
+  slot->tx_busy = false;
+  slot->send_dma_result = ESY_ERR_IO;
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_proto_bin_uart_channel_poll(&s_ctx.channel));
   TEST_ASSERT_EQUAL(1u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(1u, s_ctx.event_count);
   TEST_ASSERT_EQUAL(ESY_PROTO_BIN_TP_EVENT_IO_ERROR, s_ctx.events[0]);

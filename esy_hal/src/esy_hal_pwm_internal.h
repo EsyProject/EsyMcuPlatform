@@ -8,6 +8,7 @@
 #define ESY_HAL_PWM_INTERNAL_H
 
 #include "esy_hal_storage_internal.h"
+#include <stdatomic.h>
 
 #include "esy_common/defs/peripheral/esy_pwm_defs.h"
 #include "esy_common/device/esy_device.h"
@@ -20,10 +21,10 @@ typedef struct ESY_HAL_MAY_ALIAS {
   void *dma_half_arg;
   esy_dma_callback_t dma_error_cb;
   void *dma_error_arg;
-  bool output_enabled;
-  bool dma_active;
+  atomic_bool output_enabled;
+  atomic_bool dma_active;
   bool dma_circular;
-  bool callback_running;
+  atomic_bool callback_running;
 } esy_hal_pwm_runtime_t;
 
 _Static_assert(sizeof(esy_hal_pwm_runtime_t) <= ESY_PWM_HAL_STORAGE_BYTES,

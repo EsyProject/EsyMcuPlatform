@@ -252,7 +252,9 @@ void test_esy_hal_spi_dma_completes_board_metadata(void) {
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_INVALID_ARG,
                           spi.ops->transfer_dma(&spi, NULL, NULL, NULL, NULL));
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_spi_write_dma(&spi, &tx_dma));
+  platform_test_set_dma_busy(false);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_spi_read_dma(&spi, &rx_dma));
+  platform_test_set_dma_busy(false);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_spi_transfer_dma(
                                       &spi, &tx_dma, &rx_dma, NULL, NULL));
 
@@ -375,22 +377,11 @@ void test_esy_hal_spi_device_tracks_dma_and_runtime_resume(void) {
   TEST_ASSERT_EQUAL_UINT32(234000u, platform_test_state()->resumed_speed_hz);
 }
 
-static esy_err_t failing_poll(esy_spi_t *spi) { (void)spi; return ESY_ERR_BUSY; }
-void test_spi_poll_requires_a_backend_hook_and_propagates_retained_cleanup(void) {
-  esy_spi_t spi = {0};
-  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_spi_poll(NULL));
-  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_spi_poll(&spi));
-  init_spi(&spi);
-  TEST_ASSERT_NOT_NULL(spi.ops->poll);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
-  static const esy_spi_vtable_t k_failing_poll_ops = {.poll = failing_poll};
-  spi.ops = &k_failing_poll_ops;
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_spi_poll(&spi));
-}
 
 typedef struct {
   uint32_t calls;
   esy_spi_dma_transfer_status_t status;
+  esy_spi_device_binding_t *binding;
 } spi_completion_t;
 
 static void record_spi_completion(esy_spi_t *spi,
@@ -399,9 +390,18 @@ static void record_spi_completion(esy_spi_t *spi,
   (void)spi;
   completion->calls++;
   completion->status = result->status;
+  if (completion->binding != NULL) {
+    uint32_t usage = 0u;
+    TEST_ASSERT_TRUE(completion->binding->async_ref_held);
+    TEST_ASSERT_EQUAL(ESY_OK, esy_device_get_usage_count(
+        &completion->binding->device, &usage));
+    TEST_ASSERT_EQUAL_UINT32(1u, usage);
+    TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+        esy_hal_spi_unregister_device(completion->binding));
+  }
 }
 
-void test_spi_failed_submit_retains_borrow_and_graph_lease_until_poll_or_abort(void) {
+void test_spi_failed_submit_retains_borrow_and_graph_lease_until_terminal_irq_or_abort(void) {
   ESY_DEVICE_REGISTRY_STATIC_STORAGE(storage, 1u);
   esy_device_registry_static_resources_t resources;
   esy_device_registry_t registry = {0};
@@ -424,11 +424,25 @@ void test_spi_failed_submit_retains_borrow_and_graph_lease_until_poll_or_abort(v
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_register_device(&binding, &spi,
       &registry, &registration, &config));
   TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_start(&registry));
+  /* Busy retirement must reject before acquiring or retaining another lease. */
+  spi_completion_t normal_completion = {.binding = &binding};
+  platform_test_set_dma_busy(true);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_spi_transfer_dma(&spi, &dma, NULL,
+      record_spi_completion, &normal_completion));
+  TEST_ASSERT_FALSE(binding.async_ref_held);
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_transfer_dma_calls);
+  platform_test_set_dma_busy(false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_transfer_dma(&spi, &dma, NULL,
+      record_spi_completion, &normal_completion));
+  platform_test_complete_spi_dma(&spi, ESY_SPI_DMA_TRANSFER_OK);
+  TEST_ASSERT_EQUAL_UINT32(1u, normal_completion.calls);
+  TEST_ASSERT_FALSE(binding.async_ref_held);
   platform_test_set_spi_submit_result(ESY_ERR_IO);
+  platform_test_set_spi_submit_retains_borrow(true);
   for (unsigned use_abort = 0u; use_abort < 2u; ++use_abort) {
-    spi_completion_t completion = {0};
+    spi_completion_t completion = {.binding = &binding};
     uint32_t usage = 0u;
-    platform_test_set_dma_busy(true);
+    platform_test_set_dma_busy(false);
     TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_spi_transfer_dma(&spi, &dma,
         NULL, record_spi_completion, &completion));
     TEST_ASSERT_TRUE(esy_hal_spi_is_busy(&spi));
@@ -441,7 +455,7 @@ void test_spi_failed_submit_retains_borrow_and_graph_lease_until_poll_or_abort(v
       TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_abort(&spi));
       TEST_ASSERT_EQUAL_UINT32(0u, completion.calls);
     } else {
-      TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
+      platform_test_complete_spi_dma(&spi, ESY_SPI_DMA_TRANSFER_DMA_ERROR);
       TEST_ASSERT_EQUAL_UINT32(1u, completion.calls);
       TEST_ASSERT_EQUAL(ESY_SPI_DMA_TRANSFER_DMA_ERROR, completion.status);
     }
@@ -451,11 +465,11 @@ void test_spi_failed_submit_retains_borrow_and_graph_lease_until_poll_or_abort(v
     TEST_ASSERT_EQUAL_UINT32(0u, usage);
   }
   /* A clean rejection retains neither a callback nor a usage reference. */
+  platform_test_set_spi_submit_retains_borrow(false);
   spi_completion_t completion = {0};
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_spi_transfer_dma(&spi, &dma,
       NULL, record_spi_completion, &completion));
   TEST_ASSERT_FALSE(binding.async_ref_held);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_poll(&spi));
   TEST_ASSERT_EQUAL_UINT32(0u, completion.calls);
   TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_deinit(&registry));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_spi_unregister_device(&binding));
@@ -910,7 +924,7 @@ void test_spi_copied_registered_handle_cannot_resume_or_borrow_the_original_owne
 
   TEST_ASSERT_EQUAL_INT32(1, esy_hal_spi_write_blocking(&owner, &byte, 1u));
   TEST_ASSERT_TRUE(platform_test_state()->spi_enabled);
-  platform_test_set_dma_busy(true);
+  platform_test_set_dma_busy(false);
   TEST_ASSERT_EQUAL(ESY_OK,
                     esy_hal_spi_transfer_dma(&owner, &dma, NULL, NULL, NULL));
   TEST_ASSERT_TRUE(binding.async_ref_held);
@@ -1068,7 +1082,7 @@ void test_spi_pm_write_requires_the_transitioning_direct_dependent_and_idle_pare
     esy_device_t foreign = {.registry = &foreign_registry};
     if (mode == PM_WRITE_FOREIGN_REQUESTER) probe.requester_override = &foreign;
     if (mode == PM_WRITE_ASYNC_BORROW) {
-      platform_test_set_dma_busy(true);
+      platform_test_set_dma_busy(false);
       esy_dma_config_t transfer = {.src = &byte, .length = sizeof(byte)};
       TEST_ASSERT_EQUAL(ESY_OK,
           esy_hal_spi_transfer_dma(&spi, &transfer, NULL, NULL, NULL));

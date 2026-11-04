@@ -15,6 +15,7 @@
 
 #include "hardware/irq.h"
 #include "hardware/uart.h"
+#include "pico/time.h"
 #include "hardware/structs/uart.h"
 
 #include "esy_hal_backend/esy_hb_dma.h"
@@ -24,12 +25,11 @@
 #define PICO_UART_CORE_COUNT 2u
 #define UART_RX_IRQ_BYTE_BUDGET 32u
 
-enum { UART_DMA_DONE = 1u, UART_DMA_ERROR = 2u };
-
 typedef struct {
   esy_dma_config_t config;
-  _Atomic uint32_t events;
-  bool active;
+  atomic_bool active;
+  esy_dma_inner_config_t route;
+  bool prepared;
 } pico_uart_dma_t;
 
 typedef struct {
@@ -164,8 +164,8 @@ esy_err_t esy_hb_uart_claim(esy_uart_t *uart, uint8_t phys_index) {
   memset(c, 0, sizeof(*c));
   c->phys_index = phys_index;
   c->bound_handle = uart;
-  atomic_init(&c->tx_dma.events, 0u);
-  atomic_init(&c->rx_dma.events, 0u);
+  atomic_init(&c->tx_dma.active, false);
+  atomic_init(&c->rx_dma.active, false);
   atomic_init(&c->rx_stream_overflowed, false);
   uart->ctx[0] = c;
   return ESY_OK;
@@ -234,6 +234,14 @@ esy_err_t esy_hb_uart_deinit(esy_uart_t *uart) {
   if (c == NULL) return ESY_ERR_STATE;
   if (c->tx_dma.active || c->rx_dma.active || c->rx_stream_active ||
       esy_hb_uart_is_transmitting(uart)) return ESY_ERR_BUSY;
+  for (unsigned i = 0u; i < 2u; ++i) {
+    pico_uart_dma_t *direction = i == 0u ? &c->tx_dma : &c->rx_dma;
+    if (!direction->prepared) continue;
+    esy_err_t result = esy_hb_dma_release(direction, direction->route.dreq,
+                                         direction->route.channel);
+    if (result != ESY_OK) return result;
+    direction->prepared = false;
+  }
   if (c->enabled && !c->suspended) uart_deinit(c->inst);
   uint32_t key = uart_rx_lock();
   s_ctx.bound_uarts[c->phys_index] = NULL;
@@ -254,6 +262,27 @@ extern int32_t esy_hb_uart_send_blocking(esy_uart_t *uart,
     return (int32_t)len;
 }
 
+int32_t esy_hb_uart_send_timeout(esy_uart_t *uart, const uint8_t *data,
+                                size_t len, uint32_t timeout_ms) {
+  if (uart_context(uart) == NULL || data == NULL || len == 0u ||
+      len > INT32_MAX || timeout_ms == 0u || timeout_ms > INT32_MAX)
+    return ESY_ERR_INVALID_ARG;
+  rp2040_uart_ctx_t *c = uart_context(uart);
+  if (!c->enabled || c->suspended) return ESY_ERR_STATE;
+  if (c->tx_dma.active) return ESY_ERR_BUSY;
+  /* The free-running 64-bit microsecond timer continues through normal sleep.
+   * Unsigned elapsed time bounds one finite call; expiry cannot reactivate it. */
+  uint64_t start = time_us_64();
+  uint64_t budget = (uint64_t)timeout_ms * 1000u;
+  size_t count = 0u;
+  while (count < len) {
+    if (time_us_64() - start >= budget) break;
+    if (uart_is_writable(c->inst)) c->hw->dr = data[count++];
+    else tight_loop_contents();
+  }
+  return (int32_t)count;
+}
+
 extern int32_t esy_hb_uart_receive_blocking(esy_uart_t *uart, uint8_t *data,
                                                 size_t len) {
     if (!uart || uart_context(uart) == NULL || !data || !len) return ESY_ERR_INVALID_ARG;
@@ -265,16 +294,27 @@ extern int32_t esy_hb_uart_receive_blocking(esy_uart_t *uart, uint8_t *data,
     return (int32_t)len;
 }
 
-/* IRQs only publish terminal events. The task owner retires the native
- * dispatch and its pending/peer-core callbacks before releasing caller state. */
-static void uart_dma_complete_callback(void *arg) {
-  pico_uart_dma_t *direction = arg;
-  atomic_fetch_or_explicit(&direction->events, UART_DMA_DONE, memory_order_release);
+/* Finite DMA releases caller memory from its native completion IRQ. TX
+ * completion certifies source retirement; the PL011 FIFO and shifter may still
+ * be transmitting. Physical drain remains visible through is_transmitting. */
+static void uart_dma_finish(pico_uart_dma_t *direction, bool error) {
+  if (!atomic_load_explicit(&direction->active, memory_order_acquire)) return;
+  esy_err_t result = error
+      ? esy_hb_dma_abort_from_isr(direction, direction->config.inner.dreq,
+                                 direction->config.inner.channel)
+      : esy_hb_dma_retire_from_isr(direction, direction->config.inner.dreq,
+                                  direction->config.inner.channel);
+  if (result != ESY_OK) return; /* Explicit abort recovers a stuck native DMA. */
+  esy_dma_config_t completed = direction->config;
+  esy_dma_callback_t callback = error ? completed.error_callback : completed.callback;
+  void *arg = error ? completed.error_callback_arg : completed.callback_arg;
+  if (callback != NULL) callback(arg);
+  memset(&direction->config, 0, sizeof(direction->config));
+  /* Publish retirement only after callback return; lifecycle may then reclaim. */
+  atomic_store_explicit(&direction->active, false, memory_order_release);
 }
-static void uart_dma_error_callback(void *arg) {
-  pico_uart_dma_t *direction = arg;
-  atomic_fetch_or_explicit(&direction->events, UART_DMA_ERROR, memory_order_release);
-}
+static void uart_dma_complete_callback(void *arg) { uart_dma_finish(arg, false); }
+static void uart_dma_error_callback(void *arg) { uart_dma_finish(arg, true); }
 
 static esy_err_t uart_start_dma(esy_uart_t *uart, esy_dma_config_t *config,
                                  bool is_tx) {
@@ -295,10 +335,17 @@ static esy_err_t uart_start_dma(esy_uart_t *uart, esy_dma_config_t *config,
   transfer.error_callback = uart_dma_error_callback;
   transfer.error_callback_arg = direction;
   memset(&direction->config, 0, sizeof(direction->config));
+  if (direction->prepared) {
+    esy_err_t release = esy_hb_dma_release(direction, direction->route.dreq,
+                                          direction->route.channel);
+    if (release != ESY_OK) return release;
+    direction->prepared = false;
+  }
   esy_err_t result = esy_hb_dma_prepare(direction, &transfer);
   if (result != ESY_OK) return result;
   direction->config = *config;
-  atomic_store_explicit(&direction->events, 0u, memory_order_release);
+  direction->route = config->inner;
+  direction->prepared = true;
   direction->active = true;
   result = esy_hb_dma_start(direction, 1u << config->inner.channel);
   if (result != ESY_OK) {
@@ -320,8 +367,8 @@ esy_err_t esy_hb_uart_abort_dma(esy_uart_t *uart, bool is_tx) {
   rp2040_uart_ctx_t *c = uart_context(uart);
   pico_uart_dma_t *direction = is_tx ? &c->tx_dma : &c->rx_dma;
   if (!direction->active) return ESY_OK;
-  esy_err_t result = esy_hb_dma_abort(direction, direction->config.inner.dreq,
-                                    direction->config.inner.channel);
+  esy_err_t result = esy_hb_dma_abort(direction, direction->route.dreq,
+                                    direction->route.channel);
   if (result != ESY_OK) return result;
   direction->active = false;
   memset(&direction->config, 0, sizeof(direction->config));
@@ -334,33 +381,6 @@ bool esy_hb_uart_is_dma_busy(const esy_uart_t *uart, bool is_tx) {
   return is_tx ? c->tx_dma.active : c->rx_dma.active;
 }
 
-esy_err_t esy_hb_uart_poll(esy_uart_t *uart) {
-  if (uart_context(uart) == NULL) return ESY_ERR_INVALID_ARG;
-  rp2040_uart_ctx_t *c = uart_context(uart);
-  esy_err_t first_error = ESY_OK;
-  for (unsigned i = 0u; i < 2u; ++i) {
-    pico_uart_dma_t *direction = i == 0u ? &c->tx_dma : &c->rx_dma;
-    if (!direction->active) continue;
-    uint32_t events = atomic_load_explicit(&direction->events, memory_order_acquire);
-    if (events == 0u) continue;
-    if ((events & UART_DMA_ERROR) == 0u && i == 0u &&
-        (c->hw->fr & UART_UARTFR_BUSY_BITS) != 0u) continue;
-    esy_dma_config_t completed = direction->config;
-    esy_err_t result = esy_hb_uart_abort_dma(uart, i == 0u);
-    if (result != ESY_OK) {
-      if (first_error == ESY_OK) first_error = result;
-      continue;
-    }
-    /* Abort excludes pending and peer dispatch; prioritize any late error. */
-    events = atomic_load_explicit(&direction->events, memory_order_acquire);
-    esy_dma_callback_t callback = (events & UART_DMA_ERROR) != 0u
-        ? completed.error_callback : completed.callback;
-    void *arg = (events & UART_DMA_ERROR) != 0u
-        ? completed.error_callback_arg : completed.callback_arg;
-    if (callback != NULL) callback(arg);
-  }
-  return first_error;
-}
 
 extern esy_err_t esy_hb_uart_rx_stream_start(
     esy_uart_t *uart, uint8_t *storage, size_t storage_size,

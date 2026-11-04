@@ -547,33 +547,25 @@ void test_poll_uart_busy_stop_preserves_dma_and_releases_after_completion(void) 
   TEST_ASSERT_EQUAL(0u, fake_esy_os_task_get_delete_count());
 }
 
-static void complete_log_during_uart_poll(esy_uart_t *uart) {
-  TEST_ASSERT_FALSE(s_ctx.in_critical);
-  fake_esy_hal_uart_find(uart)->poll_hook = NULL;
-  fake_esy_hal_uart_complete_last_dma(uart);
-}
-
-void test_poll_uart_shutdown_keeps_dma_storage_until_owner_cleanup_succeeds(void) {
+void test_poll_uart_shutdown_keeps_dma_storage_until_native_completion(void) {
   init_poll_uart(0u);
   fake_esy_hal_uart_set_send_dma_result(&s_ctx.uart, ESY_OK);
   queue_block();
   TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_core_process(&s_ctx.backend, 1u));
   fake_esy_hal_uart_slot_t *slot = fake_esy_hal_uart_find(&s_ctx.uart);
-  slot->poll_result = ESY_ERR_IO;
-  slot->poll_hook = complete_log_during_uart_poll;
-  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_logger_backend_uart_core_process(&s_ctx.backend, 1u));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_core_process(&s_ctx.backend, 1u));
   TEST_ASSERT_TRUE(slot->tx_busy);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_logger_backend_uart_deinit(&s_ctx.backend));
-  slot->poll_result = ESY_OK;
-  TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_core_process(&s_ctx.backend, 1u));
+  TEST_ASSERT_FALSE(s_ctx.in_critical);
+  fake_esy_hal_uart_complete_last_dma(&s_ctx.uart);
   TEST_ASSERT_FALSE(slot->tx_busy);
   TEST_ASSERT_EQUAL_UINT32(1u, slot->send_dma_count);
   TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_deinit(&s_ctx.backend));
 }
 
-void test_failed_dma_submit_keeps_pool_block_until_poll_or_abort_and_never_resends(void) {
-  for (unsigned retire_with_poll = 0u; retire_with_poll < 2u; ++retire_with_poll) {
+void test_failed_dma_submit_keeps_pool_block_until_process_or_abort_and_never_resends(void) {
+  for (unsigned retire_with_irq = 0u; retire_with_irq < 2u; ++retire_with_irq) {
     init_poll_uart(0u);
     queue_block();
     const uint8_t *held = s_ctx.borrowed;
@@ -613,7 +605,7 @@ void test_failed_dma_submit_keeps_pool_block_until_poll_or_abort_and_never_resen
     TEST_ASSERT_EQUAL_UINT32(aborts_before + 2u, slot->abort_count);
     TEST_ASSERT_EQUAL_UINT32(sends_before + 1u, slot->send_dma_count);
     TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_logger_backend_uart_deinit(&s_ctx.backend));
-    if (retire_with_poll != 0u) slot->poll_hook = complete_log_during_uart_poll;
+    if (retire_with_irq != 0u) fake_esy_hal_uart_complete_last_dma(&s_ctx.uart);
     else slot->abort_result = ESY_OK;
     TEST_ASSERT_EQUAL(ESY_OK, esy_logger_backend_uart_core_process(&s_ctx.backend, 32u));
     TEST_ASSERT_FALSE(esy_logger_backend_uart_internal_is_dma_busy(&s_ctx.backend));

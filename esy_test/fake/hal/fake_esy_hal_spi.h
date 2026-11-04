@@ -130,17 +130,11 @@ void fake_esy_hal_spi_set_transfer_dma_result(esy_err_t ret);
 /**
  * @brief Retain DMA buffers/callbacks when the configured submission fails.
  * Default false models an idle rejection. True models partial-start cleanup
- * failure: the handle stays busy until successful poll or abort. Existing
+ * failure: the handle stays busy until terminal event or successful abort. Existing
  * retained transfers reject further submissions without replacing their borrow.
  */
 void fake_esy_hal_spi_set_failed_submit_retains_borrow(bool retain);
 
-/**
- * @brief Set owner poll cleanup result for retained failed submissions.
- * ESY_OK retires the borrow and delivers one DMA_ERROR callback; an error
- * retains it. Default ESY_OK. An installed fake poll hook takes precedence.
- */
-void fake_esy_hal_spi_set_poll_result(esy_err_t ret);
 
 /**
  * @brief Set task abort result; ESY_OK cancels silently, errors retain the borrow.
@@ -148,8 +142,6 @@ void fake_esy_hal_spi_set_poll_result(esy_err_t ret);
  */
 void fake_esy_hal_spi_set_abort_result(esy_err_t ret);
 
-/** @brief Count poll calls for the handle since reset; zero for unknown handles. */
-size_t fake_esy_hal_spi_get_poll_count(esy_spi_t *spi);
 /** @brief Count abort calls for the handle since reset; zero for unknown handles. */
 size_t fake_esy_hal_spi_get_abort_count(esy_spi_t *spi);
 /** @brief Observe borrowed TX storage until terminal retirement; NULL if none. */
@@ -182,6 +174,7 @@ void fake_esy_hal_spi_complete_last_dma(esy_spi_t *spi);
 void fake_esy_hal_spi_complete_last_dma_with_result(
     esy_spi_t *spi, const esy_spi_dma_transfer_result_t *result);
 
+
 /**
  * @brief Set the result returned by the DMA remaining-count query.
  */
@@ -206,8 +199,6 @@ void fake_esy_hal_spi_fail_read_after(size_t successful_calls, int32_t result);
 /** @brief Supply a borrowed graph association in the fake provider; NULL clears it.
  * Installs the fake's immutable operation table without touching HAL private state. */
 void fake_esy_hal_spi_set_device(esy_spi_t *spi, const esy_device_t *device);
-/** @brief Replace owner poll behavior for this fake instance; NULL restores default. */
-void fake_esy_hal_spi_set_poll_hook(esy_spi_t *spi, esy_err_t (*hook)(esy_spi_t *));
 /** @brief Replace PM write behavior after public transition checks; NULL records writes. */
 void fake_esy_hal_spi_set_pm_write_hook(esy_spi_t *spi,
     int32_t (*hook)(esy_spi_t *, const uint8_t *, size_t));

@@ -69,11 +69,12 @@ typedef struct esy_spi_s esy_spi_t;
  * Bits describe implemented operations for the current handle/role, subject to
  * board resources, configuration limits and normal runtime errors. A set bit
  * neither reserves a resource nor guarantees every parameter combination.
- * DMA-named bits describe the corresponding API, not native DMA or asynchronous
- * completion. Unknown bits must be ignored; zero is a valid capability mask.
+ * DMA capabilities require native hardware DMA and asynchronous completion;
+ * synchronous software substitutes must not set them. Unknown bits must be
+ * ignored; zero is a valid capability mask.
  */
 typedef enum {
-  ESY_SPI_CAP_DMA_TRANSFER = 1u << 0, /**< transfer_dma entry point; may complete synchronously. */
+  ESY_SPI_CAP_DMA_TRANSFER = 1u << 0, /**< Native asynchronous transfer_dma entry point. */
   ESY_SPI_CAP_TRANSFER16 = 1u << 1, /**< Blocking uint16_t buffer entry points; not a wire byte-order guarantee. */
   ESY_SPI_CAP_DMA_REMAINING = 1u << 2, /**< DMA remaining-count query for board-provided routes. */
 } esy_spi_cap_t;
@@ -392,7 +393,6 @@ typedef struct {
   void (*handle_irq)(esy_spi_t *spi);
   /** @brief Required owner-task DMA retirement; may dispatch terminal callbacks.
    * Synchronous backends return OK when no retirement work is pending. */
-  esy_err_t (*poll)(esy_spi_t *spi);
   /** @brief Optional remaining transfer-unit query; NULL means unsupported.
    * Units follow each direction's configured DMA element width, not bytes. */
   esy_err_t (*get_dma_trans_count_remaining)(const esy_spi_t *spi,

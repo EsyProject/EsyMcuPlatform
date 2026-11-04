@@ -27,6 +27,8 @@
 #define ESY_LOGGER_UART_RETRY_MS 10u
 
 /* ============ Send descriptor stored in the shared ready ring ============ */
+#define ESY_LOGGER_UART_FALLBACK_TIMEOUT_MS 1000u
+
 typedef struct {
   uint32_t pool_index; /* Block index in the shared pool. */
   uint16_t len;        /* Valid payload length. */
@@ -72,7 +74,7 @@ typedef struct {
   bool quiesced;
   bool worker_active;
   bool retry_pending;
-  esy_err_t last_poll_result;
+  esy_err_t last_process_result;
   uint32_t borrowed_mask;
   uint32_t active_calls;
   esy_logger_backend_t *owner;
@@ -227,7 +229,6 @@ esy_err_t esy_logger_backend_uart_init_with_runtime(
 #endif
 
   ctx->uart = config->uart;
-
   ctx->pool_buffers = config->static_resources->pool_buffers;
   ctx->pool_index_stacks = config->static_resources->pool_index_stacks;
   ctx->ready_ring_slots = config->static_resources->ready_ring_slots;
@@ -373,7 +374,8 @@ esy_err_t esy_logger_backend_uart_resume(esy_logger_backend_t *backend) {
   }
   ctx->quiesced = false;
   ctx->runtime.unlock(key);
-  return ctx->runtime.notify ? ctx->runtime.notify(ctx->task) : ESY_OK;
+  if (ctx->runtime.notify) return ctx->runtime.notify(ctx->task);
+  return ESY_OK;
 }
 
 static esy_err_t acquire_buffer(void *self, uint8_t **buf, size_t *buf_len) {
@@ -448,7 +450,7 @@ static bool try_kick_one(esy_logger_backend_uart_ctx_t *ctx) {
   /* Critical section reason: the sender, lifecycle owner and completion callback
    * must reserve one descriptor and its I/O lease as an indivisible operation. */
   uint32_t key = ctx->runtime.lock();
-  ctx->last_poll_result = ESY_OK;
+  ctx->last_process_result = ESY_OK;
   if (!ctx->initialized || ctx->worker_active) {
     ctx->runtime.unlock(key);
     return false;
@@ -458,7 +460,7 @@ static bool try_kick_one(esy_logger_backend_uart_ctx_t *ctx) {
     bool cleanup_pending = ctx->dma_cleanup_pending;
     ctx->worker_active = true;
     ctx->runtime.unlock(key);
-    esy_err_t result = esy_hal_uart_poll(ctx->uart);
+    esy_err_t result = ESY_OK;
     if (cleanup_pending && esy_hal_uart_is_busy(ctx->uart, true)) {
       result = esy_hal_uart_abort_dma(ctx->uart, true);
       /* No DMA borrow remains in STATE, but physical TX may still be draining. */
@@ -470,7 +472,7 @@ static bool try_kick_one(esy_logger_backend_uart_ctx_t *ctx) {
     }
     key = ctx->runtime.lock();
     ctx->worker_active = false;
-    ctx->last_poll_result = result;
+    ctx->last_process_result = result;
     ctx->runtime.unlock(key);
     /* End this slice after one retirement/abort attempt, even with a large
      * caller budget or an OS worker's drain loop. */
@@ -532,7 +534,15 @@ static bool try_kick_one(esy_logger_backend_uart_ctx_t *ctx) {
   dma.error_callback = dma_complete;
   dma.error_callback_arg = ctx;
   esy_err_t ret = esy_hal_uart_send_dma(ctx->uart, &dma);
-  bool retained = ret != ESY_OK && esy_hal_uart_is_busy(ctx->uart, true);
+  bool synchronous_fallback = ret == ESY_ERR_NOT_SUPPORTED || ret == ESY_ERR_NOT_IMPLEMENTED;
+  if (synchronous_fallback && !esy_hal_uart_is_busy(ctx->uart, true)) {
+    int32_t sent = esy_hal_uart_send_timeout(ctx->uart, payload, length,
+                                           ESY_LOGGER_UART_FALLBACK_TIMEOUT_MS);
+    ret = sent == (int32_t)length ? ESY_OK : sent < 0 ? (esy_err_t)sent : ESY_ERR_IO;
+    if (ret == ESY_OK) dma_complete(ctx);
+  }
+  bool retained = !synchronous_fallback && ret != ESY_OK &&
+                  esy_hal_uart_is_busy(ctx->uart, true);
 
   key = ctx->runtime.lock();
   bool retry = ret == ESY_ERR_BUSY || ret == ESY_ERR_STATE;
@@ -626,7 +636,22 @@ esy_err_t esy_logger_backend_uart_core_process(esy_logger_backend_t *backend, si
   for (size_t i = 0u; i < budget && try_kick_one(ctx); ++i) {}
   ctx->retry_waiting = ctx->retry_pending;
   if (ctx->retry_waiting) ctx->last_retry_ms = esy_hal_system_get_tick();
-  return ctx->last_poll_result;
+  return ctx->last_process_result;
+}
+
+uint32_t esy_logger_backend_uart_core_next_wait_ms(const esy_logger_backend_t *backend) {
+  const esy_logger_backend_uart_ctx_t *ctx = backend_context(backend);
+  if (!ctx || ctx->task) return UINT32_MAX;
+  if (ctx->dma_busy) {
+    return ESY_LOGGER_UART_RETRY_MS;
+  }
+  if (ctx->quiesced || ctx->deinit_requested || esy_block_ring_empty(&ctx->ready_ring))
+    return UINT32_MAX;
+  if (ctx->retry_waiting) {
+    uint32_t elapsed = (uint32_t)(esy_hal_system_get_tick() - ctx->last_retry_ms);
+    if (elapsed < ESY_LOGGER_UART_RETRY_MS) return ESY_LOGGER_UART_RETRY_MS - elapsed;
+  }
+  return 0u;
 }
 
 bool esy_logger_backend_uart_retry_pending(void *context) {

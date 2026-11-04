@@ -30,11 +30,22 @@ static const esy_dma_channel_runtime_t *dma_find_runtime_const(
   return dma_find_runtime((esy_dma_t *)dma, dreq, channel);
 }
 
-enum { DMA_EVENT_DONE = 1u, DMA_EVENT_HALF = 2u, DMA_EVENT_ERROR = 4u };
+static bool dma_callbacks_running(const esy_dma_t *dma) {
+  for (uint32_t i = 0u; i < dma->channel_count; ++i)
+    if (dma->runtime[i].callback_running) return true;
+  return false;
+}
+
+static void dma_deliver_callback(esy_dma_channel_runtime_t *runtime,
+                                 esy_dma_callback_t callback, void *arg) {
+  if (callback == NULL) return;
+  runtime->callback_running = true;
+  callback(arg);
+  runtime->callback_running = false;
+}
 
 static esy_err_t dma_validate_control(esy_dma_channel_runtime_t *runtime) {
-  if (runtime->started ||
-      atomic_load_explicit(&runtime->events, memory_order_acquire) != 0u ||
+  if (dma_callbacks_running(runtime->owner) || runtime->started ||
       esy_hb_dma_is_busy(runtime->dreq, runtime->channel)) return ESY_ERR_BUSY;
   if (!runtime->prepared) return ESY_ERR_STATE;
   return ESY_OK;
@@ -50,31 +61,54 @@ static void dma_clear_callbacks(esy_dma_channel_runtime_t *runtime) {
   runtime->circular = false;
   runtime->prepared = false;
   runtime->started = false;
-  atomic_store_explicit(&runtime->events, 0u, memory_order_release);
 }
 
-static void dma_release_runtime(esy_dma_channel_runtime_t *runtime) {
+static void dma_release_runtime(esy_dma_channel_runtime_t *runtime, bool from_isr) {
   if ((runtime == NULL) || !runtime->ref_held) return;
   runtime->ref_held = false;
-  (void)esy_device_put(&runtime->owner->device);
+  if (from_isr) (void)esy_device_put_from_isr(&runtime->owner->device);
+  else (void)esy_device_put(&runtime->owner->device);
+}
+
+/* Backend callbacks run in native IRQ context. Mark the runtime borrowed
+ * before retiring hardware; no owner lifecycle/control operation may reenter.
+ * Native stop failure retains buffers, callbacks and the graph reference for
+ * explicit task abort. Never deliver a terminal result for unsafe storage. */
+static void dma_finish(esy_dma_channel_runtime_t *runtime, bool failed) {
+  if (runtime == NULL || !runtime->started) return;
+  runtime->callback_running = true;
+  esy_err_t result = failed
+      ? esy_hb_dma_abort_from_isr(runtime->owner, runtime->dreq, runtime->channel)
+      : esy_hb_dma_retire_from_isr(runtime->owner, runtime->dreq, runtime->channel);
+  if (result != ESY_OK) {
+    runtime->callback_running = false;
+    return;
+  }
+  esy_dma_callback_t callback = failed ? runtime->error_cb : runtime->complete_cb;
+  void *arg = failed ? runtime->error_arg : runtime->complete_arg;
+  dma_clear_callbacks(runtime);
+  if (callback != NULL) callback(arg);
+  dma_release_runtime(runtime, true);
+  /* Last runtime access: task-side idle observation may now destroy storage. */
+  runtime->callback_running = false;
 }
 
 static void dma_complete(void *arg) {
   esy_dma_channel_runtime_t *runtime = arg;
-  if (runtime != NULL)
-    atomic_fetch_or_explicit(&runtime->events, DMA_EVENT_DONE, memory_order_release);
+  if (runtime == NULL || !runtime->started) return;
+  if (runtime->circular)
+    dma_deliver_callback(runtime, runtime->complete_cb, runtime->complete_arg);
+  else dma_finish(runtime, false);
 }
 
 static void dma_half_complete(void *arg) {
   esy_dma_channel_runtime_t *runtime = arg;
-  if (runtime != NULL)
-    atomic_fetch_or_explicit(&runtime->events, DMA_EVENT_HALF, memory_order_release);
+  if (runtime != NULL && runtime->started)
+    dma_deliver_callback(runtime, runtime->half_cb, runtime->half_arg);
 }
 
 static void dma_error(void *arg) {
-  esy_dma_channel_runtime_t *runtime = arg;
-  if (runtime != NULL)
-    atomic_fetch_or_explicit(&runtime->events, DMA_EVENT_ERROR, memory_order_release);
+  dma_finish(arg, true);
 }
 
 esy_err_t esy_hal_dma_init(esy_dma_t *dma,
@@ -109,7 +143,10 @@ esy_err_t esy_hal_dma_init(esy_dma_t *dma,
     dma->runtime[i].dreq = dma->channels[i].dreq;
     dma->runtime[i].channel = dma->channels[i].channel;
     dma->runtime[i].resource_id = resource_ids[i];
-    atomic_init(&dma->runtime[i].events, 0u);
+    atomic_init(&dma->runtime[i].ref_held, 0u);
+    atomic_init(&dma->runtime[i].prepared, 0u);
+    atomic_init(&dma->runtime[i].started, 0u);
+    atomic_init(&dma->runtime[i].callback_running, 0u);
   }
   dma->initialized = true;
   return ESY_OK;
@@ -119,12 +156,16 @@ esy_err_t esy_hal_dma_deinit(esy_dma_t *dma) {
   if ((dma == NULL) || !dma->initialized) return ESY_ERR_INVALID_ARG;
   if (dma->device.registry != NULL) return ESY_ERR_STATE;
   for (uint32_t i = 0u; i < dma->channel_count; i++) {
-    if (dma->runtime[i].ref_held || dma->runtime[i].prepared ||
-        dma->runtime[i].started ||
-        atomic_load_explicit(&dma->runtime[i].events,
-                             memory_order_acquire) != 0u) {
+    if (dma->runtime[i].callback_running || dma->runtime[i].ref_held || dma->runtime[i].prepared ||
+        dma->runtime[i].started) {
       return ESY_ERR_BUSY;
     }
+  }
+  for (uint32_t i = 0u; i < dma->channel_count; ++i) {
+    esy_err_t result = esy_hb_dma_release(dma, dma->runtime[i].dreq,
+                                        dma->runtime[i].channel);
+    /* Cache-flush failure retains the initialized controller for retry. */
+    if (result != ESY_OK) return result;
   }
   memset(dma, 0, sizeof(*dma));
   return ESY_OK;
@@ -245,6 +286,7 @@ esy_err_t esy_hal_dma_prepare(esy_dma_t *dma,
 
   runtime = dma_find_runtime(dma, config->inner.dreq, config->inner.channel);
   if (runtime == NULL) return ESY_ERR_INVALID_ARG;
+  if (dma_callbacks_running(dma)) return ESY_ERR_BUSY;
   if (runtime->prepared || runtime->started) return ESY_ERR_BUSY;
   driver_config = *config;
   if (dma->device.registry != NULL) {
@@ -260,11 +302,10 @@ esy_err_t esy_hal_dma_prepare(esy_dma_t *dma,
   runtime->error_cb = config->error_callback;
   runtime->error_arg = config->error_callback_arg;
   runtime->circular = config->circular;
-  atomic_store_explicit(&runtime->events, 0u, memory_order_release);
   driver_config.callback = dma_complete;
   driver_config.callback_arg = runtime;
-  driver_config.half_callback = dma_half_complete;
-  driver_config.half_callback_arg = runtime;
+  driver_config.half_callback = config->half_callback != NULL ? dma_half_complete : NULL;
+  driver_config.half_callback_arg = config->half_callback != NULL ? runtime : NULL;
   driver_config.error_callback = dma_error;
   driver_config.error_callback_arg = runtime;
 
@@ -273,7 +314,7 @@ esy_err_t esy_hal_dma_prepare(esy_dma_t *dma,
     runtime->prepared = true;
   } else {
     dma_clear_callbacks(runtime);
-    dma_release_runtime(runtime);
+    dma_release_runtime(runtime, false);
   }
   return ret;
 }
@@ -286,6 +327,7 @@ esy_err_t esy_hal_dma_start(esy_dma_t *dma, uint32_t route_mask) {
   if ((dma == NULL) || !dma->initialized || (route_mask == 0u)) {
     return ESY_ERR_INVALID_ARG;
   }
+  if (dma_callbacks_running(dma)) return ESY_ERR_BUSY;
   for (uint32_t i = 0u; i < dma->channel_count; i++) {
     uint32_t bit = 1u << i;
 
@@ -322,6 +364,7 @@ esy_err_t esy_hal_dma_start_single(esy_dma_t *dma,
   esy_dma_channel_runtime_t *runtime =
       dma_find_runtime(dma, config->inner.dreq, config->inner.channel);
   if (runtime == NULL) return ESY_ERR_INVALID_ARG;
+  if (dma_callbacks_running(dma)) return ESY_ERR_BUSY;
   esy_err_t ret = esy_hal_dma_prepare(dma, config);
   if (ret != ESY_OK) return ret;
   uint32_t route_index = (uint32_t)(runtime - dma->runtime);
@@ -334,14 +377,14 @@ esy_err_t esy_hal_dma_abort(esy_dma_t *dma, uint32_t dreq,
   esy_err_t ret;
 
   if (runtime == NULL) return ESY_ERR_INVALID_ARG;
-  if (!runtime->prepared && !runtime->started &&
-      atomic_load_explicit(&runtime->events, memory_order_acquire) == 0u) {
+  if (dma_callbacks_running(dma)) return ESY_ERR_BUSY;
+  if (!runtime->prepared && !runtime->started) {
     return ESY_OK;
   }
   ret = esy_hb_dma_abort(dma, dreq, channel);
   if (ret == ESY_OK) {
     dma_clear_callbacks(runtime);
-    dma_release_runtime(runtime);
+    dma_release_runtime(runtime, false);
   }
   return ret;
 }
@@ -351,44 +394,18 @@ bool esy_hal_dma_is_busy(const esy_dma_t *dma, uint32_t dreq,
   const esy_dma_channel_runtime_t *runtime = dma_find_runtime_const(dma, dreq, channel);
   if (runtime == NULL) return false;
   return runtime->started ||
-      atomic_load_explicit(&runtime->events, memory_order_acquire) != 0u ||
       esy_hb_dma_is_busy(dreq, channel);
 }
 
-esy_err_t esy_hal_dma_poll(esy_dma_t *dma) {
-  if (dma == NULL || !dma->initialized) return ESY_ERR_INVALID_ARG;
-  esy_err_t first_error = ESY_OK;
+bool esy_hal_dma_is_idle(const esy_dma_t *dma) {
+  if (dma == NULL || !dma->initialized) return false;
   for (uint32_t i = 0u; i < dma->channel_count; ++i) {
-    esy_dma_channel_runtime_t *runtime = &dma->runtime[i];
-    unsigned events = atomic_load_explicit(&runtime->events, memory_order_acquire);
-    if ((events & DMA_EVENT_ERROR) ||
-        (!runtime->circular && (events & DMA_EVENT_DONE))) {
-      esy_err_t result = esy_hb_dma_abort(dma, runtime->dreq, runtime->channel);
-      if (result != ESY_OK) {
-        if (first_error == ESY_OK) first_error = result;
-        continue;
-      }
-      events = atomic_load_explicit(&runtime->events, memory_order_acquire);
-      esy_dma_callback_t callback = events & DMA_EVENT_ERROR
-          ? runtime->error_cb : runtime->complete_cb;
-      void *arg = events & DMA_EVENT_ERROR
-          ? runtime->error_arg : runtime->complete_arg;
-      dma_clear_callbacks(runtime);
-      if (callback != NULL) callback(arg);
-      dma_release_runtime(runtime);
-      continue;
-    }
-    const unsigned notifications = DMA_EVENT_HALF |
-        (runtime->circular ? DMA_EVENT_DONE : 0u);
-    events = atomic_fetch_and_explicit(&runtime->events, ~notifications,
-                                       memory_order_acq_rel);
-    if (events & DMA_EVENT_ERROR) continue;
-    if ((events & DMA_EVENT_HALF) && runtime->half_cb != NULL)
-      runtime->half_cb(runtime->half_arg);
-    if (runtime->circular && (events & DMA_EVENT_DONE) &&
-        runtime->complete_cb != NULL) runtime->complete_cb(runtime->complete_arg);
+    const esy_dma_channel_runtime_t *runtime = &dma->runtime[i];
+    if (runtime->prepared || runtime->started || runtime->ref_held ||
+        runtime->callback_running ||
+          esy_hb_dma_is_busy(runtime->dreq, runtime->channel)) return false;
   }
-  return first_error;
+  return true;
 }
 
 esy_err_t esy_hal_dma_bind_irq_to_core(esy_dma_t *dma, uint8_t irq_index,
@@ -408,10 +425,14 @@ esy_err_t esy_hal_dma_set_read_addr(esy_dma_t *dma, uint32_t dreq,
   }
   ret = dma_validate_control(runtime);
   if (ret != ESY_OK) return ret;
-  ret = esy_hb_dma_set_read_addr(dma, dreq, channel, addr, trigger_now);
-  if (ret == ESY_OK && trigger_now) {
+  if (trigger_now) {
     runtime->prepared = false;
     runtime->started = true;
+  }
+  ret = esy_hb_dma_set_read_addr(dma, dreq, channel, addr, trigger_now);
+  if (ret != ESY_OK && trigger_now) {
+    runtime->started = false;
+    runtime->prepared = true;
   }
   return ret;
 }
@@ -427,10 +448,14 @@ esy_err_t esy_hal_dma_set_write_addr(esy_dma_t *dma, uint32_t dreq,
   }
   ret = dma_validate_control(runtime);
   if (ret != ESY_OK) return ret;
-  ret = esy_hb_dma_set_write_addr(dma, dreq, channel, addr, trigger_now);
-  if (ret == ESY_OK && trigger_now) {
+  if (trigger_now) {
     runtime->prepared = false;
     runtime->started = true;
+  }
+  ret = esy_hb_dma_set_write_addr(dma, dreq, channel, addr, trigger_now);
+  if (ret != ESY_OK && trigger_now) {
+    runtime->started = false;
+    runtime->prepared = true;
   }
   return ret;
 }
@@ -446,10 +471,14 @@ esy_err_t esy_hal_dma_set_trans_count(esy_dma_t *dma, uint32_t dreq,
   }
   ret = dma_validate_control(runtime);
   if (ret != ESY_OK) return ret;
-  ret = esy_hb_dma_set_trans_count(dma, dreq, channel, count, trigger_now);
-  if (ret == ESY_OK && trigger_now) {
+  if (trigger_now) {
     runtime->prepared = false;
     runtime->started = true;
+  }
+  ret = esy_hb_dma_set_trans_count(dma, dreq, channel, count, trigger_now);
+  if (ret != ESY_OK && trigger_now) {
+    runtime->started = false;
+    runtime->prepared = true;
   }
   return ret;
 }

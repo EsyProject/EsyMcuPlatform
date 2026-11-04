@@ -29,7 +29,6 @@ typedef struct
 {
     esy_spi_t *spi;   /* External handle passed by the caller. */
     const esy_device_t *device;
-    esy_err_t (*poll_hook)(esy_spi_t *spi);
     int32_t (*pm_write_hook)(esy_spi_t *spi, const uint8_t *data, size_t length);
     bool       in_use;
 
@@ -55,7 +54,6 @@ typedef struct
     bool       failed_submit;
     const void *borrowed_tx;
     void *borrowed_rx;
-    size_t poll_count;
     size_t abort_count;
     esy_spi_dma_complete_cb_t last_dma_callback;
     void *last_dma_callback_arg;
@@ -71,7 +69,6 @@ typedef struct {
   int32_t write_blocking_result;
   bool transfer_dma_async;
   bool failed_submit_retains_borrow;
-  esy_err_t poll_result;
   esy_err_t abort_result;
   bool write_fault_armed;
   size_t write_skip;
@@ -145,7 +142,6 @@ static const esy_spi_vtable_t k_fake_spi_ops = {
     .read16_blocking = esy_hal_spi_read16_blocking,
     .transfer16_blocking = esy_hal_spi_transfer16_blocking,
     .transfer_dma = esy_hal_spi_transfer_dma,
-    .poll = esy_hal_spi_poll,
     .abort = esy_hal_spi_abort,
     .is_busy = esy_hal_spi_is_busy,
     .set_speed = esy_hal_spi_set_speed,
@@ -518,7 +514,8 @@ esy_err_t esy_hal_spi_get_caps(const esy_spi_t *spi,
 {
     if (spi == NULL || out_caps == NULL) return ESY_ERR_INVALID_ARG;
     fake_spi_slot_t *slot = fake_spi_get_slot((esy_spi_t *)spi, false);
-    if (slot == NULL || !slot->initialized) return ESY_ERR_NOT_IMPLEMENTED;
+    if (slot == NULL || !slot->initialized)
+        return ESY_ERR_NOT_IMPLEMENTED;
     uint32_t caps = ESY_SPI_CAP_TRANSFER16;
     if (s_ctx.transfer_dma_result != ESY_ERR_NOT_SUPPORTED)
         caps |= ESY_SPI_CAP_DMA_TRANSFER;
@@ -657,13 +654,6 @@ void fake_esy_hal_spi_set_failed_submit_retains_borrow(bool retain) {
     s_ctx.failed_submit_retains_borrow = retain;
 }
 
-void fake_esy_hal_spi_set_poll_result(esy_err_t ret) { s_ctx.poll_result = ret; }
-void fake_esy_hal_spi_set_abort_result(esy_err_t ret) { s_ctx.abort_result = ret; }
-
-size_t fake_esy_hal_spi_get_poll_count(esy_spi_t *spi) {
-    fake_spi_slot_t *slot = fake_spi_get_slot(spi, false);
-    return slot != NULL ? slot->poll_count : 0u;
-}
 size_t fake_esy_hal_spi_get_abort_count(esy_spi_t *spi) {
     fake_spi_slot_t *slot = fake_spi_get_slot(spi, false);
     return slot != NULL ? slot->abort_count : 0u;
@@ -676,6 +666,8 @@ void *fake_esy_hal_spi_get_borrowed_rx(esy_spi_t *spi) {
     fake_spi_slot_t *slot = fake_spi_get_slot(spi, false);
     return slot != NULL ? slot->borrowed_rx : NULL;
 }
+
+void fake_esy_hal_spi_set_abort_result(esy_err_t ret) { s_ctx.abort_result = ret; }
 
 void fake_esy_hal_spi_set_transfer_dma_async(bool async)
 {
@@ -719,6 +711,7 @@ void fake_esy_hal_spi_complete_last_dma(esy_spi_t *spi)
     fake_esy_hal_spi_complete_last_dma_with_result(spi, &result);
 }
 
+
 void fake_esy_hal_spi_set_get_dma_remaining_result(esy_err_t ret)
 {
     s_ctx.get_dma_remaining_result = ret;
@@ -736,16 +729,6 @@ void fake_esy_hal_spi_fail_read_after(size_t successful_calls, int32_t result) {
     s_ctx.read_fault = result;
 }
 
-esy_err_t esy_hal_spi_poll(esy_spi_t *spi) {
-  if (!spi) return ESY_ERR_INVALID_ARG;
-  fake_spi_slot_t *slot = fake_spi_get_slot(spi, true);
-  if (slot == NULL) return ESY_ERR_NO_MEM;
-  ++slot->poll_count;
-  if (slot->poll_hook != NULL) return slot->poll_hook(spi);
-  if (s_ctx.poll_result != ESY_OK) return s_ctx.poll_result;
-  if (slot->failed_submit) fake_esy_hal_spi_complete_last_dma(spi);
-  return ESY_OK;
-}
 
 const esy_device_t *esy_hal_spi_get_device(const esy_spi_t *spi) {
   const fake_spi_slot_t *slot = fake_spi_get_slot((esy_spi_t *)spi, false);
@@ -760,11 +743,6 @@ void fake_esy_hal_spi_set_device(esy_spi_t *spi, const esy_device_t *device) {
   spi->ops = &k_fake_spi_ops;
 }
 
-void fake_esy_hal_spi_set_poll_hook(esy_spi_t *spi, esy_err_t (*hook)(esy_spi_t *)) {
-  if (spi == NULL) return;
-  fake_spi_slot_t *slot = fake_spi_get_slot(spi, true);
-  if (slot != NULL) slot->poll_hook = hook;
-}
 
 void fake_esy_hal_spi_set_pm_write_hook(esy_spi_t *spi,
     int32_t (*hook)(esy_spi_t *, const uint8_t *, size_t)) {

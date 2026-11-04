@@ -78,9 +78,9 @@ Dormant compile/link probes are not hardware execution or return-value evidence.
 8. With both A/B handles initialized, DMA output on either must return BUSY even
    when both pins are disabled. Neither waveform, compare nor peer callback may
    change. Remove B, start finite aligned 16-bit samples on disabled A, and verify
-   a new B init returns BUSY through DMA completion IRQ and until owner poll
+   a new B init returns BUSY through the DMA callback and until terminal IRQ retirement
    retires the dispatcher and invokes the terminal callback.
-9. After finite completion and poll, verify A remains enabled at its final sample.
+9. After finite completion and process, verify A remains enabled at its final sample.
    Disable it, join B at the same frequency, and verify ordinary shared operation.
    Repeat a sole-owner DMA transfer with explicit abort and DMA bus-error fault
    injection: output must become inactive; no peer can be admitted before safe
@@ -92,6 +92,14 @@ Dormant compile/link probes are not hardware execution or return-value evidence.
     live timing. Each rejection preserves existing owners and permits a valid
     retry on the zero handle. Invalid logical indices and generic zero-frequency
     or out-of-range-duty arguments must fail before any board configure call.
+11. Publish finite, circular half/full and error events without a second callback.
+    Confirm IRQ publication alone does not invoke user transfer callbacks. Regular
+    IRQs deliver finite terminal completion once and retain circular ownership.
+    Repeated IRQ dispatch does not duplicate a finite completion.
+12. Fail retirement and cancellation, then retry without another IRQ. Buffers,
+    handles and callback arguments remain owned until successful retirement or
+    explicit abort; successful cancellation suppresses pending terminal callbacks.
+    Refill timing must meet the interrupt and waveform budgets.
 
 ## Evidence and Limits
 

@@ -47,8 +47,8 @@ esy_err_t esy_hal_xio_spi_init(esy_spi_t *spi,
   return s_init_result;
 }
 
-void esy_hal_xio_spi_deinit(esy_spi_t *spi) {
-  (void)spi;
+esy_err_t esy_hal_xio_spi_deinit(esy_spi_t *spi) {
+  return spi != NULL ? ESY_OK : ESY_ERR_INVALID_ARG;
 }
 
 __attribute__((constructor)) static void fake_esy_hal_xio_spi_ctor(void) {

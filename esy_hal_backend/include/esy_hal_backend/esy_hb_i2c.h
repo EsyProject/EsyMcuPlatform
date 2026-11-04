@@ -254,7 +254,7 @@ extern esy_err_t esy_hb_i2c_recover_bus(esy_i2c_t *i2c);
  *
  * Uses @ref esy_i2c_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  i2c       I2C handle

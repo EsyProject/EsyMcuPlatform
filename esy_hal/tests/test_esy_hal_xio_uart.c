@@ -257,13 +257,10 @@ void test_xio_dma_failed_abort_keeps_borrow_until_successful_retry(void) {
   TEST_ASSERT_TRUE(esy_hal_uart_is_busy(&uart, true));
   esy_hal_xio_uart_deinit(&uart);
   TEST_ASSERT_NOT_NULL(uart.ops->send_dma);
-  platform_test_set_uart_dma_results(ESY_OK, ESY_ERR_IO);
-  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_uart_poll(&uart));
   platform_test_set_dma_results(ESY_OK, ESY_OK, ESY_OK);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_abort_dma(&uart, true));
   TEST_ASSERT_FALSE(esy_hal_xio_uart_is_busy(&uart, true));
-  platform_test_set_uart_dma_results(ESY_OK, ESY_OK);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_poll(&uart));
+  platform_test_set_uart_abort_result(ESY_OK);
   esy_hal_xio_uart_deinit(&uart);
   TEST_ASSERT_NULL(uart.ops);
 }
@@ -389,4 +386,26 @@ void test_xio_uart_foreign_raw_dma_does_not_prevent_idle_graph_suspend(void) {
   TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_deinit(&registry));
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_uart_unregister_device(&binding));
   esy_hal_xio_uart_deinit(&uart);
+}
+
+void test_xio_uart_failed_deinit_reports_and_retains_partial_context_until_retry(void) {
+  esy_uart_t uart = {0};
+  init_xio_uart(&uart);
+  void *tx_context = uart.ctx[0];
+  TEST_ASSERT_NOT_NULL(tx_context);
+  platform_test_set_xio_uart_cleanup_results(ESY_ERR_BUSY, ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_xio_uart_deinit(&uart));
+  TEST_ASSERT_EQUAL_PTR(tx_context, uart.ctx[0]);
+  TEST_ASSERT_NULL(uart.ctx[1]);
+  TEST_ASSERT_NULL(uart.ops);
+  esy_xio_uart_config_t tx = {.pin = TEST_XIO_TX_PIN};
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_xio_uart_init(&uart, &tx, NULL));
+  TEST_ASSERT_EQUAL_PTR(tx_context, uart.ctx[0]);
+  platform_test_set_xio_uart_cleanup_results(ESY_OK, ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_uart_deinit(&uart));
+  TEST_ASSERT_NULL(uart.ctx[0]);
+  TEST_ASSERT_NULL(uart.ctx[1]);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_uart_deinit(&uart));
+  init_xio_uart(&uart);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_uart_deinit(&uart));
 }

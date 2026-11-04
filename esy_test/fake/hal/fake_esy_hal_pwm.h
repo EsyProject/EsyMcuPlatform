@@ -9,8 +9,10 @@
  * @brief Fake HAL PWM contract for unit tests.
  * @note Test-thread only; serialize all use. Storage starts at {0}; reset the
  * fake only after retiring live handles. DMA is unsupported by default. Opt-in
- * simulation models owner polling, finite output retention and failed cleanup;
- * it does not model hardware timing, route arbitration or PM graph references.
+ * simulation models automatic IRQ completion, finite output retention
+ * and failed cleanup. Event injection invokes callbacks on the test thread.
+ * Abort explicitly retires retained error state. It does not
+ * model hardware timing, route arbitration or PM graph references.
  */
 
 #ifndef FAKE_ESY_HAL_PWM_H
@@ -38,6 +40,12 @@ void fake_esy_hal_pwm_reset(void);
  */
 void fake_esy_hal_pwm_set_dma_result(esy_err_t result);
 
+/** @brief Select native half-transfer support (default true).
+ * False rejects an explicit half_callback before borrowing the waveform;
+ * finite terminal-only DMA remains available.
+ */
+void fake_esy_hal_pwm_set_half_supported(bool supported);
+
 /**
  * @brief Inject retirement and hardware-deinit results, both default ESY_OK.
  * @param abort_result Failure retains active DMA and pending notifications.
@@ -48,15 +56,19 @@ void fake_esy_hal_pwm_set_cleanup_results(esy_err_t abort_result,
                                           esy_err_t deinit_result);
 
 /**
- * @brief Queue a full-transfer notification or terminal error for owner poll.
+ * @brief Inject a full-transfer notification or terminal error and deliver its callback.
  * @param pwm Initialized PWM with an active simulated DMA borrow.
- * @param error true queues terminal error; false queues full/cycle completion.
+ * @param error true injects terminal error; false injects full/cycle completion.
  * @return ESY_OK, INVALID_ARG for NULL, STATE if inactive, BUSY in a callback.
- * @note Notifications coalesce and error wins. This never invokes a callback;
- * poll retires terminal work before notification. Circular completion retains
- * the borrow. Half-transfer timing is not simulated.
+ * @note Terminal retirement occurs before callback delivery. Circular completion retains
+ * the borrow. Half-transfer events are injected separately.
  */
 esy_err_t fake_esy_hal_pwm_queue_dma_event(esy_pwm_t *pwm, bool error);
+
+/** @brief Inject output-disable failure; defaults to ESY_OK. */
+void fake_esy_hal_pwm_set_disable_result(esy_err_t result);
+/** @brief Inject and deliver a half-transfer progress event without retiring sample storage. */
+esy_err_t fake_esy_hal_pwm_queue_half_event(esy_pwm_t *pwm);
 
 /**
  * @brief Query whether a PWM instance has been initialized.

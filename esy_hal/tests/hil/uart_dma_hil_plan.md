@@ -18,27 +18,27 @@ Enable UART and provide board TX/RX routes and interrupt priorities. Peripheral
 DMA does not require the optional generic DMA facade; enable that facade only
 when the test also exercises its independent controller API.
 Use one serialized owner task or baremetal loop. Initialize each handle with
-`{0}`. Call `esy_hal_uart_poll()` on each owner turn while work is pending.
-All built-in finite transfer notifications require this poll except ESP32 TX,
-which may complete inline. A poll visits at most both directions, but SDK
-retirement and user callback execution contribute to
-its duration. Choose the polling period from the consumer latency requirement.
+`{0}`. Supported native DMA completes automatically from IRQ; no HAL progress
+call is configured. Pico TX DMA retires its source independently of physical
+UART drain; both TX and RX DMA remain supported.
+
+Supported finite DMA terminal callbacks execute in ISR context. ESP32 public
+DMA is unsupported. DMA controller completion is distinct from UART TX/TC events.
 Callbacks are bounded notifications and never reenter UART APIs. Keep buffers,
 handles and callback arguments alive through terminal callback return or
 successful abort. Failed retirement retains that ownership for a later retry.
 
 STM32 supports finite ordinary TX/RX DMA only; circular submissions reject with
 `NOT_SUPPORTED` before starting. Continuous RX uses the dedicated RX stream API.
-Pico/STM32/XIO finite DMA notifications and ESP32 RX run in the owner poll;
-ESP32 TX may complete inline. ESP32 finite RX consumes at most 1024 bytes and
-emits at most one terminal callback per poll. No platform task or event queue
-advances RX. Poll regularly or apply sender backpressure before the SDK RX ring
-fills. Serialize cancellation with the owner; callback reentry is forbidden.
+Pico/STM32/XIO finite DMA notifications run in ISR context. Pico TX retires source
+storage while the physical wire may remain busy; STM32 additionally uses UART TC.
+ESP32 exposes synchronous operations and scheduled UART TX results in middleware.
+Serialize task cancellation with lifecycle; callback reentry is forbidden.
 Cancellation retires source/buffer access, but does not promise that bytes already in a UART
 TX FIFO or shift register disappear from the wire.
 
 Record firmware, chip, board routes, toolchain/SDK, baud rate, buffer lengths,
-IRQ/core ownership, polling period and callback context with each result.
+IRQ/core ownership, IRQ latency and callback context with each result.
 
 ## Procedure
 
@@ -46,8 +46,8 @@ IRQ/core ownership, polling period and callback context with each result.
    independent TX/RX routes. Verify exact bytes and exactly one completion per
    direction. On STM32 inspect CR3: successful RX submission enables DMAR, TX enables
    DMAT, and terminal retirement disables only the completed direction. Stop
-   polling after IRQ publication: no terminal callback or lease release occurs
-   until polling resumes. TX success occurs after the final stop bit.
+   processing after IRQ publication: no terminal callback or lease release occurs
+   until processing resumes. TX success occurs after the final stop bit.
 2. Start and abort TX before TC, then send again on the same handle. Repeat for
    an incomplete RX request, then receive again. Aborts must retire native DMA,
    request bits and pending callbacks. No canceled terminal callback may occur.
@@ -60,7 +60,7 @@ IRQ/core ownership, polling period and callback context with each result.
    DMA stream and leaves no DMAT/DMAR request or graph lease. Subsequent finite
    transfers must work. Verify dedicated continuous RX still starts/stops.
 5. Inject native abort failure after submission and after error IRQ publication.
-   Poll/abort reports the failure, is_busy remains true, and deinit/re-init must
+   Process/abort reports the failure, is_busy remains true, and deinit/re-init must
    not clear the retained handle. Restore the provider and retry: ownership
    releases once, and a new transfer works. ISR paths must not wait for abort.
 6. Race owner abort with completion/error delivery, including a Pico peer-core
@@ -70,9 +70,9 @@ IRQ/core ownership, polling period and callback context with each result.
    remain prohibited; they must never enter a native wait for the current IRQ.
 7. On ESP32 start incomplete RX, cancel it before new data arrives, then start a
    replacement request. Bytes retained in the SDK RX ring may serve that new
-   request but must never access canceled storage. Pause owner polling after
+   request but must never access canceled storage. Delay application consumption after
    submission: no RX callback may
-   occur and the buffer remains borrowed. Resume polling and verify the bounded
+   occur and the buffer remains borrowed. Resume processing and verify the bounded
    RX budget, exactly one terminal callback and no callback reentry. Check that
    no platform task/event queue is created, and retry cancellation only from
    the serialized owner outside a callback.
@@ -99,13 +99,13 @@ IRQ/core ownership, polling period and callback context with each result.
 
 11. Repeat terminal/error/abort races on Pico XIO UART with TX-only, RX-only and
    both directions assembled. IRQs only publish events; user callbacks run in
-   the owner poll after native callback pointers and pending IRQs retire.
+   the native IRQ after callback pointers and pending DMA access retire.
    Inject abort failure: the source/destination, handle and graph lease remain
    borrowed, and retry retires once. Circular ordinary submissions reject before
    native DMA starts; the built-in Pico DMA backend provides no half callback.
    XIO TX completion certifies DMA source retirement, not PIO wire drain: queued
    bytes may still transmit. At a deliberately slow baud, complete a one-byte
-   and FIFO-sized TX and poll the DMA source callback immediately. While the
+   and FIFO-sized TX and process the DMA source callback immediately. While the
    final byte/stop bit is still on the logic analyzer, require TX busy, runtime
    PM to leave the device active, system prepare to return BUSY, and deinit to
    retain the program/SM and handle. Continue owner busy checks until idle; only
@@ -114,7 +114,7 @@ IRQ/core ownership, polling period and callback context with each result.
    PULL proves drain. First starve the FIFO between earlier bytes, then append a
    last byte and repeat to ensure an old sticky stall cannot announce idle.
    Repeat after successful DMA abort with already queued bytes, and while an
-   unrelated DMA IRQ fires. Delay the first DMA poll/busy check until the SM is
+   unrelated DMA IRQ fires. Delay the first DMA process/busy check until the SM is
    already stalled at idle; clearing its sticky flag must allow a fresh TXSTALL
    observation and eventual idle, without requiring another transmitted byte.
    Blocking TX must return only after the final stop
@@ -156,9 +156,9 @@ and retain the controller claim and native cleanup state until system
 recovery/reset. A faulted graph cannot be deinitialized or unbound through the
 ordinary lifecycle APIs; final deinit retry applies to unregistered handles.
 It must never advertise unchanged ACTIVE state after that uncertain transition.
-On ESP32, exercise failed driver deletion after finite RX and callback
-retirement in the owner poll. Deinit of active DMA, a continuous RX stream or
-undrained physical TX returns BUSY; explicitly stop/poll/abort the owner before retrying.
+On ESP32, exercise failed driver deletion after synchronous I/O. Deinit of
+undrained physical TX returns BUSY; retry once the native wire is idle.
+Supported native DMA and RX streams must be explicitly stopped/aborted before teardown.
 
 On Pico, contend independent owner tasks on both cores while stream IRQs are
 pending; the guarded dispatcher must never reach a released handle. On STM32F4,
@@ -181,3 +181,13 @@ two streams on different cores with different priorities and verify delivery,
 bounded peer-core exclusion and successful owner-controlled stop. Native users
 must not independently change the owned IRQ priorities. Record priorities,
 pending status, byte/callback counts and core heartbeats with the target traces.
+
+## Single Completion Acceptance
+
+Submit finite TX/RX and publish the native completion event. Confirm no terminal
+terminal callback duplicates a finite DMA completion. On STM32F4, delay physical UART TC after
+DMA completion; TX must remain owned until the final stop bit. Exercise native
+retirement failure, cancellation and late IRQs. Successful abort suppresses
+pending terminal callbacks; failed cleanup retains storage for explicit retry.
+Terminal hardware events complete supported paths without caller processing.
+Pico/STM32F4 continuous RX stream callbacks retain their existing ISR context.

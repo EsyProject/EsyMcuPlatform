@@ -16,18 +16,13 @@
 
 /**
  * @note Initialize handle storage with {0}; repeated init returns ESY_ERR_STATE.
- * Serialize all operations on one owner task/core. DMA descriptors are copied;
- * buffers remain borrowed until terminal callback from esy_hal_spi_poll()
- * or successful esy_hal_spi_abort(). Poll must be driven by the owner;
- * BUSY retains ownership. Abort suppresses the callback. Deinit refuses a
- * registered or DMA-active handle; unregister/retire before deinitialization.
- * Successful deinit returns zero storage. Failed init permits retry.
- * On Pico, selected state machines are reserved in the SDK claim table. The
- * built-in Wi-Fi provider shares a nonblocking assembly guard with XIO; claim
- * contention returns BUSY or is retried by that provider. Direct external SDK
- * allocators must be serialized with XIO init/deinit and PM resource reassembly
- * because they do not participate in that guard. The SDK fixed-SM claim has no
- * recoverable atomic try-claim operation.
+ * Serialize lifecycle and I/O on one owner context. DMA descriptors are copied;
+ * native DMA callbacks automatically retire both directions and PIO wire tail,
+ * then invoke the sole terminal callback in IRQ context. No OS or caller progress
+ * hook is required. Buffers, handles and callback context stay borrowed through
+ * terminal return or successful abort. Callbacks must be bounded/nonblocking and
+ * must not reenter lifecycle/I/O. Failed cleanup retains storage for abort retry.
+ * Abort suppresses the callback; deinit refuses active work.
  */
 
 #ifdef __cplusplus
@@ -110,7 +105,7 @@ void esy_hal_xio_spi_default_cfg(esy_xio_spi_config_t *cfg);
  * configuration. The monitor consumes two instruction words and runs at
  * clk_sys, independently of data FIFO/SCK stalls. With CS synchronized, allow
  * six clk_sys cycles plus pad propagation for MISO high impedance after CS
- * deasserts and for activation before the first clock; qualify this on hardware.
+ * deasserts and for activation before the first clock.
  * Master and MISO-less slave configurations do not claim a monitor.
  * - Slave blocking transfers retire one RX FIFO word per transmitted frame,
  * including TX-only calls. Completion survives owner preemption followed by
@@ -124,34 +119,15 @@ esy_err_t esy_hal_xio_spi_init(esy_spi_t *spi, esy_xio_spi_config_t *cfg);
  * @brief Deinitialize and release XIO SPI resources (idempotent).
  *
  * This function releases backend-specific hardware resources and clears the
- * assembly state. Calling it multiple times is safe.
+ * assembly state. A zero-state handle returns OK. Registered/foreign handles
+ * return STATE. DMA/callback work or cached native reservation contention returns
+ * BUSY with the handle and resources retained for retry; successful cleanup alone
+ * permits storage reuse. Serialize this operation with all I/O and lifecycle.
+ * @return OK, INVALID_ARG for NULL, STATE, BUSY, or native cleanup failure.
  *
  * @param[in,out] spi SPI handle.
  */
-void esy_hal_xio_spi_deinit(esy_spi_t *spi);
-
-/**
- * @brief Start an XIO SPI DMA transfer after completing board DMA metadata.
- *
- * This convenience API mirrors the generic SPI DMA entry while keeping the
- * XIO-specific board metadata completion inside the HAL. Pico XIO accepts only
- * 8-bit frame/8-bit DMA and 16-bit frame/16-bit DMA combinations, in either bit
- * order. Other frame/element combinations return NOT_SUPPORTED before DMA
- * claims, FIFO changes or CS activity. The generic SPI descriptor validation,
- * buffer lifetime and poll/abort completion contract applies.
- *
- * @param[in,out] spi SPI handle initialized by @ref esy_hal_xio_spi_init.
- * @param[in,out] tx_dma_cfg TX DMA config; may be NULL for RX-only transfer.
- * @param[in,out] rx_dma_cfg RX DMA config; may be NULL for TX-only transfer.
- *
- * @retval ESY_OK Success.
- * @retval ESY_ERR_INVALID_ARG Invalid handle or missing both DMA configs.
- * @retval ESY_ERR_NOT_SUPPORTED DMA operation is not bound.
- * @retval <0 HAL backend error.
- */
-esy_err_t esy_hal_xio_spi_transfer_dma(
-    esy_spi_t *spi, esy_dma_config_t *tx_dma_cfg, esy_dma_config_t *rx_dma_cfg,
-    esy_spi_dma_complete_cb_t complete_cb, void *user_data);
+esy_err_t esy_hal_xio_spi_deinit(esy_spi_t *spi);
 
 #ifdef __cplusplus
 } /* extern "C" */

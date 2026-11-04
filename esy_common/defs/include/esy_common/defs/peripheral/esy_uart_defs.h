@@ -34,10 +34,11 @@ extern "C" {
  * HAL backend implementations may store internal state here to avoid dynamic
  * allocation. Override globally when an embedded backend needs more capacity;
  * all HAL/backend/consumer translation units must use the same value and be
- * rebuilt together. Backend capacity assertions validate the selected size.
+ * rebuilt together. The default includes both XIO directions' notification
+ * and atomic event state. Backend capacity assertions validate the selected size.
  */
 #ifndef ESY_UART_PRIV_BYTES
-#define ESY_UART_PRIV_BYTES 448
+#define ESY_UART_PRIV_BYTES 480
 #endif
 
 /* -------------------------------------------------------------------------- */
@@ -65,12 +66,12 @@ typedef struct esy_uart_s esy_uart_t;
  * Bits describe implemented operations for the current handle/role, subject to
  * board resources, configuration limits and normal runtime errors. A set bit
  * neither reserves a resource nor guarantees every parameter combination.
- * DMA-named bits describe the corresponding API, not native DMA or asynchronous
- * completion. Unknown bits must be ignored; zero is a valid capability mask.
+ * DMA bits identify native asynchronous operations with automatic completion.
+ * Unknown bits must be ignored; zero is a valid capability mask.
  */
 typedef enum {
-  ESY_UART_CAP_TX_DMA = 1u << 0, /**< send_dma entry point; may complete synchronously. */
-  ESY_UART_CAP_RX_DMA = 1u << 1, /**< receive_dma entry point; not a promise of native hardware DMA. */
+  ESY_UART_CAP_TX_DMA = 1u << 0, /**< Native asynchronous TX DMA. */
+  ESY_UART_CAP_RX_DMA = 1u << 1, /**< Native asynchronous RX DMA. */
   ESY_UART_CAP_RX_STREAM = 1u << 2, /**< Caller-owned continuous RX stream start/peek/consume/stop. */
   ESY_UART_CAP_DMA_REMAINING = 1u << 3, /**< DMA remaining-count query for board-provided routes. */
 } esy_uart_cap_t;
@@ -135,6 +136,7 @@ typedef struct {
   uint8_t stop_bits;             /**< Stop bits (typically 1 or 2) */
   esy_uart_parity_t parity;      /**< Parity setting */
   esy_uart_inner_config_t inner; /**< Controller internal configuration */
+
 } esy_uart_config_t;
 
 /* -------------------------------------------------------------------------- */
@@ -161,6 +163,12 @@ typedef struct {
    * @return Bytes sent on success; negative error code on failure
    */
   int32_t (*send_blocking)(esy_uart_t *uart, const uint8_t *data, size_t len);
+  /** @brief Task-only transmit with a finite 1..INT32_MAX millisecond budget.
+   * Returns copied bytes; a partial count leaves no caller-memory borrow.
+   * A missing optional operation means NOT_SUPPORTED.
+   */
+  int32_t (*send_timeout)(esy_uart_t *uart, const uint8_t *data, size_t len,
+                          uint32_t timeout_ms);
 
   /**
    * @brief Blocking receive.
@@ -267,8 +275,6 @@ typedef struct {
    * ESY_ERR_NOT_SUPPORTED)
    */
   esy_err_t (*get_phys_index)(const esy_uart_t *uart, uint8_t *out_index);
-  /** @brief Required task-owned terminal retirement; callbacks may run here. */
-  esy_err_t (*poll)(esy_uart_t *uart);
   /** @brief Stop one DMA direction; success retires all its callbacks. */
   esy_err_t (*abort_dma)(esy_uart_t *uart, bool is_tx);
   /** @brief Read remaining DMA transfer units for optional directions. */

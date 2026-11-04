@@ -7,8 +7,8 @@
 #include "esy_hal_backend/esy_hb_pwm.h"
 #include "esy_common/defs/peripheral/esy_pwm_defs.h"
 
-#include <stdatomic.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
@@ -23,11 +23,6 @@
 #define PWM_DIVIDER_MAX 4095u
 #define PWM_PERIOD_MAX 65536u
 
-enum {
-  PWM_DMA_DONE = 1u << 0,
-  PWM_DMA_ERROR = 1u << 1,
-};
-
 typedef struct {
   uint8_t slice;
   uint8_t channel;
@@ -38,16 +33,16 @@ typedef struct {
   void (*handler)(void *);
   void *handler_arg;
 
-  bool enabled;
+  atomic_bool enabled;
   bool initialized;
   bool suspended;
   bool inverted;
 
-  bool dma_owned;
+  atomic_bool dma_owned;
+  bool dma_route_valid;
   uint32_t dma_dreq;
   uint8_t dma_channel;
   uint8_t dma_resource;
-  atomic_uint dma_events;
   esy_dma_callback_t dma_callback;
   void *dma_callback_arg;
   esy_dma_callback_t dma_error_callback;
@@ -75,7 +70,7 @@ typedef struct {
 
 /* All handles share one task/core owner. The same core's wrap IRQ only reads
  * published bindings; short IRQ-masked updates retire callback contexts. DMA
- * IRQs only stop their exclusively owned slice and publish atomic events. */
+ * DMA IRQs own terminal retirement; atomic flags keep task queries race-free. */
 static esy_hb_pwm_module_ctx_t s_ctx;
 
 static esy_err_t pwm_compute_period(uint32_t freq_hz, uint16_t *divider,
@@ -136,19 +131,15 @@ static void pwm_update_output(rp2040_pwm_ctx_t *c) {
   pwm_update_irq(c->slice);
 }
 
-/* IRQ callbacks publish only; owner polling retires the shared dispatcher
- * before notifying users or allowing handle/buffer reuse. */
+/* Native callbacks retire the DMA route before delivering terminal results.
+ * They never call the task-side SDK abort or wait for a dispatcher lock. */
+static void pwm_finish_dma_from_isr(rp2040_pwm_ctx_t *c, bool failed);
 static void pwm_dma_callback_wrapper(void *arg) {
-  rp2040_pwm_ctx_t *c = arg;
-  atomic_fetch_or_explicit(&c->dma_events, PWM_DMA_DONE, memory_order_release);
+  pwm_finish_dma_from_isr(arg, false);
 }
 
 static void pwm_dma_error_wrapper(void *arg) {
-  rp2040_pwm_ctx_t *c = arg;
-  gpio_set_outover(c->gpio,
-                   c->inverted ? GPIO_OVERRIDE_HIGH : GPIO_OVERRIDE_LOW);
-  pwm_set_enabled(c->slice, false);
-  atomic_fetch_or_explicit(&c->dma_events, PWM_DMA_ERROR, memory_order_release);
+  pwm_finish_dma_from_isr(arg, true);
 }
 
 static void pwm_dma_clear(rp2040_pwm_ctx_t *c) {
@@ -156,10 +147,9 @@ static void pwm_dma_clear(rp2040_pwm_ctx_t *c) {
   c->dma_callback_arg = NULL;
   c->dma_error_callback = NULL;
   c->dma_error_callback_arg = NULL;
-  atomic_store_explicit(&c->dma_events, 0u, memory_order_relaxed);
 }
 
-static esy_err_t pwm_dma_retire(rp2040_pwm_ctx_t *c, bool stop_output) {
+static esy_err_t pwm_dma_retire(rp2040_pwm_ctx_t *c, bool stop_output, bool from_isr) {
   if (!c->dma_owned) return ESY_OK;
   if (stop_output) {
     uint32_t key = save_and_disable_interrupts();
@@ -167,14 +157,17 @@ static esy_err_t pwm_dma_retire(rp2040_pwm_ctx_t *c, bool stop_output) {
     pwm_update_output(c);
     restore_interrupts(key);
   }
-  esy_err_t result = esy_hb_dma_abort(c, c->dma_dreq, c->dma_channel);
+  esy_err_t result = from_isr
+      ? (stop_output ? esy_hb_dma_abort_from_isr(c, c->dma_dreq, c->dma_channel)
+                     : esy_hb_dma_retire_from_isr(c, c->dma_dreq, c->dma_channel))
+      : esy_hb_dma_abort(c, c->dma_dreq, c->dma_channel);
   if (result != ESY_OK) return result;
   uint32_t compare = pwm_hw->slice[c->slice].cc;
   compare = (compare >> (c->channel * 16u)) & UINT16_MAX;
   c->duty_cycle = (float)compare /
       ((uint32_t)pwm_hw->slice[c->slice].top + 1u);
   if (c->duty_cycle > 1.0f) c->duty_cycle = 1.0f;
-  c->dma_owned = false;
+  if (!from_isr) c->dma_owned = false;
   return ESY_OK;
 }
 
@@ -212,13 +205,14 @@ esy_err_t esy_hb_pwm_init(esy_pwm_t *pwm,
 
   rp2040_pwm_ctx_t *c = &s_ctx.channel[config->phys_index];
   memset(c, 0, sizeof(*c));
+  atomic_init(&c->dma_owned, false);
+  atomic_init(&c->enabled, false);
   c->slice = slice;
   c->channel = ch;
   c->phys_index = config->phys_index;
   c->gpio = config->inner.gpio;
   c->duty_cycle = (float)config->duty_cycle / 100.0f;
   c->inverted = config->start_low;
-  atomic_init(&c->dma_events, 0u);
 
   uint32_t key = save_and_disable_interrupts();
   if (shared->owners == 0u) {
@@ -352,6 +346,11 @@ esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
   if (c->dma_owned || c->enabled || s_ctx.slice[c->slice].owners != 1u)
     return ESY_ERR_BUSY;
   if (c->suspended) return ESY_ERR_STATE;
+  if (c->dma_route_valid) {
+    esy_err_t flushed = esy_hb_dma_release(c, c->dma_dreq, c->dma_channel);
+    if (flushed != ESY_OK) return flushed;
+    c->dma_route_valid = false;
+  }
   dma_config->inner.dreq = (uint32_t)(DREQ_PWM_WRAP0 + c->slice);
   dma_config->inner.direction = ESY_DMA_MEM_TO_PERIPH;
   uint8_t resource;
@@ -375,7 +374,6 @@ esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
   dma_config->callback_arg = c;
   dma_config->error_callback = pwm_dma_error_wrapper;
   dma_config->error_callback_arg = c;
-  atomic_store_explicit(&c->dma_events, 0u, memory_order_relaxed);
   result = esy_hb_dma_prepare(c, dma_config);
   if (result != ESY_OK) {
     pwm_dma_clear(c);
@@ -384,6 +382,7 @@ esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
   c->dma_dreq = dma_config->inner.dreq;
   c->dma_channel = dma_config->inner.channel;
   c->dma_resource = resource;
+  c->dma_route_valid = true;
   c->dma_owned = true;
   uint32_t key = save_and_disable_interrupts();
   c->enabled = true;
@@ -400,34 +399,27 @@ esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
 esy_err_t esy_hb_pwm_abort_dma(esy_pwm_t *pwm) {
   if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
   rp2040_pwm_ctx_t *c = pwm->ctx;
-  esy_err_t result = pwm_dma_retire(c, true);
-  if (result != ESY_OK) return result;
+  esy_err_t result = pwm_dma_retire(c, true, false);
+  if (result != ESY_OK) {
+    return result;
+  }
+  if (c->dma_route_valid) {
+    result = esy_hb_dma_release(c, c->dma_dreq, c->dma_channel);
+    if (result != ESY_OK) return result;
+    c->dma_route_valid = false;
+  }
   pwm_dma_clear(c);
   return ESY_OK;
 }
 
-esy_err_t esy_hb_pwm_poll(esy_pwm_t *pwm) {
-  if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
-  rp2040_pwm_ctx_t *c = pwm->ctx;
-  if (!c->dma_owned) return ESY_OK;
-  unsigned events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
-  if (events == 0u) return ESY_OK;
-  esy_err_t result = pwm_dma_retire(c, (events & PWM_DMA_ERROR) != 0u);
-  if (result != ESY_OK) return result;
-  events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
-  if (events & PWM_DMA_ERROR) {
-    uint32_t key = save_and_disable_interrupts();
-    c->enabled = false;
-    pwm_update_output(c);
-    restore_interrupts(key);
-  }
-  esy_dma_callback_t callback = events & PWM_DMA_ERROR
-      ? c->dma_error_callback : c->dma_callback;
-  void *arg = events & PWM_DMA_ERROR
-      ? c->dma_error_callback_arg : c->dma_callback_arg;
+static void pwm_finish_dma_from_isr(rp2040_pwm_ctx_t *c, bool failed) {
+  if (!c->dma_owned) return;
+  if (pwm_dma_retire(c, failed, true) != ESY_OK) return;
+  esy_dma_callback_t callback = failed ? c->dma_error_callback : c->dma_callback;
+  void *arg = failed ? c->dma_error_callback_arg : c->dma_callback_arg;
   pwm_dma_clear(c);
   if (callback != NULL) callback(arg);
-  return ESY_OK;
+  atomic_store_explicit(&c->dma_owned, false, memory_order_release);
 }
 
 static void pwm_wrap_isr(void) {

@@ -55,19 +55,6 @@ static void rx_stream_callback(esy_uart_t *uart,
   (void)user_data;
 }
 
-void test_esy_hal_uart_poll_rejects_a_missing_backend_hook(void) {
-  esy_uart_t uart = {0};
-
-  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_uart_poll(NULL));
-  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_uart_poll(&uart));
-  init_uart(&uart);
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_poll(&uart));
-  static const esy_uart_vtable_t k_no_poll_ops = {0};
-  uart.ops = &k_no_poll_ops;
-  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_uart_poll(&uart));
-  esy_hal_uart_deinit(&uart);
-}
-
 void test_esy_hal_uart_default_cfg_sets_standard_serial_defaults(void) {
   esy_uart_config_t cfg = {
       .phys_index = 9u,
@@ -452,13 +439,12 @@ void test_uart_unregistered_dma_abort_retries_without_releasing_storage(void) {
   TEST_ASSERT_TRUE(esy_hal_uart_is_busy(&uart, true));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_send_dma(&uart, &transfer));
   esy_dma_config_t submitted = platform_test_state()->submitted_dma;
-  platform_test_set_uart_dma_results(ESY_ERR_TIMEOUT, ESY_ERR_IO);
+  platform_test_set_uart_abort_result(ESY_ERR_TIMEOUT);
   TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_hal_uart_abort_dma(&uart, true));
   TEST_ASSERT_TRUE(esy_hal_uart_is_busy(&uart, true));
   esy_hal_uart_deinit(&uart);
   TEST_ASSERT_NOT_NULL(uart.ops->send_dma);
-  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_uart_poll(&uart));
-  platform_test_set_uart_dma_results(ESY_OK, ESY_OK);
+  platform_test_set_uart_abort_result(ESY_OK);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_abort_dma(&uart, true));
   TEST_ASSERT_TRUE(platform_test_state()->uart_abort_is_tx);
   TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, true));
@@ -469,7 +455,6 @@ void test_uart_unregistered_dma_abort_retries_without_releasing_storage(void) {
   TEST_ASSERT_FALSE(platform_test_state()->uart_abort_is_tx);
   TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, false));
   TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_uart_abort_dma(&uart, false));
-  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_poll(&uart));
   esy_hal_uart_deinit(&uart);
   TEST_ASSERT_NULL(uart.ops);
 }
@@ -484,7 +469,6 @@ static void check_uart_callback_retains_ownership(void *arg) {
   uart_callback_probe_t *probe = arg;
   probe->notifications++;
   TEST_ASSERT_TRUE(esy_hal_uart_is_busy(probe->uart, true));
-  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_poll(probe->uart));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_abort_dma(probe->uart, true));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_unregister_device(
       (esy_uart_device_binding_t *)probe->device->driver_ctx));
@@ -594,6 +578,89 @@ static void register_uart_stream_device(esy_uart_t *uart,
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_register_device(
       binding, uart, registry, &registration));
   TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_start(registry));
+}
+
+void test_uart_rejected_dma_does_not_block_synchronous_io_or_deinit(void) {
+  esy_uart_t uart = {0};
+  uint8_t bytes[4] = {0};
+  unsigned callbacks = 0u;
+  esy_dma_config_t transfer = {
+      .src = bytes, .dst = bytes, .length = sizeof(bytes),
+      .callback = count_uart_completion, .callback_arg = &callbacks,
+      .error_callback = count_uart_completion, .error_callback_arg = &callbacks,
+  };
+  const esy_dma_config_t original = transfer;
+  platform_test_set_dma_busy(false);
+  init_uart(&uart);
+  platform_test_reject_dma_mapping(true);
+
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+      esy_hal_uart_send_dma(&uart, &transfer));
+  TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, true));
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+      esy_hal_uart_receive_dma(&uart, &transfer));
+  TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, false));
+  TEST_ASSERT_EQUAL_UINT32(2u, platform_test_state()->uart_abort_calls);
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_transfer_dma_calls);
+  TEST_ASSERT_EQUAL_MEMORY(&original, &transfer, sizeof(transfer));
+  TEST_ASSERT_EQUAL_UINT(0u, callbacks);
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_uart_abort_dma(&uart, true));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_hal_uart_abort_dma(&uart, false));
+  TEST_ASSERT_EQUAL_INT32(sizeof(bytes),
+      esy_hal_uart_send_timeout(&uart, bytes, sizeof(bytes), 10u));
+  TEST_ASSERT_EQUAL_INT32(sizeof(bytes),
+      esy_hal_uart_receive_blocking(&uart, bytes, sizeof(bytes)));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+  TEST_ASSERT_NULL(uart.ops);
+  TEST_ASSERT_NULL(platform_test_state()->uart_owner);
+  init_uart(&uart);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+}
+
+void test_uart_rejected_dma_releases_registered_device_leases(void) {
+  platform_test_set_dma_busy(false);
+  ESY_DEVICE_REGISTRY_STATIC_STORAGE(storage, 1u);
+  esy_device_registry_static_resources_t resources;
+  ESY_DEVICE_REGISTRY_BIND_STATIC_RESOURCES(&resources, storage);
+  esy_device_registry_t registry = {0};
+  esy_uart_device_binding_t binding = {0};
+  esy_uart_t uart = {0};
+  uint8_t bytes[4] = {0};
+  unsigned callbacks = 0u;
+  esy_dma_config_t transfer = {
+      .src = bytes, .dst = bytes, .length = sizeof(bytes),
+      .callback = count_uart_completion, .callback_arg = &callbacks,
+      .half_callback = count_uart_completion, .half_callback_arg = &callbacks,
+      .error_callback = count_uart_completion, .error_callback_arg = &callbacks,
+  };
+  register_uart_stream_device(&uart, &binding, &registry, &resources);
+  platform_test_set_dma_half_supported(false);
+  /* Cover both a board-route rejection and a provider rejection after routing. */
+  for (unsigned route_rejected = 0u; route_rejected < 2u; ++route_rejected) {
+    platform_test_reject_dma_mapping(route_rejected != 0u);
+    TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+        esy_hal_uart_send_dma(&uart, &transfer));
+    TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, true));
+    TEST_ASSERT_FALSE(binding.tx_dma_ref_held);
+    TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+        esy_hal_uart_receive_dma(&uart, &transfer));
+    TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, false));
+    TEST_ASSERT_FALSE(binding.rx_dma_ref_held);
+    uint32_t references = UINT32_MAX;
+    TEST_ASSERT_EQUAL(ESY_OK,
+        esy_device_get_usage_count(&binding.device, &references));
+    TEST_ASSERT_EQUAL_UINT32(0u, references);
+    TEST_ASSERT_EQUAL_INT32(sizeof(bytes),
+        esy_hal_uart_send_timeout(&uart, bytes, sizeof(bytes), 10u));
+    TEST_ASSERT_EQUAL(ESY_OK,
+        esy_device_get_usage_count(&binding.device, &references));
+    TEST_ASSERT_EQUAL_UINT32(0u, references);
+  }
+  TEST_ASSERT_EQUAL_UINT(0u, callbacks);
+  TEST_ASSERT_EQUAL_UINT32(4u, platform_test_state()->uart_abort_calls);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_deinit(&registry));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_unregister_device(&binding));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
 }
 
 void test_uart_stream_failed_start_cleanup_retains_graph_until_stop_succeeds(void) {
@@ -774,5 +841,114 @@ void test_uart_own_dma_and_physical_tx_remain_busy_without_raw_dma_activity(void
   TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, false));
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_suspend(&uart));
   platform_test_set_uart_busy(false, false, false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+}
+
+void test_uart_single_terminal_callback_releases_transfer_ownership_once(void) {
+  esy_uart_t uart = {0};
+  uint8_t byte = 0u;
+  unsigned completed = 0u;
+  init_uart(&uart);
+  esy_dma_config_t transfer = {.src = &byte, .length = 1u,
+      .callback = count_uart_completion, .callback_arg = &completed};
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_send_dma(&uart, &transfer));
+  esy_dma_config_t submitted = platform_test_state()->submitted_dma;
+  TEST_ASSERT_EQUAL_UINT(0u, completed);
+  TEST_ASSERT_TRUE(esy_hal_uart_is_busy(&uart, true));
+  submitted.callback(submitted.callback_arg);
+  TEST_ASSERT_EQUAL_UINT(1u, completed);
+  TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, true));
+  submitted.callback(submitted.callback_arg);
+  TEST_ASSERT_EQUAL_UINT(1u, completed);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+}
+
+void test_uart_timeout_validates_budget_and_returns_native_partial_count(void) {
+  esy_uart_t uart = {0};
+  uint8_t data[4] = {1u, 2u, 3u, 4u};
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_hal_uart_send_timeout(NULL, data, sizeof(data), 10u));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_hal_uart_send_timeout(&uart, data, sizeof(data), 0u));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_hal_uart_send_timeout(&uart, data, sizeof(data), UINT32_MAX));
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+      esy_hal_uart_send_timeout(&uart, data, sizeof(data), 10u));
+  init_uart(&uart);
+  platform_test_set_uart_send_timeout_result(2);
+  TEST_ASSERT_EQUAL_INT32(2,
+      esy_hal_uart_send_timeout(&uart, data, sizeof(data), INT32_MAX));
+  TEST_ASSERT_EQUAL_UINT32(INT32_MAX, platform_test_state()->uart_send_timeout_ms);
+  TEST_ASSERT_EQUAL_UINT32(1u, platform_test_state()->uart_send_timeout_calls);
+  TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, true));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+}
+
+void test_uart_timeout_cannot_overlap_an_accepted_dma_borrow(void) {
+  esy_uart_t uart = {0};
+  uint8_t data[4] = {0};
+  esy_dma_config_t transfer = {.src = data, .length = sizeof(data)};
+  platform_test_set_dma_busy(false);
+  init_uart(&uart);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_send_dma(&uart, &transfer));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY,
+      esy_hal_uart_send_timeout(&uart, data, sizeof(data), 10u));
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->uart_send_timeout_calls);
+  esy_dma_config_t submitted = platform_test_state()->submitted_dma;
+  submitted.callback(submitted.callback_arg);
+  TEST_ASSERT_EQUAL_INT32(sizeof(data),
+      esy_hal_uart_send_timeout(&uart, data, sizeof(data), 10u));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+}
+
+void test_uart_dma_source_completion_keeps_physical_tail_busy_without_progress_calls(void) {
+  esy_uart_t uart = {0};
+  uint8_t bytes[4] = {0};
+  unsigned completions = 0u;
+  esy_dma_config_t transfer = {.src = bytes, .length = sizeof(bytes),
+      .callback = count_uart_completion, .callback_arg = &completions};
+  platform_test_set_dma_busy(false);
+  init_uart(&uart);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_send_dma(&uart, &transfer));
+  platform_test_set_uart_busy(false, false, true);
+  esy_dma_config_t submitted = platform_test_state()->submitted_dma;
+  submitted.callback(submitted.callback_arg);
+  TEST_ASSERT_EQUAL_UINT(1u, completions);
+  TEST_ASSERT_TRUE(esy_hal_uart_is_busy(&uart, true));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_deinit(&uart));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_hal_uart_suspend(&uart));
+  platform_test_set_uart_busy(false, false, false);
+  TEST_ASSERT_FALSE(esy_hal_uart_is_busy(&uart, true));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
+}
+
+void test_uart_dma_preserves_absent_half_request_and_rejects_unsupported_half_cleanly(void) {
+  esy_uart_t uart = {0};
+  uint8_t data[4] = {0};
+  unsigned completed = 0u;
+  esy_dma_config_t transfer = {
+      .src = data, .dst = data, .length = sizeof(data),
+      .callback = count_uart_completion, .callback_arg = &completed,
+  };
+  init_uart(&uart);
+  platform_test_set_dma_half_supported(false);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_send_dma(&uart, &transfer));
+  esy_dma_config_t submitted = platform_test_state()->submitted_dma;
+  TEST_ASSERT_NULL(submitted.half_callback);
+  TEST_ASSERT_NULL(submitted.half_callback_arg);
+  submitted.callback(submitted.callback_arg);
+  TEST_ASSERT_EQUAL_UINT(1u, completed);
+
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_receive_dma(&uart, &transfer));
+  submitted = platform_test_state()->submitted_dma;
+  TEST_ASSERT_NULL(submitted.half_callback);
+  submitted.callback(submitted.callback_arg);
+  TEST_ASSERT_EQUAL_UINT(2u, completed);
+
+  transfer.half_callback = count_uart_completion;
+  transfer.half_callback_arg = &completed;
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_uart_send_dma(&uart, &transfer));
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED, esy_hal_uart_receive_dma(&uart, &transfer));
+  TEST_ASSERT_EQUAL_UINT(2u, completed);
   TEST_ASSERT_EQUAL(ESY_OK, esy_hal_uart_deinit(&uart));
 }

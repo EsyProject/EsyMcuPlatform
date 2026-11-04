@@ -9,11 +9,11 @@
 #include <string.h>
 
 #include "esy_hal/esy_hal_spi.h"
-#include "esy_hal/esy_hal_dma.h"
 #include "esy_hal/esy_hal_system.h"
 
 #define ESY_SPI_SCHEDULER_DMA_THRESHOLD_BYTES (sizeof(uint32_t))
 #define ESY_SPI_SCHEDULER_DEFAULT_BLOCK_COUNT (4u)
+#define ESY_SPI_SCHEDULER_RETIRE_RETRY_MS (1u)
 
 _Static_assert(sizeof(esy_spi_scheduler_t) <= ESY_SPI_SCHEDULER_STORAGE_BYTES,
                "ESY_SPI_SCHEDULER_STORAGE_BYTES is too small");
@@ -82,6 +82,8 @@ static esy_err_t stop_scheduler(esy_spi_scheduler_t *gw) {
   if (atomic_load_explicit(&gw->pending_count, memory_order_acquire) != 0u) {
     return ESY_ERR_BUSY;
   }
+  if (atomic_load_explicit(&gw->notifying, memory_order_acquire) != 0u)
+    return ESY_ERR_BUSY;
   esy_io_scheduler_atomic_flag_set(&gw->stopping, true);
   if (gw->stop_worker) return gw->stop_worker(gw->task);
   return gw->current || esy_hal_spi_is_busy(gw->spi) ? ESY_ERR_BUSY : ESY_OK;
@@ -121,6 +123,7 @@ static esy_err_t init_scheduler_storage(esy_spi_scheduler_t *gw,
   gw->spi = spi;
   esy_io_scheduler_atomic_flag_init(&gw->ready, false);
   esy_io_scheduler_atomic_flag_init(&gw->dma_done, false);
+  atomic_init(&gw->notifying, 0u);
   atomic_init(&gw->pending_count, 0u);
   esy_io_scheduler_atomic_flag_init(&gw->busy, false);
   esy_io_scheduler_atomic_flag_init(&gw->stopping, false);
@@ -240,7 +243,7 @@ esy_spi_scheduler_request_t *esy_spi_scheduler_get_write_block(
 esy_err_t esy_spi_scheduler_submit(esy_spi_scheduler_t *gw,
                             esy_spi_scheduler_request_t *req) {
   if (!gw || !req || !gw->req_buf || !esy_io_scheduler_transfer_valid(req->tx_buf, req->rx_buf, req->len, req->transfer_size) ||
-      (!req->tx_buf && !req->rx_buf) ||
+      req->len > INT32_MAX || (!req->tx_buf && !req->rx_buf) ||
       esy_io_scheduler_atomic_flag_get(&gw->stopping) ||
       !scheduler_has_request(gw, req) ||
       (req->tx_buf && req->tx_buf == req->tx_alloc_buf && req->len > gw->tx_alloc_size) ||
@@ -278,6 +281,7 @@ static void esy_spi_scheduler_on_dma_done(
   esy_spi_scheduler_t *gw = arg;
   (void)spi;
   if (!gw || !gw->current) return;
+  atomic_fetch_add_explicit(&gw->notifying, 1u, memory_order_acquire);
   esy_spi_scheduler_request_t *req = gw->current;
   req->transferred = 0u;
   req->result = ESY_ERR_IO;
@@ -288,10 +292,8 @@ static void esy_spi_scheduler_on_dma_done(
     if (result->status == ESY_SPI_DMA_TRANSFER_OK && req->transferred == req->len)
       req->result = ESY_OK;
   }
-  /* Active workers already poll at 1 ms; support IRQ and owner-task providers. */
-  /* Last context access: another core may finish and release storage now. */
   esy_io_scheduler_atomic_flag_set(&gw->dma_done, true);
-
+  atomic_fetch_sub_explicit(&gw->notifying, 1u, memory_order_release);
 }
 
 static void try_start_next_transfer(esy_spi_scheduler_t *gw) {
@@ -323,13 +325,18 @@ static void try_start_next_transfer(esy_spi_scheduler_t *gw) {
   if (req->pre_callback) req->pre_callback(req->pre_callback_arg);
   if (req->len > ESY_SPI_SCHEDULER_DMA_THRESHOLD_BYTES ||
       req->transfer_size != ESY_DMA_TRANSFER_SIZE_8) {
-    esy_dma_config_t tx, rx;
-    esy_hal_dma_default_cfg(&tx);
-    esy_hal_dma_default_cfg(&rx);
-    tx.src = req->tx_buf;
-    rx.dst = req->rx_buf;
-    tx.length = rx.length = req->len;
-    tx.transfer_size = rx.transfer_size = req->transfer_size;
+    esy_dma_config_t tx = {
+        .src = req->tx_buf,
+        .length = req->len,
+        .transfer_size = req->transfer_size,
+        .inner = {.direction = ESY_DMA_MEM_TO_MEM},
+    };
+    esy_dma_config_t rx = {
+        .dst = req->rx_buf,
+        .length = req->len,
+        .transfer_size = req->transfer_size,
+        .inner = {.direction = ESY_DMA_MEM_TO_MEM},
+    };
     esy_err_t err = esy_hal_spi_transfer_dma(gw->spi,
         req->tx_buf != NULL ? &tx : NULL, req->rx_buf != NULL ? &rx : NULL,
                                                   esy_spi_scheduler_on_dma_done, gw);
@@ -352,16 +359,30 @@ static void try_start_next_transfer(esy_spi_scheduler_t *gw) {
       return;
     }
   }
-  if (req->transfer_size != ESY_DMA_TRANSFER_SIZE_8) {
-    req->result = ESY_ERR_NOT_SUPPORTED;
-    finish_current_request(gw);
-    if (gw->wake) (void)gw->wake(gw->task);
-    return;
-  }
   int32_t count;
-  if (!req->rx_buf) count = esy_hal_spi_write_blocking(gw->spi, req->tx_buf, req->len);
-  else if (!req->tx_buf) count = esy_hal_spi_read_blocking(gw->spi, req->rx_buf, req->len);
-  else count = esy_hal_spi_transfer_blocking(gw->spi, req->tx_buf, req->rx_buf, req->len);
+  if (req->transfer_size == ESY_DMA_TRANSFER_SIZE_16) {
+    if (req->len % sizeof(uint16_t) != 0u ||
+        (req->tx_buf && (uintptr_t)req->tx_buf % _Alignof(uint16_t)) ||
+        (req->rx_buf && (uintptr_t)req->rx_buf % _Alignof(uint16_t))) {
+      req->result = ESY_ERR_INVALID_ARG;
+      finish_current_request(gw);
+      return;
+    }
+    size_t frames = req->len / sizeof(uint16_t);
+    if (!req->rx_buf) count = esy_hal_spi_write16_blocking(
+        gw->spi, (const uint16_t *)(const void *)req->tx_buf, frames);
+    else if (!req->tx_buf) count = esy_hal_spi_read16_blocking(
+        gw->spi, (uint16_t *)(void *)req->rx_buf, frames);
+    else count = esy_hal_spi_transfer16_blocking(gw->spi,
+        (const uint16_t *)(const void *)req->tx_buf,
+        (uint16_t *)(void *)req->rx_buf, frames);
+    if (count >= 0) count = (size_t)count <= frames && count <= INT32_MAX / 2
+        ? count * (int32_t)sizeof(uint16_t) : ESY_ERR_IO;
+  } else if (req->transfer_size == ESY_DMA_TRANSFER_SIZE_8) {
+    if (!req->rx_buf) count = esy_hal_spi_write_blocking(gw->spi, req->tx_buf, req->len);
+    else if (!req->tx_buf) count = esy_hal_spi_read_blocking(gw->spi, req->rx_buf, req->len);
+    else count = esy_hal_spi_transfer_blocking(gw->spi, req->tx_buf, req->rx_buf, req->len);
+  } else count = ESY_ERR_NOT_SUPPORTED;
   req->transferred = count >= 0 ? (size_t)count : 0u;
   req->result = count < 0 ? (esy_err_t)count
       : ((size_t)count == req->len ? ESY_OK : ESY_ERR_IO);
@@ -392,16 +413,16 @@ esy_err_t esy_spi_scheduler_resume(esy_spi_scheduler_t *gw) {
   if (!esy_io_scheduler_atomic_flag_get(&gw->quiesced)) return ESY_ERR_STATE;
 
   esy_io_scheduler_atomic_flag_set(&gw->quiesced, false);
-  return gw->wake ? gw->wake(gw->task) : ESY_OK;
+  if (gw->wake) return gw->wake(gw->task);
+  return ESY_OK;
 }
 
 void esy_spi_scheduler_process_context(esy_spi_scheduler_t *gw) {
   if (!gw || !esy_io_scheduler_atomic_flag_get(&gw->ready)) return;
   bool stopping = esy_io_scheduler_atomic_flag_get(&gw->stopping);
-  (void)esy_hal_spi_poll(gw->spi);
   if (gw->current && gw->failed_submit &&
       !esy_io_scheduler_atomic_flag_get(&gw->dma_done)) {
-    /* Poll may retire the failed transfer and notify us. Otherwise one abort
+    /* Processing may retire the failed transfer. Otherwise one abort
      * attempt per slice can certify silent cancellation; errors retain ownership. */
     if (esy_hal_spi_abort(gw->spi) == ESY_OK) {
       gw->wire_pending = false;
@@ -410,6 +431,7 @@ void esy_spi_scheduler_process_context(esy_spi_scheduler_t *gw) {
   }
   /* Drain terminal callbacks. A best-effort abort does not certify ISR retirement. */
   if (gw->current && esy_io_scheduler_atomic_flag_get(&gw->dma_done) &&
+      atomic_load_explicit(&gw->notifying, memory_order_acquire) == 0u &&
       (!gw->wire_pending || !esy_hal_spi_is_busy(gw->spi))) {
     finish_current_request(gw);
   }
@@ -417,6 +439,18 @@ void esy_spi_scheduler_process_context(esy_spi_scheduler_t *gw) {
     return;
   }
   try_start_next_transfer(gw);
+}
+
+uint32_t esy_spi_scheduler_next_wait_ms(const esy_spi_scheduler_t *gw) {
+  if (gw == NULL || !gw->allocated ||
+      !esy_io_scheduler_atomic_flag_get(&gw->ready)) return UINT32_MAX;
+  if (esy_io_scheduler_atomic_flag_get(&gw->busy)) {
+    return ESY_SPI_SCHEDULER_RETIRE_RETRY_MS;
+  }
+  if (esy_io_scheduler_atomic_flag_get(&gw->stopping) ||
+      (!esy_io_scheduler_atomic_flag_get(&gw->quiesced) &&
+       atomic_load_explicit(&gw->pending_count, memory_order_acquire) != 0u)) return 0u;
+  return UINT32_MAX;
 }
 
 esy_err_t esy_spi_scheduler_core_process(esy_spi_scheduler_t *gw) {
@@ -429,36 +463,13 @@ esy_err_t esy_spi_scheduler_core_process(esy_spi_scheduler_t *gw) {
 }
 
 
-esy_err_t esy_spi_scheduler_get_write_buffer_with_arg(
-    uint8_t **tx_buf,
-    uint8_t **rx_buf,
-    void *arg) {
-  esy_spi_scheduler_t *spi_scheduler = (esy_spi_scheduler_t*)arg;
-  if (tx_buf) {
-    *tx_buf = NULL;
-  }
-  if (rx_buf) {
-    *rx_buf = NULL;
-  }
-  if (!spi_scheduler || (!tx_buf && !rx_buf)) {
-    return ESY_ERR_INVALID_ARG;
-  }
-  if (spi_scheduler->pending || spi_scheduler->write_req) {
-    return ESY_ERR_STATE;
-  }
-
-  esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(spi_scheduler);
-  if (!req) {
-    return ESY_ERR_BUSY;
-  }
-
-  spi_scheduler->pending = req;
-  if (tx_buf) {
-    *tx_buf = req->tx_buf;
-  }
-  if (rx_buf) {
-    *rx_buf = req->rx_buf;
-  }
+static esy_err_t reserve_payload_buffers(esy_spi_scheduler_t *gw,
+                                         uint8_t **tx_buf, uint8_t **rx_buf) {
+  esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(gw);
+  if (!req) return ESY_ERR_BUSY;
+  gw->pending = req;
+  *tx_buf = req->tx_buf;
+  *rx_buf = req->rx_buf;
   return ESY_OK;
 }
 
@@ -472,7 +483,7 @@ esy_err_t esy_spi_scheduler_get_read_write_buffer_with_arg(
   if (!gw->allocated || gw->pending || gw->write_req) return ESY_ERR_STATE;
   if (minimum_size > gw->tx_alloc_size || minimum_size > gw->rx_alloc_size)
     return ESY_ERR_NO_MEM;
-  return esy_spi_scheduler_get_write_buffer_with_arg(tx_buf, rx_buf, gw);
+  return reserve_payload_buffers(gw, tx_buf, rx_buf);
 }
 
 static bool pending_buffers_match(const esy_spi_scheduler_request_t *req,

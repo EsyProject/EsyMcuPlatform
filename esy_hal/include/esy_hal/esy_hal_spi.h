@@ -22,8 +22,12 @@
  * Concurrency:
  * - If the same SPI instance can be accessed from multiple tasks/cores, the
  * caller must provide external synchronization.
+ * - Pico/STM32F4 DMA terminal callbacks run automatically in native IRQ context.
+ *   They must be bounded, nonblocking and must not reenter HAL lifecycle/I/O.
+ * - ESP32 exposes synchronous transfers only; its public DMA API is unsupported.
+ *   Use io_scheduler for OS-backed asynchronous submission/result callbacks.
  *
- * ESP32 buffer limits apply to both blocking and DMA-named transfer APIs:
+ * ESP32 buffer limits apply to blocking transfer APIs:
  * - A transaction transfers at most 4094 bytes. Byte-count/halfword-count
  *   overflow or a larger transaction returns ESY_ERR_INVALID_ARG.
  * - RX up to four bytes uses the SDK's inline word and copies only the requested
@@ -94,9 +98,8 @@ extern esy_err_t esy_hal_spi_init(esy_spi_t *spi,
  *
  * Retire native state, reset owned pins, then release the physical controller.
  * A registered SPI device adapter must be unregistered first. This task-only
- * call is serialized with I/O, poll and PM. Pending DMA (including completed
- * hardware awaiting poll/callback retirement) returns BUSY and retains the
- * handle, buffers and callbacks. Poll or abort successfully, then retry.
+ * call is serialized with I/O and PM. Pending DMA/callbacks return BUSY and retain
+ * the handle, buffers and callbacks. Await completion or abort successfully, then retry.
  * SDK cleanup errors retain the handle and claim; retry deinit without clearing
  * storage. A zero-state handle returns OK. XIO handles use their own deinit API.
  *
@@ -252,34 +255,39 @@ extern esy_err_t esy_hal_spi_read_dma(esy_spi_t *spi,
  * @param[in] user_data Opaque callback context.
  *
  * A started transfer reports exactly one terminal result through
- * @p complete_cb when provided. A successful callback result guarantees that
- * both DMA directions transferred their requested lengths. Built-in Pico/STM32
- * callers must drive @ref esy_hal_spi_poll from the serialized owner task;
- * terminal callbacks run there after DMA, pending IRQ access and wire activity
- * retire. Other backends may complete inline or in ISR context. All buffers,
- * handles and callback arguments remain borrowed through terminal return.
- * On failure, query esy_hal_spi_is_busy(): an idle rejection retains no buffers
- * and produces no later callback. If cleanup failed and the handle remains
- * busy, buffers, handle and callback context remain borrowed. Continue owner
- * polling for the terminal error, or successfully abort before reusing them.
- * Successful abort cancels the retained transfer without a terminal callback.
- * At least one configuration is required. A provided TX/RX descriptor requires
- * a non-NULL src/dst respectively, a nonzero byte length and an aligned buffer.
- * Lengths must contain complete 8- or 16-bit elements and must fit a bit count
- * in size_t. Two provided descriptors require equal byte lengths and element
- * widths. Circular mode and 32-bit elements are unsupported. Validation failures
- * reject before board/backend dispatch, callback retention or buffer access.
- * Pico XIO requires exactly 8-bit frames with 8-bit elements or 16-bit frames
- * with 16-bit elements, in either bit order. Each memory element contains one
- * complete frame value. Other XIO frame/element combinations reject with
- * NOT_SUPPORTED before DMA claims, FIFO changes or CS activity.
- * Built-in STM32F4/ESP32 require 8-bit elements for frames up to 8 bits and
- * 16-bit elements otherwise. ESP32 applies the file-level RX/transaction bounds
- * and completes synchronously in the caller; absent directions report zero
- * transferred bytes.
- * Single-direction helpers pass a NULL memory endpoint internally: Pico/STM32
- * use a fixed dummy/discard word, while ESP32 uses the SDK's missing-buffer mode.
- * STM32F4 also rejects routes sharing a physical stream.
+ * @p complete_cb when provided. Pico/STM32F4 and Pico XIO complete automatically
+ * from the native IRQ path after both DMA directions retire. A successful result
+ * guarantees complete requested counts and, for master mode, the final wire tail
+ * and CS release. Slave completion follows the final RX frame; it does not wait
+ * for a future external CS/SCK edge. No caller progress hook or OS is required.
+ * Callbacks must be bounded/nonblocking; do not submit new HAL work, change
+ * lifecycle or release the handle/context from the callback. Buffers, handle and
+ * callback arguments remain borrowed through callback return or successful abort.
+ * A rejected idle submission retains nothing and produces no later callback.
+ * Native cleanup failure can leave the handle busy: retain all storage and retry
+ * owner-side abort before reuse. A successful abort suppresses the callback.
+ * Hardware faults exhausting bounded native stop preserve storage until abort.
+ * SPI wire-tail failure reports DMA_ERROR and disables the hardware handle;
+ * deinitialize/reinitialize before its next operation. Pico master tail work is
+ * given an iteration budget derived from one frame at its programmed divider;
+ * STM32F4 uses two frames, Pico XIO eight PIO cycles, plus register synchronization.
+ * These are CPU iteration budgets, not elapsed-time guarantees; loop/bus costs
+ * also contribute to ISR duration. Tail inspection is capped at 8192 iterations;
+ * master configurations whose actual divider requires more reject DMA with
+ * NOT_SUPPORTED before claims or CS activity. Blocking transfers remain available.
+ * XIO DMA also requires CS hold/inactive delay within 8192 core cycles. No OS
+ * tick or caller progress hook is used.
+ * At least one configuration is required. Provided TX/RX descriptors require a
+ * non-NULL src/dst respectively, nonzero byte length and aligned memory. Lengths
+ * must contain complete 8-/16-bit elements; two directions require equal byte
+ * lengths and widths. Circular and 32-bit elements are unsupported. Invalid
+ * descriptors reject before hardware activity or buffer/callback retention.
+ * Pico XIO supports exactly 8-/16-bit frames with the matching element width,
+ * in either bit order. Other frame/element combinations return NOT_SUPPORTED.
+ * Single-direction helpers use a fixed dummy/discard word for the absent side.
+ * STM32F4 rejects routes sharing a physical stream. Descriptor configurations are
+ * copied during submission; only endpoints and callback context remain borrowed.
+ * ESP32 returns NOT_SUPPORTED without starting DMA or retaining callbacks.
  * @retval ESY_OK Success.
  * @retval <0     Failure (returns ESY_ERR_NOT_SUPPORTED if the platform does
  * not support DMA for SPI).
@@ -317,16 +325,6 @@ extern esy_err_t esy_hal_spi_get_dma_trans_count_remaining(
  */
 extern bool esy_hal_spi_is_busy(esy_spi_t *spi);
 
-/** @brief Advance DMA completion/failed-transfer cleanup from the serialized owner task.
- * Built-in Pico/STM32 backends require periodic calls after DMA acceptance;
- * callbacks execute here after both directions and physical SPI have stopped.
- * Every initialized backend must supply the poll hook. Synchronous backends
- * may return OK immediately when no retirement work is pending.
- * Never call concurrently with SPI I/O/lifecycle or from an ISR.
- * @return OK, INVALID_ARG for NULL, STATE for a missing backend hook, or BUSY
- * while failed cleanup retains storage.
- */
-extern esy_err_t esy_hal_spi_poll(esy_spi_t *spi);
 
 /**
  * @brief Set SPI clock speed at runtime (optional).
@@ -342,10 +340,11 @@ extern esy_err_t esy_hal_spi_set_speed(esy_spi_t *spi, uint32_t speed_hz);
 /**
  * @brief Abort the current transaction (optional).
  *
- * Call from the serialized owner task. On STM32F4, success retires both DMA
- * directions, callbacks and wire activity, releases CS and cancels without a
- * terminal callback. Failure retains borrowed storage; continue polling or
- * retry abort before reuse or deinit. Unsupported ports return NOT_SUPPORTED.
+ * Call from the serialized owner outside callbacks. Success cancels DMA and
+ * retires borrowed storage without a terminal callback. Failure retains storage
+ * for a later abort retry. Pico cancellation disables the hardware instance;
+ * deinitialize/reinitialize before another operation. Unsupported ports return
+ * NOT_SUPPORTED. No caller progress hook is needed for normal completion.
  *
  * @param[in] spi SPI handle.
  * @retval ESY_OK Success.
@@ -362,7 +361,7 @@ extern esy_err_t esy_hal_spi_abort(esy_spi_t *spi);
  *
  * Uses @ref esy_spi_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation; DMA bits require native asynchronous transfers.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  spi      SPI handle.

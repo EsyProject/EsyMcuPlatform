@@ -5,22 +5,16 @@
  */
 
 #include "esy_hal_backend/esy_hb_pwm.h"
+#include <stdatomic.h>
 #include "esy_common/defs/peripheral/esy_pwm_defs.h"
 
 #include <stdint.h>
-#include <stdatomic.h>
 
 #include "stm32f4xx_hal.h"
 
 #include "esy_hal_backend/esy_hb_dma.h"
 
 #define STM32F4_PWM_MAX   8
-
-enum {
-  PWM_DMA_DONE = 1u << 0,
-  PWM_DMA_HALF = 1u << 1,
-  PWM_DMA_ERROR = 1u << 2,
-};
 
 typedef struct {
   TIM_HandleTypeDef htim;
@@ -33,17 +27,16 @@ typedef struct {
   uint8_t irq_priority;
 
   uint32_t saved_ccr;
-  bool enabled;
+  atomic_bool enabled;
   bool initialized;
 
   bool dma_loop;
-  bool dma_owned;
+  atomic_bool dma_owned;
   uint32_t dma_dreq;
   uint8_t dma_channel;
   uint8_t dma_resource;
   uint32_t dma_request;
   uint32_t saved_ccds;
-  atomic_uint dma_events;
   esy_dma_callback_t dma_callback;
   void *dma_callback_arg;
   esy_dma_callback_t dma_half_callback;
@@ -146,41 +139,45 @@ static esy_err_t compute_compare(const TIM_HandleTypeDef *htim, uint32_t arr,
   return ESY_OK;
 }
 
-/* DMA IRQs only touch timer registers and publish events. The serialized
- * owner retires generic DMA callback storage before releasing the borrow. */
+/* Native callbacks own DMA completion and never enter task-side abort. */
 static void pwm_dma_stop_request(stm32f4_pwm_ctx_t *c) {
   __HAL_TIM_DISABLE_DMA(&c->htim, c->dma_request);
   (void)HAL_TIM_PWM_Stop(&c->htim, c->channel);
 }
 
+static void pwm_finish_dma_from_isr(stm32f4_pwm_ctx_t *c, bool failed);
 static void pwm_dma_callback_wrapper(void *arg) {
   stm32f4_pwm_ctx_t *c = arg;
-  if (!c->dma_loop) __HAL_TIM_DISABLE_DMA(&c->htim, c->dma_request);
-  atomic_fetch_or_explicit(&c->dma_events, PWM_DMA_DONE, memory_order_release);
+  if (c->dma_loop) {
+    if (c->dma_callback != NULL) c->dma_callback(c->dma_callback_arg);
+  } else {
+    pwm_finish_dma_from_isr(c, false);
+  }
 }
 
 static void pwm_dma_half_wrapper(void *arg) {
   stm32f4_pwm_ctx_t *c = arg;
-  atomic_fetch_or_explicit(&c->dma_events, PWM_DMA_HALF, memory_order_release);
+  if (c->dma_half_callback != NULL) c->dma_half_callback(c->dma_half_callback_arg);
 }
 
 static void pwm_dma_error_wrapper(void *arg) {
-  stm32f4_pwm_ctx_t *c = arg;
-  pwm_dma_stop_request(c);
-  atomic_fetch_or_explicit(&c->dma_events, PWM_DMA_ERROR, memory_order_release);
+  pwm_finish_dma_from_isr(arg, true);
 }
 
-static esy_err_t pwm_dma_retire(stm32f4_pwm_ctx_t *c, bool stop_output) {
+static esy_err_t pwm_dma_retire(stm32f4_pwm_ctx_t *c, bool stop_output, bool from_isr) {
   if (!c->dma_owned) return ESY_OK;
   __HAL_TIM_DISABLE_DMA(&c->htim, c->dma_request);
   if (stop_output) {
     pwm_dma_stop_request(c);
     c->enabled = false;
   }
-  esy_err_t result = esy_hb_dma_abort(c, c->dma_dreq, c->dma_channel);
+  esy_err_t result = from_isr
+      ? (stop_output ? esy_hb_dma_abort_from_isr(c, c->dma_dreq, c->dma_channel)
+                     : esy_hb_dma_retire_from_isr(c, c->dma_dreq, c->dma_channel))
+      : esy_hb_dma_abort(c, c->dma_dreq, c->dma_channel);
   if (result != ESY_OK) return result;
   MODIFY_REG(c->htim.Instance->CR2, TIM_CR2_CCDS, c->saved_ccds);
-  c->dma_owned = false;
+  if (!from_isr) c->dma_owned = false;
   return ESY_OK;
 }
 
@@ -192,7 +189,6 @@ static void pwm_dma_clear(stm32f4_pwm_ctx_t *c) {
   c->dma_error_callback = NULL;
   c->dma_error_callback_arg = NULL;
   c->dma_loop = false;
-  atomic_store_explicit(&c->dma_events, 0u, memory_order_relaxed);
 }
 
 esy_err_t esy_hb_pwm_check_available(uint8_t phys_index) {
@@ -222,10 +218,9 @@ extern esy_err_t esy_hb_pwm_init(esy_pwm_t *pwm,
   c->phys_index  = config->phys_index;
   c->handler     = NULL;
   c->handler_arg = NULL;
-  c->enabled     = false;
+  atomic_init(&c->enabled, false);
   c->initialized = false;
-  c->dma_owned = false;
-  atomic_init(&c->dma_events, 0u);
+  atomic_init(&c->dma_owned, false);
   pwm_dma_clear(c);
 
   c->htim.Instance = tim;
@@ -363,6 +358,7 @@ extern esy_err_t esy_hb_pwm_enable_trigger_output(esy_pwm_t *pwm, bool enabled) 
   if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
   stm32f4_pwm_ctx_t *c = (stm32f4_pwm_ctx_t *)pwm->ctx;
   if (c->dma_owned) return ESY_ERR_BUSY;
+  if (!IS_TIM_MASTER_INSTANCE(c->htim.Instance)) return ESY_ERR_NOT_SUPPORTED;
 
   TIM_MasterConfigTypeDef cfg = {0};
   cfg.MasterOutputTrigger = enabled ? TIM_TRGO_UPDATE : TIM_TRGO_RESET;
@@ -428,11 +424,10 @@ extern esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
   c->dma_error_callback_arg = dma_config->error_callback_arg;
   dma_config->callback = pwm_dma_callback_wrapper;
   dma_config->callback_arg = c;
-  dma_config->half_callback = pwm_dma_half_wrapper;
-  dma_config->half_callback_arg = c;
+  dma_config->half_callback = c->dma_half_callback != NULL ? pwm_dma_half_wrapper : NULL;
+  dma_config->half_callback_arg = c->dma_half_callback != NULL ? c : NULL;
   dma_config->error_callback = pwm_dma_error_wrapper;
   dma_config->error_callback_arg = c;
-  atomic_store_explicit(&c->dma_events, 0u, memory_order_relaxed);
   result = esy_hb_dma_prepare(c, dma_config);
   if (result != ESY_OK) {
     pwm_dma_clear(c);
@@ -465,44 +460,22 @@ extern esy_err_t esy_hb_pwm_dma_output(esy_pwm_t *pwm,
 extern esy_err_t esy_hb_pwm_abort_dma(esy_pwm_t *pwm) {
   if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
   stm32f4_pwm_ctx_t *c = pwm->ctx;
-  esy_err_t result = pwm_dma_retire(c, true);
-  if (result != ESY_OK) return result;
+  esy_err_t result = pwm_dma_retire(c, true, false);
+  if (result != ESY_OK) {
+    return result;
+  }
   pwm_dma_clear(c);
   return ESY_OK;
 }
 
-extern esy_err_t esy_hb_pwm_poll(esy_pwm_t *pwm) {
-  if (!pwm || !pwm->ctx) return ESY_ERR_INVALID_ARG;
-  stm32f4_pwm_ctx_t *c = pwm->ctx;
-  if (!c->dma_owned) return ESY_OK;
-  unsigned events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
-  if ((events & PWM_DMA_ERROR) || (!c->dma_loop && (events & PWM_DMA_DONE))) {
-    esy_err_t result = pwm_dma_retire(c, (events & PWM_DMA_ERROR) != 0u);
-    if (result != ESY_OK) return result;
-    events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
-    if (events & PWM_DMA_ERROR) {
-      pwm_dma_stop_request(c);
-      c->enabled = false;
-    }
-    esy_dma_callback_t callback = (events & PWM_DMA_ERROR)
-        ? c->dma_error_callback : c->dma_callback;
-    void *arg = (events & PWM_DMA_ERROR)
-        ? c->dma_error_callback_arg : c->dma_callback_arg;
-    pwm_dma_clear(c);
-    if (callback != NULL) callback(arg);
-    return ESY_OK;
-  }
-  /* A finite TC arriving after the first load must remain pending for the
-   * retirement path on the next poll; never deliver it as a cycle event. */
-  unsigned notifications = PWM_DMA_HALF | (c->dma_loop ? PWM_DMA_DONE : 0u);
-  events = atomic_fetch_and_explicit(&c->dma_events,
-      ~notifications, memory_order_acq_rel);
-  if (events & PWM_DMA_ERROR) return ESY_OK;
-  if ((events & PWM_DMA_HALF) && c->dma_half_callback != NULL)
-    c->dma_half_callback(c->dma_half_callback_arg);
-  if (c->dma_loop && (events & PWM_DMA_DONE) && c->dma_callback != NULL)
-    c->dma_callback(c->dma_callback_arg);
-  return ESY_OK;
+static void pwm_finish_dma_from_isr(stm32f4_pwm_ctx_t *c, bool failed) {
+  if (!c->dma_owned) return;
+  if (pwm_dma_retire(c, failed, true) != ESY_OK) return;
+  esy_dma_callback_t callback = failed ? c->dma_error_callback : c->dma_callback;
+  void *arg = failed ? c->dma_error_callback_arg : c->dma_callback_arg;
+  pwm_dma_clear(c);
+  if (callback != NULL) callback(arg);
+  atomic_store_explicit(&c->dma_owned, false, memory_order_release);
 }
 
 extern esy_err_t esy_hb_pwm_set_wrap_handler(esy_pwm_t *pwm,
@@ -606,8 +579,9 @@ extern esy_err_t esy_hb_pwm_enable_complementary(esy_pwm_t *pwm,
 
 extern esy_err_t esy_hb_pwm_get_caps(const esy_pwm_t *pwm, uint32_t *out_caps) {
   if (!pwm || !pwm->ctx || !out_caps) return ESY_ERR_INVALID_ARG;
-  *out_caps = ESY_PWM_CAP_DMA_OUTPUT | ESY_PWM_CAP_WRAP_IRQ |
-              ESY_PWM_CAP_POLARITY;
+  const stm32f4_pwm_ctx_t *c = pwm->ctx;
+  *out_caps = ESY_PWM_CAP_WRAP_IRQ | ESY_PWM_CAP_POLARITY;
+  if (IS_TIM_CCDMA_INSTANCE(c->htim.Instance)) *out_caps |= ESY_PWM_CAP_DMA_OUTPUT;
   return ESY_OK;
 }
 

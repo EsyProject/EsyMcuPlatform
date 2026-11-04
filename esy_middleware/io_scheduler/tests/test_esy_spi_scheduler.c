@@ -207,7 +207,7 @@ void test_spi_create_submit_and_destroy(void) {
 
   req->len = 4u;
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_submit(gw, req));
-  TEST_ASSERT_EQUAL_UINT32(1u, task->notify_give_count);
+  TEST_ASSERT_EQUAL_UINT32(2u, task->notify_give_count);
 
   esy_spi_scheduler_test_iteration(gw);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_destroy(gw));
@@ -224,7 +224,7 @@ void test_spi_convenience_buffer_submit_uses_reserved_block(void) {
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_create(&s_spi, &cfg, &s_spi_scheduler_storage, &gw));
 
   TEST_ASSERT_EQUAL_INT32(
-      ESY_OK, esy_spi_scheduler_get_write_buffer_with_arg(&tx_buf, &rx_buf, gw));
+      ESY_OK, esy_spi_scheduler_get_read_write_buffer_with_arg(&tx_buf, &rx_buf, 1u, gw));
   TEST_ASSERT_NOT_NULL(tx_buf);
   TEST_ASSERT_NOT_NULL(rx_buf);
   tx_buf[0] = 0xA5u;
@@ -235,7 +235,7 @@ void test_spi_convenience_buffer_submit_uses_reserved_block(void) {
                                       NULL, gw));
 
   fake_esy_os_task_entry_t *task = fake_esy_os_task_get_last_created();
-  TEST_ASSERT_EQUAL_UINT32(1u, task->notify_give_count);
+  TEST_ASSERT_EQUAL_UINT32(2u, task->notify_give_count);
 
   esy_spi_scheduler_test_iteration(gw);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_destroy(gw));
@@ -252,22 +252,19 @@ void test_spi_convenience_api_reports_reserve_and_submit_errors(void) {
   uint8_t foreign_tx = 0x5Au;
 
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_INVALID_ARG,
-                          esy_spi_scheduler_get_write_buffer_with_arg(
-                              NULL, NULL, gw));
+                          esy_spi_scheduler_get_read_write_buffer_with_arg(NULL, NULL, 1u, gw));
 
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_create(&s_spi, &cfg, &s_spi_scheduler_storage, &gw));
 
   TEST_ASSERT_EQUAL_INT32(ESY_OK,
-                          esy_spi_scheduler_get_write_buffer_with_arg(
-                              &tx_buf, &rx_buf, gw));
+                          esy_spi_scheduler_get_read_write_buffer_with_arg(&tx_buf, &rx_buf, 1u, gw));
   TEST_ASSERT_NOT_NULL(tx_buf);
   TEST_ASSERT_NOT_NULL(rx_buf);
   reserved_tx = tx_buf;
   reserved_rx = rx_buf;
 
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_STATE,
-                          esy_spi_scheduler_get_write_buffer_with_arg(
-                              &tx_buf, &rx_buf, gw));
+                          esy_spi_scheduler_get_read_write_buffer_with_arg(&tx_buf, &rx_buf, 1u, gw));
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_STATE,
                           esy_spi_scheduler_submit_result_with_arg(
                               &foreign_tx, reserved_rx, 1u, NULL, NULL, spi_ignore_result, NULL,
@@ -305,7 +302,7 @@ void test_spi_convenience_api_can_submit_without_prior_buffer_reserve(void) {
                               NULL, gw));
 
   fake_esy_os_task_entry_t *task = fake_esy_os_task_get_last_created();
-  TEST_ASSERT_EQUAL_UINT32(1u, task->notify_give_count);
+  TEST_ASSERT_EQUAL_UINT32(2u, task->notify_give_count);
 
   esy_spi_scheduler_test_iteration(gw);
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_destroy(gw));
@@ -435,13 +432,13 @@ void test_spi_convenience_api_holds_single_outstanding_block_until_submit(void) 
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_spi_scheduler_create(&s_spi, &cfg, &s_spi_scheduler_storage, &gw));
 
   TEST_ASSERT_EQUAL_INT32(
-      ESY_OK, esy_spi_scheduler_get_write_buffer_with_arg(&tx_buf, &rx_buf, gw));
+      ESY_OK, esy_spi_scheduler_get_read_write_buffer_with_arg(&tx_buf, &rx_buf, 1u, gw));
   TEST_ASSERT_NOT_NULL(tx_buf);
   TEST_ASSERT_NOT_NULL(rx_buf);
 
   TEST_ASSERT_EQUAL_INT32(
       ESY_ERR_STATE,
-      esy_spi_scheduler_get_write_buffer_with_arg(&second_tx, &second_rx, gw));
+      esy_spi_scheduler_get_read_write_buffer_with_arg(&second_tx, &second_rx, 1u, gw));
   TEST_ASSERT_NULL(second_tx);
   TEST_ASSERT_NULL(second_rx);
 
@@ -527,12 +524,10 @@ void test_spi_scheduler_null_and_empty_handle_paths_are_safe(void) {
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_INVALID_ARG,
                           esy_spi_scheduler_submit(NULL, NULL));
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_INVALID_ARG,
-                          esy_spi_scheduler_get_write_buffer_with_arg(
-                              &tx_buf, NULL, NULL));
+                          esy_spi_scheduler_get_read_write_buffer_with_arg(&tx_buf, NULL, 1u, NULL));
   TEST_ASSERT_NULL(tx_buf);
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_INVALID_ARG,
-                          esy_spi_scheduler_get_write_buffer_with_arg(
-                              NULL, &rx_buf, NULL));
+                          esy_spi_scheduler_get_read_write_buffer_with_arg(NULL, &rx_buf, 1u, NULL));
   TEST_ASSERT_NULL(rx_buf);
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_INVALID_ARG,
                           esy_spi_scheduler_submit_result_with_arg(
@@ -802,11 +797,7 @@ void test_result_submit_reports_failure_and_requires_drain(void) {
   TEST_ASSERT_EQUAL(1u, s_spi_post_count);
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
 }
-static esy_err_t complete_from_poll(esy_spi_t *spi) {
-  fake_esy_hal_spi_complete_last_dma(spi);
-  return ESY_OK;
-}
-void test_worker_polls_backend_before_waiting_for_terminal_callback(void) {
+void test_worker_delivers_native_irq_result_on_its_next_iteration(void) {
   esy_spi_scheduler_config_t cfg = make_spi_cfg();
   attach_spi_storage(&cfg);
   esy_spi_scheduler_t *gw = NULL;
@@ -817,7 +808,7 @@ void test_worker_polls_backend_before_waiting_for_terminal_callback(void) {
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit_prepared_with_arg(tx, sizeof(tx), prepared_begin, prepared_complete, &fixture, gw));
   esy_spi_scheduler_test_iteration(gw);
   TEST_ASSERT_EQUAL(0u, fixture.completed);
-  fake_esy_hal_spi_set_poll_hook(&s_spi, complete_from_poll);
+  fake_esy_hal_spi_complete_last_dma(&s_spi);
   esy_spi_scheduler_test_iteration(gw);
   TEST_ASSERT_EQUAL(1u, fixture.completed);
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
@@ -954,7 +945,7 @@ static void process_retained_scheduler(esy_spi_scheduler_t *gw, bool worker) {
   else TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
 }
 
-void test_failed_submit_keeps_prepared_resources_and_slot_until_poll_retires_it(void) {
+void test_failed_submit_keeps_prepared_resources_until_terminal_irq(void) {
   for (unsigned worker = 0u; worker < 2u; ++worker) {
     setUp();
     esy_spi_scheduler_t *gw = NULL;
@@ -972,7 +963,6 @@ void test_failed_submit_keeps_prepared_resources_and_slot_until_poll_retires_it(
     prepared_fixture_t fixture = {0};
     fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_IO);
     fake_esy_hal_spi_set_failed_submit_retains_borrow(true);
-    fake_esy_hal_spi_set_poll_result(ESY_ERR_BUSY);
     fake_esy_hal_spi_set_abort_result(ESY_ERR_IO);
     TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit_prepared_with_arg(
         pixels, sizeof(pixels), prepared_begin, retained_prepared_complete,
@@ -992,9 +982,8 @@ void test_failed_submit_keeps_prepared_resources_and_slot_until_poll_retires_it(
       TEST_ASSERT_NULL(esy_spi_scheduler_get_write_block(gw));
       TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_spi_scheduler_destroy(gw));
     }
-    TEST_ASSERT_EQUAL_UINT(3u, fake_esy_hal_spi_get_poll_count(&s_spi));
     TEST_ASSERT_EQUAL_UINT(2u, fake_esy_hal_spi_get_abort_count(&s_spi));
-    fake_esy_hal_spi_set_poll_result(ESY_OK);
+    fake_esy_hal_spi_complete_last_dma(&s_spi);
     process_retained_scheduler(gw, worker != 0u);
     TEST_ASSERT_EQUAL_UINT(1u, fixture.prepared);
     TEST_ASSERT_EQUAL_UINT(1u, fixture.completed);
@@ -1018,7 +1007,6 @@ void test_failed_busy_unsupported_submit_never_falls_back_and_finishes_after_abo
   prepared_fixture_t fixture = {0};
   fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_NOT_SUPPORTED);
   fake_esy_hal_spi_set_failed_submit_retains_borrow(true);
-  fake_esy_hal_spi_set_poll_result(ESY_ERR_BUSY);
   fake_esy_hal_spi_set_abort_result(ESY_ERR_IO);
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit_prepared_with_arg(
       pixels, sizeof(pixels), prepared_begin, retained_prepared_complete,
@@ -1058,7 +1046,6 @@ void test_failed_full_duplex_submit_keeps_both_buffers_until_successful_abort(vo
   prepared_fixture_t fixture = {0};
   fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_IO);
   fake_esy_hal_spi_set_failed_submit_retains_borrow(true);
-  fake_esy_hal_spi_set_poll_result(ESY_ERR_BUSY);
   fake_esy_hal_spi_set_abort_result(ESY_ERR_BUSY);
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit_result_with_arg(tx, rx,
       sizeof(tx), NULL, NULL, retained_result_complete, &fixture, gw));
@@ -1075,5 +1062,185 @@ void test_failed_full_duplex_submit_keeps_both_buffers_until_successful_abort(vo
   fake_esy_hal_spi_complete_last_dma(&s_spi);
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
   TEST_ASSERT_EQUAL_UINT(1u, fixture.completed);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
+}
+
+void test_native_irq_retires_dma_and_owner_delivers_result_once(void) {
+  fake_esy_hal_spi_set_transfer_dma_async(true);
+  esy_spi_scheduler_core_config_t cfg = make_core_cfg();
+  esy_spi_scheduler_t *gw = NULL;
+  uint8_t pixels[8] = {0};
+  prepared_fixture_t fixture = {0};
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_create(&s_spi, &cfg,
+      &s_spi_scheduler_storage, &gw));
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit_prepared_with_arg(
+      pixels, sizeof(pixels), prepared_begin, prepared_complete, &fixture, gw));
+  TEST_ASSERT_EQUAL_UINT32(0u, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_spi_scheduler_next_wait_ms(gw));
+  for (unsigned i = 0u; i < 3u; ++i)
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(0u, fixture.completed);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_spi_scheduler_destroy(gw));
+  fake_esy_hal_spi_complete_last_dma(&s_spi);
+  TEST_ASSERT_EQUAL_UINT32(0u, fixture.completed);
+  TEST_ASSERT_FALSE(esy_hal_spi_is_busy(&s_spi));
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(1u, fixture.completed);
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(1u, fixture.completed);
+  /* A new request starts without inheriting the prior transaction's result. */
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit_prepared_with_arg(
+      pixels, sizeof(pixels), prepared_begin, prepared_complete, &fixture, gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_spi_scheduler_next_wait_ms(gw));
+  fake_esy_hal_spi_complete_last_dma(&s_spi);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(2u, fixture.completed);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_spi_scheduler_next_wait_ms(gw));
+}
+
+void test_os_worker_delivers_native_terminal_result_and_waits_while_idle(void) {
+  fake_esy_hal_spi_set_transfer_dma_async(true);
+  esy_spi_scheduler_config_t cfg = make_spi_cfg();
+  attach_spi_storage(&cfg);
+  esy_spi_scheduler_t *gw = NULL;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_create(&s_spi, &cfg,
+      &s_spi_scheduler_storage, &gw));
+  fake_esy_os_task_entry_t *task = fake_esy_os_task_get_last_created();
+  TEST_ASSERT_EQUAL_UINT32(1u, task->notify_value); /* Startup signal is latched. */
+  esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(gw);
+  req->len = 8u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit(gw, req));
+  esy_spi_scheduler_test_iteration(gw);
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_spi_scheduler_next_wait_ms(gw));
+  esy_spi_scheduler_test_iteration(gw);
+  TEST_ASSERT_TRUE(esy_hal_spi_is_busy(&s_spi));
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_spi_scheduler_destroy(gw));
+  fake_esy_hal_spi_complete_last_dma(&s_spi);
+  esy_spi_scheduler_test_iteration(gw);
+  TEST_ASSERT_FALSE(esy_hal_spi_is_busy(&s_spi));
+  TEST_ASSERT_EQUAL_UINT32(0u, task->notify_give_from_isr_count);
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
+}
+
+void test_failed_dma_submission_keeps_finite_cleanup_retry_and_owned_buffers(void) {
+  fake_esy_hal_spi_set_transfer_dma_async(true);
+  esy_spi_scheduler_core_config_t cfg = make_core_cfg();
+  esy_spi_scheduler_t *gw = NULL;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_create(&s_spi, &cfg,
+      &s_spi_scheduler_storage, &gw));
+  fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_IO);
+  fake_esy_hal_spi_set_failed_submit_retains_borrow(true);
+  fake_esy_hal_spi_set_abort_result(ESY_ERR_BUSY);
+  esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(gw);
+  req->len = 8u;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit(gw, req));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(1u, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_spi_scheduler_destroy(gw));
+  fake_esy_hal_spi_set_abort_result(ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, esy_spi_scheduler_next_wait_ms(gw));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
+}
+
+void test_descriptor_reservation_retains_single_direction_payload_support(void) {
+  for (unsigned rx_only = 0u; rx_only < 2u; ++rx_only) {
+    esy_spi_scheduler_core_config_t cfg = make_core_cfg();
+    cfg.tx_alloc_size = rx_only ? 0u : 8u;
+    cfg.rx_alloc_size = rx_only ? 8u : 0u;
+    esy_spi_scheduler_t *gw = NULL;
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_create(&s_spi, &cfg,
+        &s_spi_scheduler_storage, &gw));
+    esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(gw);
+    TEST_ASSERT_NOT_NULL(req);
+    if (rx_only) {
+      TEST_ASSERT_NULL(req->tx_buf);
+      TEST_ASSERT_NOT_NULL(req->rx_buf);
+    } else {
+      TEST_ASSERT_NOT_NULL(req->tx_buf);
+      TEST_ASSERT_NULL(req->rx_buf);
+      req->tx_buf[0] = 0x5au;
+    }
+    req->len = 3u;
+    req->result_callback = spi_ignore_result;
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit(gw, req));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
+  }
+}
+
+typedef struct {
+  esy_spi_scheduler_request_t *request;
+  esy_err_t status;
+  size_t transferred;
+  unsigned calls;
+} fallback_result_t;
+
+static void capture_fallback_result(esy_err_t status, uint8_t *rx, void *arg) {
+  fallback_result_t *capture = arg;
+  (void)rx;
+  capture->status = status;
+  capture->transferred = capture->request->transferred;
+  ++capture->calls;
+}
+
+void test_spi_dma_unsupported_falls_back_to_matching_halfword_operations(void) {
+  for (unsigned directions = 1u; directions < 4u; ++directions) {
+    setUp();
+    esy_spi_scheduler_core_config_t cfg = make_core_cfg();
+    esy_spi_scheduler_t *gw = NULL;
+    uint16_t tx[4] = {0x1234u, 0x5678u, 0x9abcu, 0xdef0u}, rx[4] = {0};
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_create(&s_spi, &cfg,
+        &s_spi_scheduler_storage, &gw));
+    fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_NOT_SUPPORTED);
+    esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(gw);
+    TEST_ASSERT_NOT_NULL(req);
+    fallback_result_t capture = {.request = req};
+    req->tx_buf = directions & 1u ? (uint8_t *)(void *)tx : NULL;
+    req->rx_buf = directions & 2u ? (uint8_t *)(void *)rx : NULL;
+    req->len = sizeof(tx);
+    req->transfer_size = ESY_DMA_TRANSFER_SIZE_16;
+    req->result_callback = capture_fallback_result;
+    req->result_callback_arg = &capture;
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit(gw, req));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+    TEST_ASSERT_EQUAL_UINT(1u, capture.calls);
+    TEST_ASSERT_EQUAL(ESY_OK, capture.status);
+    TEST_ASSERT_EQUAL(sizeof(tx), capture.transferred);
+    if (directions & 1u) TEST_ASSERT_EQUAL(sizeof(tx), fake_esy_hal_spi_get_last_tx_len(&s_spi));
+    TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
+  }
+}
+
+void test_spi_halfword_fallback_reports_partial_transfer_in_bytes(void) {
+  esy_spi_scheduler_core_config_t cfg = make_core_cfg();
+  esy_spi_scheduler_t *gw = NULL;
+  uint16_t tx[4] = {0};
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_create(&s_spi, &cfg,
+      &s_spi_scheduler_storage, &gw));
+  fake_esy_hal_spi_set_transfer_dma_result(ESY_ERR_NOT_SUPPORTED);
+  fake_esy_hal_spi_fail_write_after(0u, (int32_t)sizeof(uint16_t));
+  esy_spi_scheduler_request_t *req = esy_spi_scheduler_get_write_block(gw);
+  fallback_result_t capture = {.request = req};
+  req->tx_buf = (uint8_t *)(void *)tx;
+  req->rx_buf = NULL;
+  req->len = sizeof(tx);
+  req->transfer_size = ESY_DMA_TRANSFER_SIZE_16;
+  req->result_callback = capture_fallback_result;
+  req->result_callback_arg = &capture;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_submit(gw, req));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_core_process(gw));
+  TEST_ASSERT_EQUAL_UINT(1u, capture.calls);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, capture.status);
+  TEST_ASSERT_EQUAL(sizeof(uint16_t), capture.transferred);
   TEST_ASSERT_EQUAL(ESY_OK, esy_spi_scheduler_destroy(gw));
 }

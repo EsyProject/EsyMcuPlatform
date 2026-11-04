@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdalign.h>
+#include <stdatomic.h>
 
 #include "pico/time.h"
 #include "hardware/clocks.h"
@@ -25,6 +26,10 @@
 #include "esy_hb_xio_spi.pio.h"
 
 #define XIO_SPI_PIN_MASK_BITS 32u
+#define XIO_SPI_DMA_MAX_TAIL_READS 8192u
+#define XIO_SPI_DMA_MAX_CS_CYCLES 8192u
+#define XIO_SPI_DMA_TAIL_PIO_CYCLES 8u
+#define XIO_SPI_DMA_TAIL_SYNC_READS 16u
 
 typedef struct {
   esy_hb_xio_program_t prog;
@@ -59,26 +64,27 @@ typedef struct {
 
   esy_spi_dma_complete_cb_t pending_cb;
   void *pending_arg;
+  atomic_uint dma_events;
+  atomic_bool dma_finishing;
+  esy_spi_t *bound_spi;
   size_t tx_length;
   size_t rx_length;
-  esy_spi_t *bound_spi;
-  uint32_t tx_dreq;
-  uint32_t rx_dreq;
+  uint8_t tx_dreq;
+  uint8_t rx_dreq;
   uint8_t tx_channel;
   uint8_t rx_channel;
 
-  /* Only the serialized owner accesses these flags; DMA IRQs do not write
-   * this context. Keep future ISR publication separate from this flag byte. */
-  bool dma_active : 1;
-  bool tx_owned : 1;
-  bool rx_owned : 1;
-  bool dma_failed : 1;
-  bool wire_check_started : 1;
-  bool cs_monitor_claimed : 1;
-  bool cs_monitor_loaded : 1;
-  bool initialized : 1;
-  uint8_t tx_unit_bytes;
-  uint8_t rx_unit_bytes;
+  /* Submission/lifecycle is owner-serialized; the DMA dispatcher owns terminal
+   * aggregation, and dma_finishing excludes nested completion attempts. */
+  atomic_bool dma_active;
+  bool tx_owned;
+  bool rx_owned;
+  bool tx_route_valid;
+  bool rx_route_valid;
+  bool cs_monitor_claimed;
+  bool cs_monitor_loaded;
+  bool initialized;
+  uint8_t unit_bytes;
 } esy_xio_spi_ctx_t;
 
 _Static_assert(ESY_SPI_PRIV_BYTES >= sizeof(esy_xio_spi_ctx_t),
@@ -652,10 +658,13 @@ esy_err_t esy_hb_xio_spi_init(esy_spi_t *spi,
 
   esy_xio_spi_ctx_t *ctx = get_ctx(spi);
   memset(ctx, 0, sizeof(*ctx));
+  atomic_init(&ctx->dma_events, 0u);
+  atomic_init(&ctx->dma_finishing, false);
+  atomic_init(&ctx->dma_active, false);
+  ctx->bound_spi = spi;
 
   esy_err_t rc = xio_spi_load_and_config(ctx, cfg);
   if (rc == ESY_OK) {
-    ctx->bound_spi = spi;
     ctx->initialized = true;
     spi->ctx = ctx;
   } else {
@@ -664,12 +673,28 @@ esy_err_t esy_hb_xio_spi_init(esy_spi_t *spi,
   return rc;
 }
 
-void esy_hb_xio_spi_deinit(esy_spi_t *spi) {
-  if (!spi) return;
-  esy_xio_spi_ctx_t *c = get_ctx(spi);
-  if (c->dma_active) return;
-  if (!c->initialized) return;
+static esy_err_t xio_spi_flush_dma_reservations(esy_xio_spi_ctx_t *c) {
+  if (c->tx_route_valid) {
+    esy_err_t result = esy_hb_dma_release(c, c->tx_dreq, c->tx_channel);
+    if (result != ESY_OK) return result;
+    c->tx_route_valid = false;
+  }
+  if (c->rx_route_valid) {
+    esy_err_t result = esy_hb_dma_release(c, c->rx_dreq, c->rx_channel);
+    if (result != ESY_OK) return result;
+    c->rx_route_valid = false;
+  }
+  return ESY_OK;
+}
 
+esy_err_t esy_hb_xio_spi_deinit(esy_spi_t *spi) {
+  if (!spi) return ESY_ERR_INVALID_ARG;
+  esy_xio_spi_ctx_t *c = get_ctx(spi);
+  if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
+  if (!c->initialized) return ESY_OK;
+
+  esy_err_t ret = xio_spi_flush_dma_reservations(c);
+  if (ret != ESY_OK) return ret;
   esy_hb_xio_sm_stop(&c->sm);
   cs_monitor_release(c);
   esy_hb_xio_sm_release(&c->sm);
@@ -684,6 +709,7 @@ void esy_hb_xio_spi_deinit(esy_spi_t *spi) {
   }
   memset(c, 0, sizeof(*c));
   spi->ctx = NULL;
+  return ESY_OK;
 }
 
 static inline void wait_tx_done_blocking_master(esy_xio_spi_ctx_t *c) {
@@ -778,7 +804,7 @@ int32_t esy_hb_xio_spi_transfer_blocking(esy_spi_t *spi,
   if (!spi || (!tx_buf && !rx_buf) || !len) return ESY_ERR_INVALID_ARG;
   esy_xio_spi_ctx_t *c = get_ctx(spi);
   if (!c || !c->initialized) return ESY_ERR_STATE;
-  if (c->dma_active) return ESY_ERR_BUSY;
+  if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
   if (c->data_bits < 2 || c->data_bits > 8) return ESY_ERR_INVALID_ARG;
   if (c->is_three_wire && tx_buf && rx_buf) return ESY_ERR_NOT_SUPPORTED;
 
@@ -850,7 +876,7 @@ esy_err_t esy_hb_xio_spi_write_then_read_blocking(esy_spi_t *spi,
     return ESY_ERR_INVALID_ARG;
   esy_xio_spi_ctx_t *c = get_ctx(spi);
   if (!c || !c->initialized) return ESY_ERR_STATE;
-  if (c->dma_active) return ESY_ERR_BUSY;
+  if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
   if (!is_master(c) || !c->is_three_wire || c->data_bits < 2u ||
       c->data_bits > 8u || c->cpha || c->cpol)
     return ESY_ERR_NOT_SUPPORTED;
@@ -897,7 +923,7 @@ int32_t esy_hb_xio_spi_transfer16_blocking(esy_spi_t *spi,
   if (!spi || (!tx_buf && !rx_buf) || !len) return ESY_ERR_INVALID_ARG;
   esy_xio_spi_ctx_t *c = get_ctx(spi);
   if (!c || !c->initialized) return ESY_ERR_STATE;
-  if (c->dma_active) return ESY_ERR_BUSY;
+  if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
   if (c->data_bits < 9 || c->data_bits > 16) return ESY_ERR_INVALID_ARG;
   if (c->is_three_wire && tx_buf && rx_buf) return ESY_ERR_NOT_SUPPORTED;
 
@@ -971,30 +997,57 @@ int32_t esy_hb_xio_spi_read16_blocking(esy_spi_t *spi, uint16_t *rx_buf,
   return esy_hb_xio_spi_transfer16_blocking(spi, NULL, rx_buf, len);
 }
 
-/* DMA completion is retired by the serialized owner task. No DMA ISR waits
- * for PIO or invokes a user callback. Both channels must retire before buffers
- * and the HAL device reference can be released. */
-static esy_err_t retire_dma(esy_xio_spi_ctx_t *c, bool reset_sm) {
+enum { XIO_SPI_DMA_TX_DONE = 1u, XIO_SPI_DMA_RX_DONE = 2u, XIO_SPI_DMA_ERROR = 4u };
+
+static void xio_spi_finish_dma_from_isr(esy_xio_spi_ctx_t *c);
+
+/* The final direction callback retires native DMA and the PIO wire tail. */
+static void xio_spi_dma_publish(esy_xio_spi_ctx_t *c, unsigned event) {
+  atomic_fetch_or_explicit(&c->dma_events, event, memory_order_release);
+  xio_spi_finish_dma_from_isr(c);
+}
+
+static void xio_spi_dma_tx_done(void *arg) {
+  xio_spi_dma_publish(arg, XIO_SPI_DMA_TX_DONE);
+}
+
+static void xio_spi_dma_rx_done(void *arg) {
+  xio_spi_dma_publish(arg, XIO_SPI_DMA_RX_DONE);
+}
+
+static void xio_spi_dma_error(void *arg) {
+  xio_spi_dma_publish(arg, XIO_SPI_DMA_ERROR);
+}
+
+/* Both native routes retire before caller storage or its graph lease returns.
+ * Error paths stop the SM before bounded native DMA cancellation. */
+static esy_err_t retire_dma(esy_xio_spi_ctx_t *c, bool reset_sm, bool from_isr) {
   if (reset_sm) pio_sm_set_enabled(ctx_pio(c), c->sm_index, false);
   esy_err_t tx = ESY_OK, rx = ESY_OK;
   if (c->tx_owned) {
     size_t remaining = SIZE_MAX;
     (void)esy_hb_dma_get_trans_count_remaining(c->tx_dreq, c->tx_channel, &remaining);
-    tx = esy_hb_dma_abort(c, c->tx_dreq, c->tx_channel);
+    tx = (from_isr
+        ? (reset_sm ? esy_hb_dma_abort_from_isr(c, c->tx_dreq, c->tx_channel)
+                    : esy_hb_dma_retire_from_isr(c, c->tx_dreq, c->tx_channel))
+        : esy_hb_dma_abort(c, c->tx_dreq, c->tx_channel));
     if (tx == ESY_OK) {
       c->tx_owned = false;
-      c->tx_length = remaining <= c->tx_length / c->tx_unit_bytes
-          ? c->tx_length - remaining * c->tx_unit_bytes : 0u;
+      c->tx_length = remaining <= c->tx_length / c->unit_bytes
+          ? c->tx_length - remaining * c->unit_bytes : 0u;
     }
   }
   if (c->rx_owned) {
     size_t remaining = SIZE_MAX;
     (void)esy_hb_dma_get_trans_count_remaining(c->rx_dreq, c->rx_channel, &remaining);
-    rx = esy_hb_dma_abort(c, c->rx_dreq, c->rx_channel);
+    rx = (from_isr
+        ? (reset_sm ? esy_hb_dma_abort_from_isr(c, c->rx_dreq, c->rx_channel)
+                    : esy_hb_dma_retire_from_isr(c, c->rx_dreq, c->rx_channel))
+        : esy_hb_dma_abort(c, c->rx_dreq, c->rx_channel));
     if (rx == ESY_OK) {
       c->rx_owned = false;
-      c->rx_length = remaining <= c->rx_length / c->rx_unit_bytes
-          ? c->rx_length - remaining * c->rx_unit_bytes : 0u;
+      c->rx_length = remaining <= c->rx_length / c->unit_bytes
+          ? c->rx_length - remaining * c->unit_bytes : 0u;
     }
   }
   if (tx != ESY_OK) return tx;
@@ -1006,80 +1059,97 @@ static esy_err_t retire_dma(esy_xio_spi_ctx_t *c, bool reset_sm) {
     pio_sm_set_enabled(ctx_pio(c), c->sm_index, true);
   }
   cs_release(c);
-  c->dma_active = false;
+  if (!from_isr) c->dma_active = false;
   return ESY_OK;
 }
 
 bool esy_hb_xio_spi_is_busy(esy_spi_t *spi) {
-  return spi != NULL && get_ctx(spi)->dma_active;
+  return spi != NULL && (get_ctx(spi)->dma_active || get_ctx(spi)->dma_finishing);
 }
 
 esy_err_t esy_hb_xio_spi_abort(esy_spi_t *spi) {
   if (spi == NULL) return ESY_ERR_INVALID_ARG;
   esy_xio_spi_ctx_t *c = get_ctx(spi);
   if (!c->initialized) return ESY_ERR_STATE;
-  if (!c->dma_active) return ESY_OK;
-  esy_err_t ret = retire_dma(c, true);
+  bool expected = false;
+  if (!atomic_compare_exchange_strong_explicit(&c->dma_finishing, &expected,
+        true, memory_order_acq_rel, memory_order_acquire)) return ESY_ERR_BUSY;
+  esy_err_t ret = c->dma_active ? retire_dma(c, true, false) : ESY_OK;
+  if (ret == ESY_OK) ret = xio_spi_flush_dma_reservations(c);
   if (ret == ESY_OK) {
     c->pending_cb = NULL;
     c->pending_arg = NULL;
   }
+  atomic_store_explicit(&c->dma_finishing, false, memory_order_release);
   return ret;
 }
 
-esy_err_t esy_hb_xio_spi_poll(esy_spi_t *spi) {
-  if (spi == NULL) return ESY_ERR_INVALID_ARG;
-  esy_xio_spi_ctx_t *c = get_ctx(spi);
-  if (!c->initialized) return ESY_ERR_STATE;
-  if (!c->dma_active) return ESY_OK;
-  uint32_t errors = ((c->tx_owned ? dma_channel_hw_addr(c->tx_channel)->ctrl_trig : 0u) |
-                     (c->rx_owned ? dma_channel_hw_addr(c->rx_channel)->ctrl_trig : 0u)) &
-                    (DMA_CH0_CTRL_TRIG_READ_ERROR_BITS |
-                     DMA_CH0_CTRL_TRIG_WRITE_ERROR_BITS);
-  c->dma_failed = c->dma_failed || errors != 0u;
-  if (!c->dma_failed && ((c->tx_owned && esy_hb_dma_is_busy(c->tx_dreq, c->tx_channel)) ||
-                  (c->rx_owned && esy_hb_dma_is_busy(c->rx_dreq, c->rx_channel))))
-    return ESY_ERR_BUSY;
-  size_t tx_remaining = 0u, rx_remaining = 0u;
-  if ((c->tx_owned && esy_hb_dma_get_trans_count_remaining(c->tx_dreq, c->tx_channel,
-                                                &tx_remaining) != ESY_OK) ||
-      (c->rx_owned && esy_hb_dma_get_trans_count_remaining(c->rx_dreq, c->rx_channel,
-                                                &rx_remaining) != ESY_OK))
-    return ESY_ERR_FAIL;
-  bool failed = c->dma_failed || tx_remaining || rx_remaining;
-  if (!failed) {
-    PIO pio = ctx_pio(c);
-    if (!pio_sm_is_tx_fifo_empty(pio, c->sm_index)) return ESY_ERR_BUSY;
-    /* Slave RX DMA counts every sampled frame, including dummy RX for TX-only.
-     * Unlike a master, it may already be waiting for the next CS assertion;
-     * no future stall/clock event is needed to certify this transaction. */
-    if (is_master(c) && c->pin_trigger != ESY_PIN_UNUSED) {
-      uint pc = pio_sm_get_pc(pio, c->sm_index);
-      if (pc != c->prog_offs && pc != c->prog_offs + 1u) return ESY_ERR_BUSY;
-    } else if (is_master(c)) {
-      uint32_t mask = 1u << (PIO_FDEBUG_TXSTALL_LSB + c->sm_index);
-      if (!c->wire_check_started) {
-        pio->fdebug = mask;
-        c->wire_check_started = true;
-        return ESY_ERR_BUSY;
-      }
-      if (!(pio->fdebug & mask)) return ESY_ERR_BUSY;
+/* Once RX sampled the last frame, each master program reaches its idle
+ * WAIT/TX stall within eight PIO cycles, including delay slots. Budget from
+ * the programmed 16.8 divider, independently of OS ticks or external triggers.
+ * Slave frame completion depends on the RX count, never on another SCK/CS edge. */
+static uint64_t xio_spi_tail_budget(const esy_xio_spi_ctx_t *c) {
+  if (!is_master(c)) return 0u;
+  const uint32_t raw_divider = ctx_pio(c)->sm[c->sm_index].clkdiv >> 8u;
+  const uint32_t divider = raw_divider != 0u ? raw_divider : (65536u << 8u);
+  return ((uint64_t)divider * XIO_SPI_DMA_TAIL_PIO_CYCLES + 255u) / 256u +
+      XIO_SPI_DMA_TAIL_SYNC_READS;
+}
+
+static bool xio_spi_finish_wire(esy_xio_spi_ctx_t *c) {
+  if (!is_master(c)) return true;
+  PIO pio = ctx_pio(c);
+  const uint32_t mask = 1u << (PIO_FDEBUG_TXSTALL_LSB + c->sm_index);
+  const uint64_t derived = xio_spi_tail_budget(c);
+  uint32_t budget = derived <= XIO_SPI_DMA_MAX_TAIL_READS
+      ? (uint32_t)derived : XIO_SPI_DMA_MAX_TAIL_READS;
+  pio->fdebug = mask;
+  while (budget-- != 0u) {
+    if (!pio_sm_is_tx_fifo_empty(pio, c->sm_index)) continue;
+    if ((pio->fdebug & mask) != 0u) return true;
+    if (c->pin_trigger != ESY_PIN_UNUSED) {
+      const uint pc = pio_sm_get_pc(pio, c->sm_index);
+      if (pc == c->prog_offs || pc == c->prog_offs + 1u) return true;
     }
   }
+  return false;
+}
+
+static void xio_spi_finish_dma_from_isr(esy_xio_spi_ctx_t *c) {
+  if (!c->dma_active) return;
+  const unsigned events = atomic_load_explicit(&c->dma_events, memory_order_acquire);
+  if (!(events & XIO_SPI_DMA_ERROR) &&
+      (events & (XIO_SPI_DMA_TX_DONE | XIO_SPI_DMA_RX_DONE)) !=
+          (XIO_SPI_DMA_TX_DONE | XIO_SPI_DMA_RX_DONE)) return;
+  bool expected = false;
+  if (!atomic_compare_exchange_strong_explicit(&c->dma_finishing, &expected,
+        true, memory_order_acq_rel, memory_order_acquire)) return;
+  bool failed = (events & XIO_SPI_DMA_ERROR) != 0u;
+  size_t tx_remaining = 0u, rx_remaining = 0u;
+  if ((c->tx_owned && esy_hb_dma_get_trans_count_remaining(c->tx_dreq,
+          c->tx_channel, &tx_remaining) != ESY_OK) ||
+      (c->rx_owned && esy_hb_dma_get_trans_count_remaining(c->rx_dreq,
+          c->rx_channel, &rx_remaining) != ESY_OK)) failed = true;
+  failed = failed || tx_remaining != 0u || rx_remaining != 0u;
+  if (!failed && !xio_spi_finish_wire(c)) failed = true;
   esy_spi_dma_transfer_result_t result = {
-      .status = c->dma_failed ? ESY_SPI_DMA_TRANSFER_DMA_ERROR :
-                failed ? ESY_SPI_DMA_TRANSFER_SHORT : ESY_SPI_DMA_TRANSFER_OK,
-      .tx_transferred = c->tx_owned ? c->tx_length - tx_remaining * c->tx_unit_bytes : c->tx_length,
-      .rx_transferred = c->rx_owned ? c->rx_length - rx_remaining * c->rx_unit_bytes : c->rx_length,
+      .status = failed ? ESY_SPI_DMA_TRANSFER_DMA_ERROR : ESY_SPI_DMA_TRANSFER_OK,
+      .tx_transferred = tx_remaining <= c->tx_length / c->unit_bytes
+          ? c->tx_length - tx_remaining * c->unit_bytes : 0u,
+      .rx_transferred = rx_remaining <= c->rx_length / c->unit_bytes
+          ? c->rx_length - rx_remaining * c->unit_bytes : 0u,
   };
-  esy_err_t ret = retire_dma(c, failed);
-  if (ret != ESY_OK) return ret;
+  if (retire_dma(c, failed, true) != ESY_OK) {
+    atomic_store_explicit(&c->dma_finishing, false, memory_order_release);
+    return;
+  }
   esy_spi_dma_complete_cb_t cb = c->pending_cb;
   void *arg = c->pending_arg;
   c->pending_cb = NULL;
   c->pending_arg = NULL;
-  if (cb != NULL) cb(spi, &result, arg);
-  return ESY_OK;
+  if (cb != NULL) cb(c->bound_spi, &result, arg);
+  atomic_store_explicit(&c->dma_active, false, memory_order_release);
+  atomic_store_explicit(&c->dma_finishing, false, memory_order_release);
 }
 
 esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
@@ -1090,14 +1160,16 @@ esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
   if (!spi || !tx_dma_config || !rx_dma_config) return ESY_ERR_INVALID_ARG;
   esy_xio_spi_ctx_t *c = get_ctx(spi);
   if (!c || !c->initialized) return ESY_ERR_STATE;
-  if (c->dma_active) return ESY_ERR_BUSY;
+  if (c->dma_active || c->dma_finishing) return ESY_ERR_BUSY;
   if (tx_dma_config->circular || rx_dma_config->circular)
     return ESY_ERR_NOT_SUPPORTED;
   if (tx_dma_config->inner.channel == rx_dma_config->inner.channel ||
       tx_dma_config->inner.channel >= NUM_DMA_CHANNELS ||
       rx_dma_config->inner.channel >= NUM_DMA_CHANNELS)
     return ESY_ERR_INVALID_ARG;
-  if (tx_dma_config->length != rx_dma_config->length ||
+  if (tx_dma_config->inner.dreq > UINT8_MAX ||
+      rx_dma_config->inner.dreq > UINT8_MAX ||
+      tx_dma_config->length != rx_dma_config->length ||
       tx_dma_config->transfer_size != rx_dma_config->transfer_size)
     return ESY_ERR_INVALID_ARG;
   esy_dma_config_t tx = *tx_dma_config, rx = *rx_dma_config;
@@ -1115,6 +1187,15 @@ esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
         (c->data_bits == 16u && tx_dma_config->transfer_size == ESY_DMA_TRANSFER_SIZE_16)))
     return ESY_ERR_NOT_SUPPORTED;
 
+  if (xio_spi_tail_budget(c) > XIO_SPI_DMA_MAX_TAIL_READS)
+    return ESY_ERR_NOT_SUPPORTED;
+  if (is_master(c) && c->role != ESY_SPI_ROLE_MASTER_NO_CS && c->pin_cs != ESY_PIN_UNUSED) {
+    const uint64_t cs_cycles = (((uint64_t)c->cs_hold_ns + c->cs_inactive_ns) *
+        clock_get_hz(clk_sys) + 999999999ull) / 1000000000ull;
+    if (cs_cycles > XIO_SPI_DMA_MAX_CS_CYCLES) return ESY_ERR_NOT_SUPPORTED;
+  }
+  esy_err_t flushed = xio_spi_flush_dma_reservations(c);
+  if (flushed != ESY_OK) return flushed;
   PIO pio = ctx_pio(c);
   uint smi = c->sm_index;
 
@@ -1124,34 +1205,32 @@ esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
 
   c->pending_cb = complete_cb;
   c->pending_arg = user_data;
+  atomic_store_explicit(&c->dma_events, 0u, memory_order_relaxed);
   c->tx_length = tx_dma_config->length;
   c->rx_length = rx_dma_config->length;
-  c->tx_unit_bytes = 1u << tx_dma_config->transfer_size;
-  c->rx_unit_bytes = 1u << rx_dma_config->transfer_size;
-  c->wire_check_started = false;
+  c->unit_bytes = 1u << tx_dma_config->transfer_size;
   c->tx_owned = false;
   c->rx_owned = false;
-  c->dma_failed = false;
   c->tx_dreq = tx_dma_config->inner.dreq;
   c->rx_dreq = rx_dma_config->inner.dreq;
   c->tx_channel = tx_dma_config->inner.channel;
   c->rx_channel = rx_dma_config->inner.channel;
 
   rx_dma_config->inner.direction = ESY_DMA_PERIPH_TO_MEM;
-  const size_t rx_lane = c->in_shift_right ? sizeof(uint32_t) - c->rx_unit_bytes : 0u;
+  const size_t rx_lane = c->in_shift_right ? sizeof(uint32_t) - c->unit_bytes : 0u;
   rx_dma_config->src = (uint8_t *)&pio->rxf[smi] + rx_lane;
-  rx_dma_config->callback = NULL;
-  rx_dma_config->callback_arg = NULL;
-  rx_dma_config->error_callback = NULL;
-  rx_dma_config->error_callback_arg = NULL;
+  rx_dma_config->callback = xio_spi_dma_rx_done;
+  rx_dma_config->callback_arg = c;
+  rx_dma_config->error_callback = xio_spi_dma_error;
+  rx_dma_config->error_callback_arg = c;
 
   tx_dma_config->inner.direction = ESY_DMA_MEM_TO_PERIPH;
-  const size_t tx_lane = c->out_shift_right ? 0u : sizeof(uint32_t) - c->tx_unit_bytes;
+  const size_t tx_lane = c->out_shift_right ? 0u : sizeof(uint32_t) - c->unit_bytes;
   tx_dma_config->dst = (uint8_t *)&pio->txf[smi] + tx_lane;
-  tx_dma_config->callback = NULL;
-  tx_dma_config->callback_arg = NULL;
-  tx_dma_config->error_callback = NULL;
-  tx_dma_config->error_callback_arg = NULL;
+  tx_dma_config->callback = xio_spi_dma_tx_done;
+  tx_dma_config->callback_arg = c;
+  tx_dma_config->error_callback = xio_spi_dma_error;
+  tx_dma_config->error_callback_arg = c;
 
   esy_err_t err = esy_hb_dma_prepare(c, rx_dma_config);
   if (err != ESY_OK) {
@@ -1160,25 +1239,33 @@ esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
     return err;
   }
   c->rx_owned = true;
+  c->rx_route_valid = true;
   err = esy_hb_dma_prepare(c, tx_dma_config);
   if (err != ESY_OK) {
-    /* The Pico DMA abort contract synchronously retires valid channels. */
-    (void)esy_hb_dma_abort(c, c->rx_dreq, c->rx_channel);
-    c->rx_owned = false;
+    c->tx_length = 0u; /* This direction was never prepared or started. */
+    esy_err_t cleanup = retire_dma(c, true, false);
+    if (cleanup != ESY_OK) {
+      c->dma_active = true;
+      return cleanup;
+    }
     c->pending_cb = NULL;
     c->pending_arg = NULL;
     return err;
   }
   c->tx_owned = true;
+  c->tx_route_valid = true;
   c->dma_active = true;
   cs_assert(c);
   uint32_t mask = (1u << tx_dma_config->inner.channel) |
                   (1u << rx_dma_config->inner.channel);
   err = esy_hb_dma_start(c, mask);
   if (err != ESY_OK) {
+    esy_err_t cleanup = retire_dma(c, true, false);
+    if (cleanup != ESY_OK) {
+      return cleanup;
+    }
     c->pending_cb = NULL;
     c->pending_arg = NULL;
-    (void)retire_dma(c, true);
   }
   return err;
 }

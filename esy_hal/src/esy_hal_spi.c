@@ -115,9 +115,6 @@ static esy_err_t vt_get_phys_index(const esy_spi_t *spi, uint8_t *out_index) {
 static bool vt_is_busy(esy_spi_t *spi) {
   return esy_hb_spi_is_busy(spi);
 }
-static esy_err_t vt_poll(esy_spi_t *spi) {
-  return esy_hb_spi_poll(spi);
-}
 
 /* -------- speed and abort -------- */
 
@@ -148,7 +145,6 @@ static const esy_spi_vtable_t k_spi_ops = {
     .get_caps = vt_get_caps,
     .get_phys_index = vt_get_phys_index,
     .is_busy = vt_is_busy,
-    .poll = vt_poll,
     .set_speed = vt_set_speed,
     .abort = vt_abort,
     .get_dma_trans_count_remaining = esy_hb_spi_get_dma_trans_count_remaining,
@@ -333,6 +329,7 @@ esy_err_t esy_hal_spi_register_device(
   }
   if (binding->spi != NULL) return ESY_ERR_STATE;
   memset(binding, 0, sizeof(*binding));
+  atomic_init(&binding->async_ref_held, false);
   binding->spi = spi;
   binding->transition = standard_spi_transition;
   ctx = spi_device_ctx(binding);
