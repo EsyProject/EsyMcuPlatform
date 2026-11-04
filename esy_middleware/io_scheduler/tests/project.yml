@@ -46,11 +46,16 @@
     - ../../../esy_common/ds/src/esy_block_ring.c
     - ../../../esy_common/ds/src/esy_prio_slot_queue.c
     - ../src/esy_uart_tx_scheduler.c
+    - ../src/esy_uart_tx_scheduler_os.c
     - ../src/esy_spi_scheduler.c
     - ../src/esy_spi_scheduler_core.c
+    - ../src/esy_dma_scheduler_core.c
+    - ../src/esy_pwm_scheduler_core.c
     - ../../../esy_test/fake/os/fake_esy_os.c
     - ../../../esy_test/fake/os/fake_esy_os_task.c
+    - ../../../esy_test/fake/os/fake_esy_os_queue.c
     - ../../../esy_test/fake/hal/fake_esy_hal_dma.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_pwm.c
     - ../../../esy_test/fake/hal/fake_esy_hal_spi.c
     - ../../../esy_test/fake/hal/fake_esy_hal_system.c
     - ../../../esy_test/fake/hal/fake_esy_hal_uart.c

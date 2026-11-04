@@ -5,6 +5,8 @@
 
 from pathlib import Path
 import json
+import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -24,14 +26,18 @@ if(PROVIDE_DEPENDENCIES)
     if(PROVIDE_OS)
         add_library(esy_os STATIC
             "${PLATFORM_ROOT}/esy_test/fake/os/fake_esy_os.c"
-            "${PLATFORM_ROOT}/esy_test/fake/os/fake_esy_os_task.c")
+            "${PLATFORM_ROOT}/esy_test/fake/os/fake_esy_os_task.c"
+            "${PLATFORM_ROOT}/esy_test/fake/os/fake_esy_os_queue.c")
         target_include_directories(esy_os PUBLIC "${PLATFORM_ROOT}/esy_middleware/os/include")
         target_link_libraries(esy_os PUBLIC esy_common)
     endif()
-    add_library(esy_hal STATIC "${PLATFORM_ROOT}/esy_test/fake/hal/fake_esy_hal_system.c")
+    add_library(esy_hal STATIC)
+    if(ENABLE_ESY_SYSTEM)
+        target_sources(esy_hal PRIVATE "${PLATFORM_ROOT}/esy_test/fake/hal/fake_esy_hal_system.c")
+    endif()
     target_include_directories(esy_hal PUBLIC "${PLATFORM_ROOT}/esy_hal/include")
     target_link_libraries(esy_hal PUBLIC esy_common)
-    foreach(feature IN ITEMS UART SPI DMA)
+    foreach(feature IN ITEMS UART SPI DMA PWM)
         if(ENABLE_ESY_${feature})
             string(TOLOWER ${feature} lower)
             if(REAL_SPI_HAL AND feature STREQUAL "SPI")
@@ -53,11 +59,15 @@ if(PROVIDE_DEPENDENCIES)
     endforeach()
 endif()
 if(ENABLE_ESY_IO_SCHEDULER)
-    add_subdirectory("${PLATFORM_ROOT}/esy_middleware/io_scheduler" io_scheduler)
+    if(USE_UMBRELLA)
+        add_subdirectory("${PLATFORM_ROOT}/esy_middleware" middleware)
+    else()
+        add_subdirectory("${PLATFORM_ROOT}/esy_middleware/io_scheduler" io_scheduler)
+    endif()
     if(TARGET esy_io_scheduler)
         message(FATAL_ERROR "Unexpected aggregate target")
     endif()
-    foreach(adapter IN ITEMS esy_spi_scheduler esy_uart_tx_scheduler esy_spi_scheduler_core)
+    foreach(adapter IN ITEMS esy_spi_scheduler esy_uart_tx_scheduler_os esy_uart_tx_scheduler esy_spi_scheduler_core esy_dma_scheduler_core esy_pwm_scheduler_core)
         if(TARGET ${adapter})
             get_target_property(dependencies ${adapter} INTERFACE_LINK_LIBRARIES)
             foreach(dependency IN LISTS dependencies)
@@ -69,7 +79,7 @@ if(ENABLE_ESY_IO_SCHEDULER)
             message(FATAL_ERROR "Missing adapter: ${adapter}")
         endif()
     endforeach()
-    foreach(core IN ITEMS esy_spi_scheduler_core)
+    foreach(core IN ITEMS esy_spi_scheduler_core esy_uart_tx_scheduler esy_dma_scheduler_core esy_pwm_scheduler_core)
         if(TARGET ${core})
             get_target_property(dependencies ${core} INTERFACE_LINK_LIBRARIES)
             if("esy_os" IN_LIST dependencies)
@@ -80,12 +90,30 @@ if(ENABLE_ESY_IO_SCHEDULER)
     foreach(link_target IN LISTS EXPECTED_TARGETS)
         foreach(language IN ITEMS c cpp)
             add_executable(${link_target}_${language} ${link_target}.${language})
-            target_link_libraries(${link_target}_${language} PRIVATE ${link_target})
+            if(USE_UMBRELLA)
+                target_link_libraries(${link_target}_${language} PRIVATE esy_middleware)
+            else()
+                target_link_libraries(${link_target}_${language} PRIVATE ${link_target})
+            endif()
             if(REAL_SPI_HAL)
                 target_link_options(${link_target}_${language} PRIVATE -Wl,--gc-sections)
             endif()
         endforeach()
     endforeach()
+    if(README_EXAMPLES)
+        foreach(language IN ITEMS c cpp)
+            add_executable(readme_${language} readme.${language})
+            if(language STREQUAL "cpp")
+                # The C examples use designated initializers, standardized in C++20.
+                target_compile_features(readme_${language} PRIVATE cxx_std_20)
+            endif()
+            target_link_libraries(readme_${language} PRIVATE
+                esy_uart_tx_scheduler esy_pwm_scheduler_core)
+            if(TARGET esy_uart_tx_scheduler_os)
+                target_link_libraries(readme_${language} PRIVATE esy_uart_tx_scheduler_os)
+            endif()
+        endforeach()
+    endif()
     if(REAL_SPI_HAL)
         add_executable(spi_hal_contract
             "${PLATFORM_ROOT}/esy_middleware/io_scheduler/tests/fixtures/spi_hal/consumer.c")
@@ -103,7 +131,7 @@ project(io_scheduler_umbrella_consumer LANGUAGES C)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(esy_feature_import.cmake)
 add_subdirectory("${PLATFORM_ROOT}/esy_middleware" middleware)
-foreach(adapter IN ITEMS esy_spi_scheduler esy_spi_scheduler_core esy_uart_tx_scheduler)
+foreach(adapter IN ITEMS esy_spi_scheduler esy_spi_scheduler_core esy_uart_tx_scheduler esy_dma_scheduler_core esy_pwm_scheduler_core)
     if(TARGET ${adapter})
         message(FATAL_ERROR "Disabled I/O schedulers assembled target ${adapter}")
     endif()
@@ -117,6 +145,9 @@ CALLS = {
     "esy_spi_scheduler": "esy_spi_scheduler_create(NULL, NULL, NULL, NULL)",
     "esy_spi_scheduler_core": "esy_spi_scheduler_core_create(NULL, NULL, NULL, NULL)",
     "esy_uart_tx_scheduler": "esy_uart_tx_scheduler_init(NULL, NULL, NULL)",
+    "esy_uart_tx_scheduler_os": "esy_uart_tx_scheduler_os_create(NULL, NULL, NULL)",
+    "esy_dma_scheduler_core": "esy_dma_scheduler_core_init(NULL, NULL, NULL)",
+    "esy_pwm_scheduler_core": "esy_pwm_scheduler_core_init(NULL, NULL, NULL)",
 }
 
 
@@ -133,6 +164,29 @@ def consumer(adapters):
 
 
 class IoSchedulerConsumerTests(unittest.TestCase):
+    def test_pwm_terminal_irq_racing_progress_clear_retains_completion(self):
+        fixture = ROOT / "esy_middleware/io_scheduler/tests/fixtures/pwm_events"
+        with tempfile.TemporaryDirectory(prefix="PWM event race consumer ") as directory:
+            executable = Path(directory) / "consumer"
+            command = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                       "-I", str(fixture)]
+            for relative in ("esy_middleware/io_scheduler/include", "esy_hal/include",
+                             "esy_common/defs/include", "esy_common/device/include",
+                             "esy_common/utils/include", "esy_common/ds/include",
+                             "esy_test/fake/hal"):
+                command += ["-I", str(ROOT / relative)]
+            command += [str(fixture / "consumer.c")]
+            for relative in ("esy_middleware/io_scheduler/src/esy_pwm_scheduler_core.c",
+                             "esy_common/ds/src/esy_block_ring.c",
+                             "esy_test/fake/hal/fake_esy_hal_pwm.c"):
+                command.append(str(ROOT / relative))
+            result = subprocess.run(command + ["-o", str(executable)],
+                                    capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True,
+                                    timeout=10)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def check_umbrella(self, overrides):
         flags = dict(ESY_RTOS="None")
         flags.update(overrides)
@@ -153,9 +207,10 @@ class IoSchedulerConsumerTests(unittest.TestCase):
 
     def check(self, adapters=(), overrides=None, error=None):
         flags = dict(ENABLE_ESY_IO_SCHEDULER="ON", ENABLE_ESY_UART="OFF", ENABLE_ESY_SPI="OFF",
-                     ENABLE_ESY_DMA="ON", ENABLE_ESY_SYSTEM="ON", ESY_RTOS="FreeRTOS",
+                     ENABLE_ESY_DMA="OFF", ENABLE_ESY_PWM="OFF", ENABLE_ESY_SYSTEM="ON", ESY_RTOS="FreeRTOS",
+                     ENABLE_ESY_DMA_SCHEDULER="OFF", ENABLE_ESY_PWM_SCHEDULER="OFF",
                      PROVIDE_DEPENDENCIES="ON", PROVIDE_OS="ON",
-                     REAL_SPI_HAL="OFF",
+                     REAL_SPI_HAL="OFF", USE_UMBRELLA="OFF", README_EXAMPLES="OFF",
                      ENABLE_ESY_COMMON_DS="ON", ENABLE_ESY_COMMON_PROTOCOL="OFF")
         flags.update(overrides or {})
         with tempfile.TemporaryDirectory(prefix="io scheduler consumer ") as d:
@@ -168,7 +223,17 @@ class IoSchedulerConsumerTests(unittest.TestCase):
             for target in targets:
                 for extension in ("c", "cpp"):
                     (project / f"{target}.{extension}").write_text(consumer((target,)))
-            cores = tuple(target for target in targets if target.endswith("_core"))
+            if flags["README_EXAMPLES"] == "ON":
+                examples = re.findall(r"^```c\n(.*?)^```", (ROOT /
+                    "esy_middleware/io_scheduler/README.md").read_text(), re.MULTILINE | re.DOTALL)
+                examples = [code for code in examples if
+                    "esy_uart_tx_scheduler_os" not in code or "esy_uart_tx_scheduler_os" in targets]
+                self.assertGreaterEqual(len(examples), 2)
+                for extension in ("c", "cpp"):
+                    (project / f"readme.{extension}").write_text(
+                        "\n".join(examples) + "\nint main(void) { return 0; }\n")
+            cores = tuple(target for target in targets
+                          if target.endswith("_core") or target == "esy_uart_tx_scheduler")
             features = "".join(f'set({key} "{value}")\n' for key, value in flags.items())
             features += 'set(EXPECTED_TARGETS "' + ";".join(targets) + '")\n'
             (project / "esy_feature_import.cmake").write_text(features)
@@ -191,6 +256,11 @@ class IoSchedulerConsumerTests(unittest.TestCase):
                 self.assertNotIn("esy_middleware/os", command_text)
             self.assertEqual({f"{target}.c" for target in targets}, sources)
             self.assertNotIn("esy_middleware/protocol/src", command_text)
+            if flags["ENABLE_ESY_SYSTEM"] == "OFF":
+                self.assertNotIn("fake_esy_hal_system.c", command_text)
+            if flags["ENABLE_ESY_DMA"] == "OFF":
+                self.assertNotIn("fake_esy_hal_dma.c", command_text)
+                self.assertNotIn("esy_hal/src/esy_hal_dma.c", command_text)
             if flags["ENABLE_ESY_IO_SCHEDULER"] == "ON":
                 for item in json.loads(command_text):
                     if Path(item["file"]).stem in cores:
@@ -198,6 +268,9 @@ class IoSchedulerConsumerTests(unittest.TestCase):
                 for target in targets:
                     for language in ("c", "cpp"):
                         self.assertEqual(0, subprocess.run([str(project / f"out/{target}_{language}")]).returncode)
+                if flags["README_EXAMPLES"] == "ON":
+                    for language in ("c", "cpp"):
+                        self.assertEqual(0, subprocess.run([str(project / f"out/readme_{language}")]).returncode)
                 if flags["REAL_SPI_HAL"] == "ON":
                     self.assertIn("esy_hal/src/esy_hal_spi.c", command_text)
                     self.assertIn("esy_hal/src/esy_hal_spi_io.c", command_text)
@@ -226,9 +299,12 @@ class IoSchedulerConsumerTests(unittest.TestCase):
             ENABLE_ESY_SPI_SCHEDULER="ON", ESY_RTOS="None", PROVIDE_OS="OFF",
             REAL_SPI_HAL="ON"))
 
-    def test_all_concrete_adapters_link(self):
-        self.check(("esy_spi_scheduler", "esy_uart_tx_scheduler"), dict(ENABLE_ESY_UART="ON",
-            ENABLE_ESY_SPI="ON", ENABLE_ESY_SPI_SCHEDULER="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON"))
+    def test_all_concrete_scheduler_targets_link(self):
+        self.check(("esy_spi_scheduler", "esy_uart_tx_scheduler", "esy_uart_tx_scheduler_os",
+            "esy_dma_scheduler_core", "esy_pwm_scheduler_core"), dict(ENABLE_ESY_UART="ON",
+            ENABLE_ESY_SPI="ON", ENABLE_ESY_SPI_SCHEDULER="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON",
+            ENABLE_ESY_DMA="ON", ENABLE_ESY_DMA_SCHEDULER="ON",
+            ENABLE_ESY_PWM="ON", ENABLE_ESY_PWM_SCHEDULER="ON"))
 
     def test_explicitly_disabled_adapters_need_no_dependencies(self):
         self.check(overrides=dict(ENABLE_ESY_UART="ON", ENABLE_ESY_SPI="ON",
@@ -245,13 +321,106 @@ class IoSchedulerConsumerTests(unittest.TestCase):
         self.check_umbrella(dict(ENABLE_ESY_IO_SCHEDULER="OFF"))
 
     def test_missing_dependencies_fail_at_configure(self):
-        for name, value, message in (("ENABLE_ESY_DMA", "OFF", "requires ENABLE_ESY_DMA"),
-            ("ENABLE_ESY_SYSTEM", "OFF", "requires ENABLE_ESY_SYSTEM"),
+        for name, value, message in (("ENABLE_ESY_SYSTEM", "OFF", "requires ENABLE_ESY_SYSTEM"),
             ("PROVIDE_OS", "OFF", "requires the esy_os target"),
             ("ENABLE_ESY_COMMON_DS", "OFF", "requires the esy_common_ds target"),
             ):
             with self.subTest(feature=name):
                 self.check(overrides={"ENABLE_ESY_SPI": "ON", "ENABLE_ESY_SPI_SCHEDULER": "ON", name: value}, error=message)
+
+    def test_readme_examples_compile_and_link_as_c_and_cpp(self):
+        self.check(("esy_uart_tx_scheduler", "esy_pwm_scheduler_core"), dict(
+            ENABLE_ESY_UART="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON",
+            ENABLE_ESY_PWM="ON", ENABLE_ESY_PWM_SCHEDULER="ON",
+            ESY_RTOS="None", PROVIDE_OS="OFF", ENABLE_ESY_SYSTEM="OFF",
+            README_EXAMPLES="ON"))
+
+    def test_uart_os_adapter_and_readme_link_with_public_os_only(self):
+        self.check(("esy_uart_tx_scheduler", "esy_uart_tx_scheduler_os", "esy_pwm_scheduler_core"), dict(
+            ENABLE_ESY_UART="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON",
+            ENABLE_ESY_PWM="ON", ENABLE_ESY_PWM_SCHEDULER="ON", README_EXAMPLES="ON"))
+
+    def test_dma_core_without_os_or_system(self):
+        self.check(("esy_dma_scheduler_core",), dict(ENABLE_ESY_DMA="ON",
+            ENABLE_ESY_DMA_SCHEDULER="ON", ESY_RTOS="None", PROVIDE_OS="OFF",
+            ENABLE_ESY_SYSTEM="OFF"))
+
+    def test_pwm_core_without_os_system_or_generic_dma(self):
+        self.check(("esy_pwm_scheduler_core",), dict(ENABLE_ESY_PWM="ON",
+            ENABLE_ESY_PWM_SCHEDULER="ON", ESY_RTOS="None", PROVIDE_OS="OFF",
+            ENABLE_ESY_SYSTEM="OFF", ENABLE_ESY_DMA="OFF"))
+
+    def test_all_caller_driven_cores_link_without_os(self):
+        self.check(("esy_spi_scheduler_core", "esy_uart_tx_scheduler",
+            "esy_dma_scheduler_core", "esy_pwm_scheduler_core"), dict(
+            ENABLE_ESY_SPI="ON", ENABLE_ESY_SPI_SCHEDULER="ON",
+            ENABLE_ESY_UART="ON", ENABLE_ESY_UART_TX_SCHEDULER="ON",
+            ENABLE_ESY_DMA="ON", ENABLE_ESY_DMA_SCHEDULER="ON",
+            ENABLE_ESY_PWM="ON", ENABLE_ESY_PWM_SCHEDULER="ON",
+            ESY_RTOS="None", PROVIDE_OS="OFF"))
+
+    def test_middleware_umbrella_exports_dma_and_pwm_cores_without_os(self):
+        self.check(("esy_dma_scheduler_core", "esy_pwm_scheduler_core"), dict(
+            ENABLE_ESY_DMA="ON", ENABLE_ESY_DMA_SCHEDULER="ON",
+            ENABLE_ESY_PWM="ON", ENABLE_ESY_PWM_SCHEDULER="ON",
+            ESY_RTOS="None", PROVIDE_OS="OFF", ENABLE_ESY_SYSTEM="OFF",
+            USE_UMBRELLA="ON"))
+
+    def test_peripheral_features_do_not_implicitly_enable_dma_or_pwm_cores(self):
+        self.check(overrides=dict(ENABLE_ESY_DMA="ON", ENABLE_ESY_PWM="ON",
+            ENABLE_ESY_DMA_SCHEDULER="OFF", ENABLE_ESY_PWM_SCHEDULER="OFF",
+            PROVIDE_DEPENDENCIES="OFF", ESY_RTOS="None"))
+
+    def test_new_core_gates_require_their_peripheral_and_common_providers(self):
+        for peripheral in ("DMA", "PWM"):
+            feature = f"ENABLE_ESY_{peripheral}_SCHEDULER"
+            with self.subTest(peripheral=peripheral, dependency="peripheral"):
+                self.check(overrides={feature: "ON", f"ENABLE_ESY_{peripheral}": "OFF",
+                    "ESY_RTOS": "None", "PROVIDE_OS": "OFF"},
+                    error=f"requires ENABLE_ESY_{peripheral}")
+            with self.subTest(peripheral=peripheral, dependency="data structures"):
+                self.check(overrides={feature: "ON", f"ENABLE_ESY_{peripheral}": "ON",
+                    "ENABLE_ESY_COMMON_DS": "OFF", "ESY_RTOS": "None", "PROVIDE_OS": "OFF"},
+                    error="requires the esy_common_ds target")
+
+    def test_disabled_parent_ignores_selected_core_children(self):
+        self.check(overrides=dict(ENABLE_ESY_IO_SCHEDULER="OFF",
+            ENABLE_ESY_DMA_SCHEDULER="ON", ENABLE_ESY_PWM_SCHEDULER="ON",
+            PROVIDE_DEPENDENCIES="OFF", ESY_RTOS="None"))
+        self.check_umbrella(dict(ENABLE_ESY_IO_SCHEDULER="OFF",
+            ENABLE_ESY_DMA_SCHEDULER="ON", ENABLE_ESY_PWM_SCHEDULER="ON"))
+
+    @unittest.skipUnless(shutil.which("arm-none-eabi-gcc") and shutil.which("arm-none-eabi-g++"),
+                         "ARM GNU C/C++ compilers are not on PATH")
+    def test_caller_driven_cores_compile_for_arm_without_os_headers(self):
+        cores = ("esy_spi_scheduler_core", "esy_uart_tx_scheduler",
+                 "esy_dma_scheduler_core", "esy_pwm_scheduler_core")
+        includes = [ROOT / "esy_middleware/io_scheduler/include",
+                    ROOT / "esy_hal/include", ROOT / "esy_common/defs/include",
+                    ROOT / "esy_common/ds/include", ROOT / "esy_common/device/include",
+                    ROOT / "esy_common/utils/include"]
+        with tempfile.TemporaryDirectory(prefix="io scheduler ARM consumer ") as d:
+            out = Path(d)
+            for name in cores:
+                source = ROOT / "esy_middleware/io_scheduler/src" / f"{name}.c"
+                command = [shutil.which("arm-none-eabi-gcc"), "-std=c11", "-mcpu=cortex-m4",
+                           "-mthumb", "-ffreestanding", "-Wall", "-Wextra", "-Werror",
+                           "-MMD", "-MF", str(out / f"{name}.d")]
+                command += [f"-I{directory}" for directory in includes]
+                compiled = subprocess.run(command + ["-c", str(source), "-o", str(out / f"{name}.o")],
+                                          capture_output=True, text=True)
+                self.assertEqual(0, compiled.returncode, compiled.stdout + compiled.stderr)
+                self.assertNotIn("esy_middleware/os", (out / f"{name}.d").read_text())
+            for language, compiler, standard in (("c", "arm-none-eabi-gcc", "c11"),
+                                                  ("cpp", "arm-none-eabi-g++", "c++17")):
+                source = out / f"consumer.{language}"
+                source.write_text(consumer(cores))
+                compiled = subprocess.run([shutil.which(compiler), f"-std={standard}",
+                    "-mcpu=cortex-m4", "-mthumb", "-ffreestanding", "-Wall", "-Wextra", "-Werror"] +
+                    [f"-I{directory}" for directory in includes] +
+                    ["-c", str(source), "-o", str(out / f"consumer_{language}.o")],
+                    capture_output=True, text=True)
+                self.assertEqual(0, compiled.returncode, compiled.stdout + compiled.stderr)
 
     def test_missing_spi_feature_is_rejected(self):
         self.check(overrides=dict(ENABLE_ESY_SPI_SCHEDULER="ON"), error="requires ENABLE_ESY_SPI")

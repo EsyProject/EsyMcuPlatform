@@ -185,7 +185,8 @@ endif()
 
 if(ENABLE_ESY_IO_SCHEDULER)
     add_subdirectory(io_scheduler)
-    foreach(adapter IN ITEMS esy_spi_scheduler esy_uart_tx_scheduler)
+    foreach(adapter IN ITEMS esy_spi_scheduler esy_uart_tx_scheduler
+                             esy_dma_scheduler esy_pwm_scheduler)
         if(TARGET ${adapter})
             target_link_libraries(esy_middleware INTERFACE ${adapter})
         elseif(TARGET ${adapter}_core)
