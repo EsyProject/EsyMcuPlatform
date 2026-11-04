@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "esy_common/defs/base/esy_common_defs.h"
+#include "esy_common/defs/system/esy_system_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,7 @@ typedef void (*fake_esy_hal_system_reset_hook_t)(void);
 
 /** @brief Observable state maintained by the fake platform system. */
 typedef struct {
+  const esy_system_context_callbacks_t *context_callbacks; /**< System-lifetime runtime binding. */
   uintptr_t pc; /**< Fake execution address for image-region identification. */
   uint32_t irq_status;      /**< Fake local interrupt mask; zero is enabled. */
   uint32_t wait_event_count; /**< Number of low-level event waits. */

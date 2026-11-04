@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 if(TARGET esy_os_context)
+    if(TARGET esy_os)
+        target_link_libraries(esy_os PRIVATE esy_os_context)
+    endif()
     return()
 endif()
 
@@ -16,3 +19,7 @@ add_library(esy_os_context STATIC esy_os_context.c)
 target_include_directories(esy_os_context PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/../../../../include")
 target_link_libraries(esy_os_context PRIVATE ${FREE_RTOS_KERNEL_LIB} esy_opt_default)
+
+if(TARGET esy_os)
+    target_link_libraries(esy_os PRIVATE esy_os_context)
+endif()

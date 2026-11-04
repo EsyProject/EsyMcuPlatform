@@ -23,6 +23,15 @@
 extern "C" {
 #endif
 
+/** @brief Runtime context checks supplied by a system integration owner.
+ * Callbacks are nonblocking and safe in interrupt context. The binding and its
+ * code have system lifetime; it contains no OS types or owned resources.
+ */
+typedef struct {
+    bool (*is_in_isr)(void); /**< Exact runtime interrupt-context query. */
+    bool (*can_block)(void); /**< True only in an active, schedulable context. */
+} esy_system_context_callbacks_t;
+
 /**
  * @brief System initialization configuration.
  *

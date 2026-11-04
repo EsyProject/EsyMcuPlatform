@@ -3,6 +3,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+include("${CMAKE_CURRENT_LIST_DIR}/post_project.cmake")
+esy_port_esp32_validate_target()
+
 # The conventional scaffold supplies a component named after its directory.
 # Custom component selections and native ESP-IDF discovery remain available.
 if(ESY_PROJECT_ROOT AND EXISTS "${ESY_PROJECT_ROOT}/app/esp32/CMakeLists.txt")

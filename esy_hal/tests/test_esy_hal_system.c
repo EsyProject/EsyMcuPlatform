@@ -105,3 +105,23 @@ void test_system_random_forwards_the_complete_buffer_and_preserves_provider_erro
   TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_system_random_bytes(bytes, sizeof(bytes)));
   TEST_ASSERT_EQUAL_UINT32(3u, platform_test_state()->driver_random_calls);
 }
+
+static bool runtime_is_in_isr(void) { return false; }
+static bool runtime_can_block(void) { return true; }
+
+void test_esy_hal_system_context_binding_validates_before_forwarding(void) {
+  const esy_system_context_callbacks_t incomplete = {0};
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_hal_system_set_context_callbacks(NULL));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG,
+      esy_hal_system_set_context_callbacks(&incomplete));
+  TEST_ASSERT_NULL(platform_test_state()->system_context_callbacks);
+}
+
+void test_esy_hal_system_context_binding_forwards_immutable_provider(void) {
+  static const esy_system_context_callbacks_t k_callbacks = {
+    .is_in_isr = runtime_is_in_isr, .can_block = runtime_can_block,
+  };
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_system_set_context_callbacks(&k_callbacks));
+  TEST_ASSERT_EQUAL_PTR(&k_callbacks, platform_test_state()->system_context_callbacks);
+}

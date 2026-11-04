@@ -16,6 +16,7 @@ typedef struct {
   unsigned deletes, command_count, fence_count, critical_depth, isr_entries, task_entries, yields;
   TickType_t ticks, period;
   uint32_t local_irq_mask;
+  int scheduler_state;
   eNotifyAction action;
   StaticTask_t *last_task;
   TimerHandle_t last_timer;

@@ -14,7 +14,7 @@
 #include "esp_clk_tree.h"
 #include "esp_cpu.h"
 #include "esp_rom_sys.h"
-#include "esy_middleware/os/esy_os_context.h"
+#include "esy_hb_esp32_context.h"
 #include "soc/rtc.h"
 
 typedef struct {
@@ -110,18 +110,20 @@ void esy_hb_system_resume_tick(void) {}
 
 bool esy_hb_system_tick_is_pending(void) { return false; }
 
-void esy_hb_system_disable_irq(void) { esy_os_context_irq_disable(); }
+void esy_hb_system_disable_irq(void) { (void)esy_hb_esp32_irq_save(); }
 
-void esy_hb_system_enable_irq(void) { esy_os_context_irq_enable(); }
+void esy_hb_system_enable_irq(void) {
+  esy_hb_esp32_irq_restore(esy_hb_esp32_status() & ~PS_INTLEVEL_MASK);
+}
 
 uint32_t esy_hb_system_irq_save(void) {
   /* Local-core ISR/task nesting requires the SDK's previous-level token.
    * This masks interrupts only; cross-core objects need separate ownership. */
-  return esy_os_context_irq_save();
+  return esy_hb_esp32_irq_save();
 }
 
 void esy_hb_system_irq_restore(uint32_t saved_status) {
-  esy_os_context_irq_restore(saved_status);
+  esy_hb_esp32_irq_restore(saved_status);
 }
 
 void esy_hb_system_memory_barrier(void) { __sync_synchronize(); }
@@ -143,7 +145,7 @@ uint8_t esy_hb_system_get_core_id(void) {
 }
 
 uint8_t esy_hb_system_get_core_count(void) {
-  return esy_os_context_core_count();
+  return (uint8_t)CONFIG_FREERTOS_NUMBER_OF_CORES;
 }
 
-bool esy_hb_system_is_in_isr(void) { return esy_os_context_is_in_isr(); }
+bool esy_hb_system_is_in_isr(void) { return esy_hb_esp32_is_in_isr(); }

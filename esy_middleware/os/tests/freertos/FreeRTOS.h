@@ -8,6 +8,7 @@
 #define TEST_FREERTOS_H
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #ifndef configTICK_RATE_HZ
 #define configTICK_RATE_HZ 1000u
 #endif
@@ -35,6 +36,7 @@
 #define pdFALSE 0
 #define pdPASS 1
 #define taskSCHEDULER_NOT_STARTED 0
+#define taskSCHEDULER_SUSPENDED 1
 #define taskSCHEDULER_RUNNING 2
 #define portMAX_DELAY ((TickType_t)~(TickType_t)0)
 #define pdMS_TO_TICKS(ms) ((TickType_t)((uint64_t)(ms)*configTICK_RATE_HZ/1000u))
@@ -45,6 +47,7 @@ typedef uint32_t StackType_t;
 typedef void *TaskHandle_t;
 #define CONFIG_FREERTOS_NUMBER_OF_CORES 2
 int xPortInIsrContext(void);
+bool xPortCanYield(void);
 void os_fixture_context_irq_disable(void);
 void os_fixture_context_irq_enable(void);
 uint32_t os_fixture_context_irq_save(void);

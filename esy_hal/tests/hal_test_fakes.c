@@ -2527,3 +2527,9 @@ esy_err_t esy_hb_xio_uart_rx_poll(esy_uart_t *uart) {
   s_state.uart_poll_calls++;
   return s_state.uart_poll_result;
 }
+
+esy_err_t esy_hb_system_set_context_callbacks(
+    const esy_system_context_callbacks_t *callbacks) {
+  s_state.system_context_callbacks = callbacks;
+  return ESY_OK;
+}

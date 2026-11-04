@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esy_common/defs/base/esy_common_defs.h"
+#include "esy_common/defs/system/esy_system_defs.h"
 
 #ifndef ESY_HAL_RAM_FUNC
 #if defined(__GNUC__)
@@ -229,6 +230,19 @@ extern uint8_t esy_hal_system_get_core_count(void);
  * @retval false The current code is executing in task/thread context.
  */
 extern bool esy_hal_system_is_in_isr(void);
+
+/** @brief Install system-lifetime runtime context checks without an OS dependency.
+ * A serialized startup owner publishes an immutable, non-NULL binding with both
+ * callbacks. Keep the binding/code valid until reset. Repeating the same binding
+ * succeeds; replacing a published binding returns STATE. The ESP32 OS adapter
+ * installs its checks during esy_os_init(); a native SDK consumer can supply its
+ * own checks. ESP32 uses a conservative CPU interrupt-level check before binding,
+ * and explicit sleep rejects entry until can_block is available. Other ports
+ * retain their hardware context queries. No task or allocation is created.
+ * @return OK, INVALID_ARG for an incomplete binding, or STATE on replacement.
+ */
+esy_err_t esy_hal_system_set_context_callbacks(
+    const esy_system_context_callbacks_t *callbacks);
 
 /**
  * @brief Disable interrupts and return a platform-defined restore token.

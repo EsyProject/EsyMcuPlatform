@@ -118,7 +118,10 @@ have matching alignment and aggregate layout. Manual source lists must include
   cleanup. Ignoring the return and reclaiming memory is invalid. Finish a pending
   stop before requesting delete (`ESY_ERR_STATE` otherwise).
 - `esy_os_task_delay_until()` takes `esy_os_tick_t *` and returns status. Initialize
-  it with `esy_os_task_get_tick()` and retain the public tick type.
+  it with `esy_os_task_get_tick()` and retain the public tick type. The FreeRTOS
+  port requires `INCLUDE_xTaskDelayUntil=1` and uses `xTaskDelayUntil()` directly;
+  `ESY_OK` confirms a valid scheduling
+  request and does not imply that the task blocked when its deadline had passed.
 - Notification actions use `esy_os_notify_action_t` and named public constants.
   Raw native action numbers are not a public contract; invalid actions are rejected.
   Value-based notify/wait and semaphore-style give/take share the same default

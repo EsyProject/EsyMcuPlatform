@@ -246,6 +246,7 @@ typedef struct {
   esy_xio_spi_config_t last_xio_spi_config;
   esy_usb_ep_cfg_t last_usb_ep_cfg;
   esy_system_config_t last_system_config;
+  const esy_system_context_callbacks_t *system_context_callbacks;
 } platform_test_state_t;
 
 extern const platform_test_state_t *platform_test_state(void);

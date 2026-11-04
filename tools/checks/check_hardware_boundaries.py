@@ -134,6 +134,8 @@ def check(root):
                 lower_header = include.startswith(('esy_hal_backend/', 'esy_board/')) or include.endswith('esy_board_defs.h')
                 if (module == 'esy_middleware' or public_hal) and lower_header:
                     errors.append(f'{relative}: lower-layer header {include} bypasses the public HAL boundary')
+                if module in ('esy_hal', 'esy_hal_backend') and include.startswith('esy_middleware/'):
+                    errors.append(f'{relative}: HAL/backend must not include middleware header {include}')
                 if module == 'esy_hal_backend' and include.startswith('esy_hal/'):
                     errors.append(f'{relative}: a hardware backend must not include its HAL caller')
                 if (include.endswith('_internal.h') and include not in
@@ -151,6 +153,8 @@ def check(root):
                         errors.append(f'{relative}: internal header {include} is not public or cross-module API')
             if module == 'esy_middleware' and LOWER_CALL.search(code):
                 errors.append(f'{relative}: middleware must access hardware through public HAL APIs')
+            if module in ('esy_hal', 'esy_hal_backend') and re.search(r'\besy_os_\w+\s*\(', code):
+                errors.append(f'{relative}: HAL/backend must not call OS APIs')
             if module == 'esy_hal_backend' and HAL_CALL.search(code):
                 errors.append(f'{relative}: a hardware backend must not call its HAL caller')
             if module == 'esy_common' and path.suffix == '.c' and UPPER_COMMON_CALL.search(code):
@@ -159,8 +163,11 @@ def check(root):
                 errors.append(f'{relative}: native hardware operations belong to private HAL/backend code')
             if not os_port and NATIVE_RTOS_CALL.search(code):
                 errors.append(f'{relative}: native RTOS calls belong to the OS port')
-        elif module in ('esy_common', 'esy_middleware'):
+        elif module in ('esy_common', 'esy_middleware', 'esy_hal', 'esy_hal_backend'):
             code = re.sub(r'#[^\n]*', '', source)
+            if module in ('esy_hal', 'esy_hal_backend') and re.search(
+                    r'\b(?:esy_os(?:_[A-Za-z0-9_]+)?|esy_middleware(?:_[A-Za-z0-9_]+)?)\b', code):
+                errors.append(f'{relative}: HAL/backend must not link OS or middleware targets')
             for linkage in re.findall(r'\btarget_link_libraries\s*\((.*?)\)', code, re.S):
                 if module == 'esy_middleware' and re.search(r'\b(?:esy_hal_backend|esy_board)\b', linkage):
                     errors.append(f'{relative}: middleware must not link a hardware backend or board target directly')

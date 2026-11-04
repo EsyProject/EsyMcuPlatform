@@ -27,6 +27,13 @@ extern "C" {
 
 /** @brief Whether the calling ESP-IDF context is an ISR. */
 bool esy_os_context_is_in_isr(void);
+/**
+ * @brief Whether native task context currently permits blocking control work.
+ * Requires a running scheduler, task context and fully enabled local IRQs.
+ * This observation does not establish cross-core quiescence or reserve native
+ * resources. It is used by explicit ESP32 sleep before the SDK's own handshake.
+ */
+bool esy_os_context_can_block(void);
 /** @brief Number of cores configured for the native scheduler. */
 uint8_t esy_os_context_core_count(void);
 /** @brief Mask local interrupts at the native port's critical level. */

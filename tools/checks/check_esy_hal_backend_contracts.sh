@@ -64,6 +64,8 @@ for platform_dir in "${DRIVER_DIR}"/src/*; do
     extract_declared_functions "${header}" >"${declared_file}"
     if [[ "${source_relative}" == "esy_hb_boot.c" && "${platform}" != "esp32" ]]; then
       extract_defined_functions "${source}" "${DRIVER_DIR}/src/esy_hb_boot_direct.c" >"${defined_file}"
+    elif [[ "${source_relative}" == "esy_hb_system.c" ]]; then
+      extract_defined_functions "${source}" "${DRIVER_DIR}/src/esy_hb_context.c" >"${defined_file}"
     else
       extract_defined_functions "${source}" >"${defined_file}"
     fi

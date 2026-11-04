@@ -301,6 +301,14 @@ extern uint8_t esy_hb_system_get_core_count(void);
  */
 extern bool esy_hb_system_is_in_isr(void);
 
+/** @brief Publish immutable system-lifetime runtime context callbacks.
+ * The startup owner retains the binding until reset. Both callbacks are required,
+ * bounded and ISR-safe. Repeating the same binding is allowed; replacement is
+ * rejected. This backend facility neither imports nor links an OS provider.
+ */
+esy_err_t esy_hb_system_set_context_callbacks(
+    const esy_system_context_callbacks_t *callbacks);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

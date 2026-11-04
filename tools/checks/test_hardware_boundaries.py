@@ -43,6 +43,21 @@ class HardwareBoundaries(unittest.TestCase):
                 self.assertEqual([], self.inspect({
                     'esy_middleware/os/src/freertos/port/esp32/context.c': source}))
 
+    def test_hal_and_backend_cannot_import_or_call_middleware(self):
+        for module in ('esy_hal', 'esy_hal_backend'):
+            for source in ('#include "esy_middleware/os/esy_os_context.h"',
+                           '#include "esy_middleware/logger/esy_logger.h"',
+                           'void operation(void) { esy_os_context_is_in_isr(); }'):
+                with self.subTest(module=module, source=source):
+                    self.assertTrue(self.inspect({f'{module}/src/port.c': source}))
+
+    def test_hal_and_backend_cannot_link_os_through_dependency_lists(self):
+        for module in ('esy_hal', 'esy_hal_backend'):
+            for source in ('target_link_libraries(target PRIVATE esy_os)',
+                           'list(APPEND MODULE_DEPS esy_os_context)'):
+                with self.subTest(module=module, source=source):
+                    self.assertTrue(self.inspect({f'{module}/CMakeLists.txt': source}))
+
     def test_middleware_cannot_import_backend_or_board_headers(self):
         for header in ('esy_hal_backend/esy_hb_flash.h', 'esy_board/esy_board.h',
                        'esy_common/defs/board/esy_board_defs.h'):

@@ -72,7 +72,7 @@ void vTaskDelete(TaskHandle_t task);
 void vTaskSuspend(TaskHandle_t task);
 eTaskState eTaskGetState(TaskHandle_t task);
 void vTaskDelay(TickType_t ticks);
-void vTaskDelayUntil(TickType_t *previous, TickType_t period);
+BaseType_t xTaskDelayUntil(TickType_t *previous, TickType_t period);
 TickType_t xTaskGetTickCount(void);
 TaskHandle_t xTaskGetCurrentTaskHandle(void);
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task);

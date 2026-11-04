@@ -88,6 +88,13 @@ extern bool esy_hal_system_is_in_isr(void) {
   return esy_hb_system_is_in_isr();
 }
 
+esy_err_t esy_hal_system_set_context_callbacks(
+    const esy_system_context_callbacks_t *callbacks) {
+  if (callbacks == NULL || callbacks->is_in_isr == NULL ||
+      callbacks->can_block == NULL) return ESY_ERR_INVALID_ARG;
+  return esy_hb_system_set_context_callbacks(callbacks);
+}
+
 ESY_HAL_RAM_FUNC uint32_t esy_hal_system_irq_save(void) {
   return esy_hb_system_irq_save();
 }

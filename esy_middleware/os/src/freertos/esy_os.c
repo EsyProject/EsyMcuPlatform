@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/portable.h"
+#include "esy_middleware/os/esy_os_context.h"
 #else
 #include "FreeRTOS.h"
 #include "task.h"
@@ -38,10 +39,22 @@ typedef struct {
 
 static esy_os_ctx_t s_ctx;
 
+#ifdef ESY_PLATFORM_ESP32
+static const esy_system_context_callbacks_t k_context_callbacks = {
+  .is_in_isr = esy_os_context_is_in_isr,
+  .can_block = esy_os_context_can_block,
+};
+#endif
+
 void esy_os_init(void) {
   if (s_ctx.initialized) {
     return;
   }
+#ifdef ESY_PLATFORM_ESP32
+  /* Startup wiring points from this runtime adapter into public HAL. A binding
+   * already supplied by the system owner remains authoritative. */
+  (void)esy_hal_system_set_context_callbacks(&k_context_callbacks);
+#endif
   s_ctx.tickless_ops = NULL;
   s_ctx.tickless_idle_ctx = NULL;
   s_ctx.tickless_fraction_scaled = 0u;

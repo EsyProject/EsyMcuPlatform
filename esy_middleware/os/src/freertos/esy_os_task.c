@@ -155,7 +155,7 @@ esy_err_t esy_os_task_delay_until(esy_os_tick_t *prev_tick, uint32_t period_ms) 
   if (!prev_tick || period_ms == 0u || *prev_tick > (uint64_t)portMAX_DELAY)
     return ESY_ERR_INVALID_ARG;
   TickType_t native_tick = (TickType_t)*prev_tick;
-  vTaskDelayUntil(&native_tick, esy_os_finite_ticks(period_ms));
+  (void)xTaskDelayUntil(&native_tick, esy_os_finite_ticks(period_ms));
   *prev_tick = (esy_os_tick_t)native_tick;
   return ESY_OK;
 }

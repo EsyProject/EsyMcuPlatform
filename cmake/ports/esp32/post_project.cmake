@@ -3,7 +3,26 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+function(esy_port_esp32_validate_target)
+    # Native IDF publishes these values at different integration stages. Empty
+    # fixture providers have no native target and retain their existing contract.
+    foreach(esy_idf_target_input IN ITEMS IDF_TARGET CONFIG_IDF_TARGET)
+        if(DEFINED ${esy_idf_target_input} AND
+           NOT "${${esy_idf_target_input}}" STREQUAL "" AND
+           NOT "${${esy_idf_target_input}}" STREQUAL "esp32")
+            message(FATAL_ERROR
+                "ESY_TARGET_DEVICE=ESP32 requires the classic IDF_TARGET=esp32; ${esy_idf_target_input}=${${esy_idf_target_input}}")
+        endif()
+    endforeach()
+    if(DEFINED ENV{IDF_TARGET} AND NOT "$ENV{IDF_TARGET}" STREQUAL "" AND
+       NOT "$ENV{IDF_TARGET}" STREQUAL "esp32")
+        message(FATAL_ERROR
+            "ESY_TARGET_DEVICE=ESP32 requires the classic IDF_TARGET=esp32; environment IDF_TARGET=$ENV{IDF_TARGET}")
+    endif()
+endfunction()
+
 macro(esy_port_esp32_initialize_sdk_dependencies)
+    esy_port_esp32_validate_target()
     if(ESY_RTOS STREQUAL "FreeRTOS")
         set(esy_freertos_provider_checked TRUE)
         set(esy_import_kernel FALSE)
@@ -21,15 +40,27 @@ macro(esy_port_esp32_initialize_sdk_dependencies)
 endmacro()
 
 function(esy_port_esp32_configure_runtime_targets)
-    # This native OS bridge has no HAL dependency and precedes backend assembly.
-    if(ENABLE_ESY_SYSTEM AND NOT TARGET esy_os_context)
-        add_subdirectory("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../../esy_middleware/os/src/freertos/port/esp32"
-            "${CMAKE_CURRENT_BINARY_DIR}/esy_os_context")
-    endif()
+    esy_port_esp32_validate_target()
+    # Runtime adapters belong to their consumers; HAL/backend assemble no OS target.
 endfunction()
 
 function(esy_port_esp32_configure_firmware target)
     # ESP-IDF owns component targets, final linking, Flash layout and image outputs.
     set_property(TARGET ${target} PROPERTY ESY_FIRMWARE_CONFIGURED TRUE)
     return()
+endfunction()
+
+function(esy_port_esp32_configure_network_providers)
+    if(ENABLE_ESY_NETWORK AND ENABLE_ESY_NETWORK_LWIP AND
+       NOT TARGET esy_network_lwip_provider)
+        if(NOT TARGET idf::lwip)
+            message(FATAL_ERROR "ESP32 networking requires the native idf::lwip component")
+        endif()
+        if(NOT CONFIG_LWIP_TCPIP_CORE_LOCKING OR NOT CONFIG_LWIP_CHECK_THREAD_SAFETY)
+            message(FATAL_ERROR
+                "ESP32 default raw lwIP provider requires CONFIG_LWIP_TCPIP_CORE_LOCKING=y and CONFIG_LWIP_CHECK_THREAD_SAFETY=y")
+        endif()
+        add_library(esy_network_lwip_provider INTERFACE)
+        target_link_libraries(esy_network_lwip_provider INTERFACE idf::lwip)
+    endif()
 endfunction()

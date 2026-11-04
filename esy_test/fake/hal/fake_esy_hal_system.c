@@ -127,6 +127,16 @@ uint8_t esy_hal_system_get_core_count(void) { return s_ctx.core_count; }
 
 bool esy_hal_system_is_in_isr(void) { return s_ctx.is_in_isr; }
 
+esy_err_t esy_hal_system_set_context_callbacks(
+    const esy_system_context_callbacks_t *callbacks) {
+  if (callbacks == NULL || callbacks->is_in_isr == NULL ||
+      callbacks->can_block == NULL) return ESY_ERR_INVALID_ARG;
+  if (s_ctx.context_callbacks != NULL && s_ctx.context_callbacks != callbacks)
+    return ESY_ERR_STATE;
+  s_ctx.context_callbacks = callbacks;
+  return ESY_OK;
+}
+
 void esy_hal_system_reset(void) {
   s_ctx.reset_count++;
   if (s_ctx.reset_hook != NULL) {

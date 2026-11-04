@@ -67,6 +67,7 @@ typedef struct {
   int scheduler_state;
   unsigned os_ticks;
   unsigned last_hal_tick;
+  uint32_t irq_mask;
 } systick_test_ctx_t;
 static systick_test_ctx_t s_ctx;
 void vTaskStartScheduler(void) {}
@@ -79,6 +80,17 @@ void os_fixture_tick_isr_lock(void) {}
 void os_fixture_tick_isr_unlock(void) {}
 void os_fixture_disable_interrupts(void) {}
 void os_fixture_yield_from_isr(int should_yield) { (void)should_yield; }
+int xPortInIsrContext(void) { return fake_esy_hal_system_get_ctx()->is_in_isr; }
+bool xPortCanYield(void) { return s_ctx.irq_mask == 0u; }
+void os_fixture_context_irq_disable(void) { s_ctx.irq_mask = 1u; }
+void os_fixture_context_irq_enable(void) { s_ctx.irq_mask = 0u; }
+uint32_t os_fixture_context_irq_save(void) {
+  uint32_t previous = s_ctx.irq_mask;
+  s_ctx.irq_mask = 1u;
+  return previous;
+}
+void os_fixture_context_irq_restore(uint32_t saved) { s_ctx.irq_mask = saved; }
+
 #ifdef TEST_STM32_SYSTICK
 /* Deliberately an ordinary native function with no same-named macro. */
 void xPortSysTickHandler(void) {
@@ -116,6 +128,17 @@ static esy_err_t tickless_clock(void *ctx, uint64_t *now) {
 }
 int check_native_tick_owner(void) {
   esy_os_init();
+#ifdef ESY_PLATFORM_ESP32
+  const esy_system_context_callbacks_t *context =
+      fake_esy_hal_system_get_ctx()->context_callbacks;
+  assert(context != NULL);
+  assert(!context->is_in_isr());
+  s_ctx.scheduler_state = 1;
+  assert(context->can_block());
+  s_ctx.irq_mask = 1u;
+  assert(!context->can_block());
+  s_ctx.irq_mask = 0u;
+#endif
   esy_os_systick();
   assert(s_ctx.os_ticks == 0u);
   const esy_os_tickless_ops_t ops = {

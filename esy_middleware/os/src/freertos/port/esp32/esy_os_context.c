@@ -9,6 +9,11 @@
 #include "freertos/task.h"
 
 bool esy_os_context_is_in_isr(void) { return xPortInIsrContext() != 0; }
+bool esy_os_context_can_block(void) {
+  return xPortCanYield() &&
+         !esy_os_context_is_in_isr() &&
+         xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
+}
 uint8_t esy_os_context_core_count(void) {
   return (uint8_t)CONFIG_FREERTOS_NUMBER_OF_CORES;
 }

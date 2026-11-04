@@ -55,7 +55,7 @@ void vTaskDelay(TickType_t ticks) {
   s_ctx.public.ticks = ticks;
   if (s_ctx.public.on_delay) s_ctx.public.on_delay();
 }
-void vTaskDelayUntil(TickType_t *previous, TickType_t period) {*previous += period; s_ctx.public.period = period;}
+BaseType_t xTaskDelayUntil(TickType_t *previous, TickType_t period) {*previous += period; s_ctx.public.period = period; return pdTRUE;}
 TickType_t xTaskGetTickCount(void) {return s_ctx.public.ticks;}
 TaskHandle_t xTaskGetCurrentTaskHandle(void) {return s_ctx.public.current;}
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task) {(void)task; return 42;}
@@ -92,6 +92,7 @@ void native_exit(int isr, void *mux, uint32_t key) {
 void native_yield(void) {++s_ctx.public.yields;}
 bool esy_hal_system_is_in_isr(void) {return s_ctx.public.isr;}
 int xPortInIsrContext(void) {return s_ctx.public.isr ? 1 : 0;}
+bool xPortCanYield(void) {return s_ctx.public.local_irq_mask == 0u;}
 void os_fixture_context_irq_disable(void) {s_ctx.public.local_irq_mask = 7u;}
 void os_fixture_context_irq_enable(void) {s_ctx.public.local_irq_mask = 0u;}
 uint32_t os_fixture_context_irq_save(void) {
