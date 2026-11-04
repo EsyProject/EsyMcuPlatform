@@ -57,6 +57,9 @@ void esy_hal_can_default_cfg(esy_can_config_t *config) {
   config->nominal.sjw = 1u;
   config->auto_retransmit = true;
   config->poll_limit = ESY_CAN_DEFAULT_POLL_LIMIT;
+  config->port.tx_pin = ESY_PIN_UNUSED;
+  config->port.rx_pin = ESY_PIN_UNUSED;
+  config->port.rx_queue_capacity = ESY_CAN_DEFAULT_RX_QUEUE_CAPACITY;
 }
 
 esy_err_t esy_hal_can_init(esy_can_t *can, const esy_can_config_t *config) {

@@ -4,7 +4,7 @@
 
 # esy_hal_backend/src/esp32/CMakeLists.txt
 
-foreach(esy_unavailable_feature IN ITEMS ENABLE_ESY_CAN ENABLE_ESY_ADC)
+foreach(esy_unavailable_feature IN ITEMS ENABLE_ESY_ADC)
     if(${esy_unavailable_feature})
         message(FATAL_ERROR
             "${esy_unavailable_feature} has no backend for ESY_TARGET_PLATFORM=${ESY_TARGET_PLATFORM}; supported platform is STM32F4")
@@ -186,6 +186,14 @@ if(ENABLE_ESY_WIFI)
 endif()
 
 # ---- Attach sources and dependencies to esy_hal_backend ----
+
+if(ENABLE_ESY_CAN)
+    if(NOT TARGET idf::driver)
+        message(FATAL_ERROR "ESP32 CAN requires the native idf::driver TWAI component")
+    endif()
+    list(APPEND MODULE_DEPS idf::driver)
+    list(APPEND MODULE_SRCS esy_hb_can.c)
+endif()
 
 target_sources(esy_hal_backend PRIVATE ${MODULE_SRCS})
 

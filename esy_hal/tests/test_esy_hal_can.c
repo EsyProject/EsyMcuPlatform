@@ -67,6 +67,10 @@ void test_can_defaults_replace_every_field_without_selecting_a_board_clock(void)
   TEST_ASSERT_EQUAL_UINT8(0u, config.data.segment2);
   TEST_ASSERT_EQUAL_UINT8(0u, config.data.sjw);
   TEST_ASSERT_EQUAL_UINT32(ESY_CAN_DEFAULT_POLL_LIMIT, config.poll_limit);
+  TEST_ASSERT_EQUAL_UINT32(ESY_PIN_UNUSED, config.port.tx_pin);
+  TEST_ASSERT_EQUAL_UINT32(ESY_PIN_UNUSED, config.port.rx_pin);
+  TEST_ASSERT_EQUAL_UINT8(ESY_CAN_DEFAULT_RX_QUEUE_CAPACITY,
+                        config.port.rx_queue_capacity);
 }
 
 void test_can_initialization_rejects_bad_arguments_timing_mode_and_poll_budget(void) {
@@ -105,6 +109,9 @@ void test_can_initialization_rejects_bad_arguments_timing_mode_and_poll_budget(v
 void test_can_initialization_copies_config_and_validates_only_active_timing_phase(void) {
   s_ctx.config.data.sjw = 99u;
   s_ctx.config.poll_limit = ESY_CAN_MAX_POLL_LIMIT;
+  s_ctx.config.port.tx_pin = 0x10015u;
+  s_ctx.config.port.rx_pin = 0x20016u;
+  s_ctx.config.port.rx_queue_capacity = 31u;
   initialize();
   TEST_ASSERT_NOT_NULL(s_ctx.can.ctx);
   TEST_ASSERT_NOT_NULL(s_ctx.can.ops);
@@ -112,6 +119,11 @@ void test_can_initialization_copies_config_and_validates_only_active_timing_phas
   TEST_ASSERT_EQUAL_INT(ESY_CAN_STATE_STOPPED, s_ctx.provider->status.state);
   TEST_ASSERT_EQUAL_UINT8(1u, s_ctx.provider->config.phys_index);
   TEST_ASSERT_EQUAL_UINT32(ESY_CAN_MAX_POLL_LIMIT, s_ctx.provider->config.poll_limit);
+  TEST_ASSERT_EQUAL_UINT32(0x10015u, s_ctx.provider->config.port.tx_pin);
+  TEST_ASSERT_EQUAL_UINT32(0x20016u, s_ctx.provider->config.port.rx_pin);
+  TEST_ASSERT_EQUAL_UINT8(31u, s_ctx.provider->config.port.rx_queue_capacity);
+  s_ctx.config.port.rx_queue_capacity = 1u;
+  TEST_ASSERT_EQUAL_UINT8(31u, s_ctx.provider->config.port.rx_queue_capacity);
   s_ctx.config.phys_index = 2u;
   TEST_ASSERT_EQUAL_UINT8(1u, s_ctx.provider->config.phys_index);
   const void *owned = s_ctx.can.ctx;
@@ -488,6 +500,27 @@ void test_can_recovery_dispatch_preserves_pending_state_and_requires_explicit_bu
   TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_can_get_status(&s_ctx.can, &status));
   TEST_ASSERT_EQUAL_INT(ESY_CAN_STATE_ERROR_ACTIVE, status.state);
   TEST_ASSERT_EQUAL_INT32(ESY_ERR_STATE, esy_hal_can_recover(&s_ctx.can));
+}
+
+void test_can_provider_without_recovery_can_release_bus_off_and_reinitialize(void) {
+  start();
+  s_ctx.provider->caps = ESY_CAN_CAP_LISTEN_ONLY | ESY_CAN_CAP_FILTER;
+  uint32_t caps = 0u;
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_can_get_caps(&s_ctx.can, &caps));
+  TEST_ASSERT_EQUAL_UINT32(ESY_CAN_CAP_LISTEN_ONLY | ESY_CAN_CAP_FILTER, caps);
+  s_ctx.provider->status.state = ESY_CAN_STATE_BUS_OFF;
+  s_ctx.provider->results[FAKE_ESY_CAN_RECOVER] = ESY_ERR_NOT_SUPPORTED;
+  TEST_ASSERT_EQUAL_INT32(ESY_ERR_NOT_SUPPORTED, esy_hal_can_recover(&s_ctx.can));
+  esy_can_status_t status = {0};
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_can_get_status(&s_ctx.can, &status));
+  TEST_ASSERT_EQUAL_INT(ESY_CAN_STATE_BUS_OFF, status.state);
+  esy_can_frame_t frame = {.id = 0x123u};
+  TEST_ASSERT_EQUAL_INT32(ESY_ERR_STATE, esy_hal_can_send(&s_ctx.can, &frame));
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_can_deinit(&s_ctx.can));
+  TEST_ASSERT_NULL(s_ctx.can.ctx);
+  TEST_ASSERT_NULL(s_ctx.can.ops);
+  start();
+  TEST_ASSERT_EQUAL_INT32(ESY_OK, esy_hal_can_send(&s_ctx.can, &frame));
 }
 
 void test_can_missing_optional_operations_report_not_implemented(void) {

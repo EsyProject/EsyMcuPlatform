@@ -28,6 +28,10 @@ extern "C" {
 #define ESY_CAN_DEFAULT_POLL_LIMIT 100000u
 /** @brief Largest accepted register observation budget. */
 #define ESY_CAN_MAX_POLL_LIMIT 1000000u
+/** @brief Default SDK-owned RX queue capacity for queue-based CAN providers. */
+#define ESY_CAN_DEFAULT_RX_QUEUE_CAPACITY 16u
+/** @brief Maximum software acceptance rules in the ESP32 provider. */
+#define ESY_CAN_ESP32_FILTER_CAPACITY 28u
 
 /** @brief CAN operations implemented by a provider; ignore unknown bits. */
 typedef enum {
@@ -88,7 +92,7 @@ typedef struct {
 /**
  * @brief One acceptance rule: (received_id & mask) == (id & mask).
  * Rules always match the identifier format. Set mask=0 for all IDs of that
- * format. All rules feed the provider's owner-polled receive FIFO.
+ * format. Rules may be enforced in hardware or by bounded provider software.
  */
 typedef struct {
   uint32_t id; /**< Unshifted reference ID. */
@@ -99,11 +103,27 @@ typedef struct {
 } esy_can_filter_t;
 
 /**
+ * @brief Portable routing and queue inputs for providers that require them.
+ *
+ * ESP32 requires distinct valid TX/RX GPIOs and a nonzero SDK RX queue capacity.
+ * The consumer owns these pins and its external transceiver until deinit
+ * succeeds. The SDK configures GPIO routing during init; no board hook is
+ * inferred. STM32F4 ignores this structure and retains its caller-routed pins.
+ */
+typedef struct {
+  uint32_t tx_pin; /**< TX pin identifier; ESY_PIN_UNUSED means unselected. */
+  uint32_t rx_pin; /**< RX pin identifier; ESY_PIN_UNUSED means unselected. */
+  uint8_t rx_queue_capacity; /**< SDK-owned frame slots, 1..255 on ESP32. */
+} esy_can_port_config_t;
+
+/**
  * @brief Configuration copied at init; controller remains stopped afterward.
  * The consumer prepares pins, peripheral input clock and external transceiver
- * before init and retains them until successful deinit. No board hook or pin
- * mapping is inferred. poll_limit bounds each register handshake by observation
- * count, not milliseconds; a timeout faults the handle and requires stop/deinit.
+ * before init and retains them until successful deinit. ESP32 consumes explicit
+ * port pins and owns their SDK routing; STM32F4 infers no board hook or mapping.
+ * poll_limit bounds STM32F4 register handshakes by observation count, not
+ * milliseconds. ESP32 uses synchronous native control calls instead and does
+ * not interpret this value as a native execution-time deadline.
  */
 typedef struct {
   uint8_t phys_index; /**< Provider controller number; STM32F4 uses 1 or 2. */
@@ -113,6 +133,7 @@ typedef struct {
   bool fd; /**< Request FD; unsupported providers reject before hardware access. */
   bool auto_retransmit; /**< Retry arbitration/transmission errors in hardware. */
   uint32_t poll_limit; /**< 1..ESY_CAN_MAX_POLL_LIMIT observations per handshake. */
+  esy_can_port_config_t port; /**< Provider routing/queue inputs; see type contract. */
 } esy_can_config_t;
 
 /**
@@ -123,11 +144,11 @@ typedef struct {
   esy_can_state_t state; /**< Current state, including explicit recovery progress. */
   uint16_t tx_error_count; /**< Native transmit error counter. */
   uint16_t rx_error_count; /**< Native receive error counter. */
-  uint8_t last_error; /**< Provider error code; STM32F4 uses raw ESR LEC (0..7). */
+  uint8_t last_error; /**< STM32F4 ESR LEC (0..7); ESP32 SDK does not expose it (0). */
   bool warning; /**< Native error-warning threshold reached. */
   bool rx_overrun; /**< Sticky receive overrun since init. */
   uint8_t tx_pending; /**< Outstanding hardware transmit requests. */
-  uint8_t rx_pending; /**< Frames currently available in the receive FIFO. */
+  uint8_t rx_pending; /**< Native FIFO/queue frames, before ESP32 software filtering. */
 } esy_can_status_t;
 
 /** @brief Forward declaration for caller-owned CAN handles. */
