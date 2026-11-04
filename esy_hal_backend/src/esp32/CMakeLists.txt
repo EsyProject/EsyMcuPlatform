@@ -116,7 +116,16 @@ if(ENABLE_ESY_PWM)
 endif()
 
 if(ENABLE_ESY_LOW_POWER)
-    message(FATAL_ERROR "ENABLE_ESY_LOW_POWER is not implemented for ESY_TARGET_PLATFORM=ESP32")
+    if(NOT ENABLE_ESY_SYSTEM)
+        message(FATAL_ERROR "ENABLE_ESY_LOW_POWER requires ENABLE_ESY_SYSTEM")
+    endif()
+    foreach(esy_power_provider IN ITEMS esp_hw_support esp_timer esp_pm)
+        if(NOT TARGET idf::${esy_power_provider})
+            message(FATAL_ERROR "ESP32 low power requires native idf::${esy_power_provider}")
+        endif()
+        list(APPEND MODULE_DEPS idf::${esy_power_provider})
+    endforeach()
+    list(APPEND MODULE_SRCS esy_hb_low_power.c esy_hb_wakeup_timer.c)
 endif()
 
 # UART/PWM HAL ownership queries use the backend DMA query without requiring

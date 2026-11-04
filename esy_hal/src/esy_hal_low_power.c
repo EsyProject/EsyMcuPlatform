@@ -55,6 +55,14 @@ esy_err_t esy_hal_power_get_capabilities(
   return ESY_OK;
 }
 
+esy_err_t esy_hal_power_sleep(const esy_power_sleep_config_t *config,
+                               esy_power_sleep_result_t *out_result) {
+  if (config == NULL || out_result == NULL ||
+      config->state != ESY_POWER_STATE_RETENTION || config->duration_us == 0u)
+    return ESY_ERR_INVALID_ARG;
+  return esy_hb_power_sleep(config, out_result);
+}
+
 esy_err_t esy_hal_power_transaction_begin(
     esy_hal_power_transaction_t *transaction, esy_power_state_t state) {
   esy_power_capabilities_t capabilities;

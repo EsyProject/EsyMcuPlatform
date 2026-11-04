@@ -32,6 +32,7 @@
 #include <stdint.h>
 
 #include "esy_common/defs/base/esy_common_defs.h"
+#include "esy_common/defs/system/esy_power_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,6 +101,25 @@ extern esy_err_t esy_hb_low_power_enter(
 
 /** @brief Cancel a prepared entry that did not consume its snapshot. */
 extern esy_err_t esy_hb_low_power_cancel(esy_hb_low_power_mode_t mode);
+
+/**
+ * @brief Explicit provider-owned, task-context sleep, outside atomic idle entry.
+ * One system owner must serialize lifecycle and native sleep/wakeup setup.
+ * ESP32 accepts RETENTION with a positive timer duration, borrows configured
+ * HAL GPIO wake sources unchanged, rejects auto Light-sleep/active RTC watchdog,
+ * and retires only its timer on return. It requires an interruptible ordinary
+ * task and whole-system quiescence, including radio, I/O, Flash and OS waits.
+ * ESP Timer advances through sleep; no FreeRTOS tick settlement is performed.
+ * Provider work may block and is never valid in an atomic power callback.
+ * Cleanup failure retains the timer: the next call performs cleanup only.
+ * Other ports return NOT_SUPPORTED. Output is written after valid arguments;
+ * it preserves entered/elapsed evidence even when later cleanup fails.
+ * @param config RETENTION request, borrowed only for this call.
+ * @param out_result Sleep or cleanup-only outcome; required.
+ * @return ESY_OK, INVALID_ARG, STATE, BUSY, NOT_SUPPORTED or provider error.
+ */
+extern esy_err_t esy_hb_power_sleep(const esy_power_sleep_config_t *config,
+                                   esy_power_sleep_result_t *out_result);
 
 typedef enum esy_hb_shutdown_mode_e {
   ESY_HB_SHUTDOWN_MODE_STANDBY = 0,

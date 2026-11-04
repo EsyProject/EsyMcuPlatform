@@ -134,6 +134,77 @@ void test_explicit_shutdown_is_not_an_idle_state(void) {
       esy_hal_shutdown(ESY_HAL_SHUTDOWN_MODE_COUNT));
 }
 
+void test_explicit_sleep_preserves_provider_wake_and_elapsed_evidence(void) {
+  const esy_power_sleep_config_t config = {
+      .state = ESY_POWER_STATE_RETENTION, .duration_us = UINT32_MAX};
+  esy_power_sleep_result_t result = {0};
+  platform_test_set_explicit_sleep_result((esy_power_sleep_result_t){
+      .elapsed_us = (uint64_t)UINT32_MAX + 100u,
+      .entered = true,
+      .gpio_wakeup = true,
+  });
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_power_sleep(&config, &result));
+  TEST_ASSERT_EQUAL_UINT32(1u, platform_test_state()->explicit_sleep_calls);
+  TEST_ASSERT_EQUAL(ESY_POWER_STATE_RETENTION,
+      platform_test_state()->explicit_sleep_config.state);
+  TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,
+      platform_test_state()->explicit_sleep_config.duration_us);
+  TEST_ASSERT_TRUE(result.entered);
+  TEST_ASSERT_TRUE(result.gpio_wakeup);
+  TEST_ASSERT_FALSE(result.timer_wakeup);
+  TEST_ASSERT_EQUAL_UINT64((uint64_t)UINT32_MAX + 100u, result.elapsed_us);
+  /* Explicit provider entry does not claim a generic atomic transaction. */
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_prepare_calls);
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_start_calls);
+}
+
+void test_explicit_sleep_failure_keeps_actual_entry_evidence_for_recovery(void) {
+  const esy_power_sleep_config_t config = {
+      .state = ESY_POWER_STATE_RETENTION, .duration_us = 10000u};
+  esy_power_sleep_result_t result = {0};
+  platform_test_set_explicit_sleep_result((esy_power_sleep_result_t){
+      .elapsed_us = 12000u, .entered = true, .timer_wakeup = true});
+  platform_test_set_low_power_result(ESY_ERR_IO);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_hal_power_sleep(&config, &result));
+  TEST_ASSERT_TRUE(result.entered);
+  TEST_ASSERT_TRUE(result.timer_wakeup);
+  TEST_ASSERT_EQUAL_UINT64(12000u, result.elapsed_us);
+}
+
+void test_explicit_sleep_rejects_invalid_requests_before_native_side_effects(void) {
+  esy_power_sleep_config_t config = {
+      .state = ESY_POWER_STATE_RETENTION, .duration_us = 1u};
+  esy_power_sleep_result_t result = {.elapsed_us = 42u, .entered = true};
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_power_sleep(NULL, &result));
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_power_sleep(&config, NULL));
+  config.duration_us = 0u;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_power_sleep(&config, &result));
+  config.duration_us = 1u;
+  config.state = ESY_POWER_STATE_CPU_IDLE;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_power_sleep(&config, &result));
+  config.state = ESY_POWER_STATE_ACTIVE;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_power_sleep(&config, &result));
+  config.state = ESY_POWER_STATE_COUNT;
+  TEST_ASSERT_EQUAL(ESY_ERR_INVALID_ARG, esy_hal_power_sleep(&config, &result));
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->explicit_sleep_calls);
+  TEST_ASSERT_EQUAL_UINT64(42u, result.elapsed_us);
+  TEST_ASSERT_TRUE(result.entered);
+}
+
+void test_explicit_sleep_unsupported_provider_and_cleanup_only_result_are_visible(void) {
+  const esy_power_sleep_config_t config = {
+      .state = ESY_POWER_STATE_RETENTION, .duration_us = 1u};
+  esy_power_sleep_result_t result = {.entered = true};
+  platform_test_set_low_power_result(ESY_ERR_NOT_SUPPORTED);
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+      esy_hal_power_sleep(&config, &result));
+  TEST_ASSERT_FALSE(result.entered);
+  platform_test_set_low_power_result(ESY_OK);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_power_sleep(&config, &result));
+  TEST_ASSERT_FALSE(result.entered);
+  TEST_ASSERT_EQUAL_UINT64(0u, result.elapsed_us);
+}
+
 void test_transaction_rejects_unsupported_state_and_invalid_arguments(void) {
   esy_hal_power_transaction_t transaction;
 

@@ -2545,3 +2545,16 @@ esy_err_t esy_hb_adc_validate_config(const esy_adc_config_t *config) {
 void platform_test_set_adc_validation_result(esy_err_t result) {
   s_state.adc_validate_result = result;
 }
+
+void platform_test_set_explicit_sleep_result(esy_power_sleep_result_t result) {
+  s_state.explicit_sleep_result = result;
+}
+
+esy_err_t esy_hb_power_sleep(const esy_power_sleep_config_t *config,
+                             esy_power_sleep_result_t *out_result) {
+  if (config == NULL || out_result == NULL) return ESY_ERR_INVALID_ARG;
+  ++s_state.explicit_sleep_calls;
+  s_state.explicit_sleep_config = *config;
+  *out_result = s_state.explicit_sleep_result;
+  return s_state.low_power_result;
+}

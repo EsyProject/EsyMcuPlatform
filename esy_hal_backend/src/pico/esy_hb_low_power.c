@@ -60,6 +60,15 @@ esy_err_t esy_hb_low_power_cancel(esy_hb_low_power_mode_t mode) {
   return ESY_OK;
 }
 
+esy_err_t esy_hb_power_sleep(const esy_power_sleep_config_t *config,
+                             esy_power_sleep_result_t *out_result) {
+  if (config == NULL || out_result == NULL ||
+      config->state != ESY_POWER_STATE_RETENTION || config->duration_us == 0u)
+    return ESY_ERR_INVALID_ARG;
+  *out_result = (esy_power_sleep_result_t){0};
+  return ESY_ERR_NOT_SUPPORTED;
+}
+
 esy_err_t esy_hb_shutdown(esy_hb_shutdown_mode_t mode) {
   return ((uint32_t)mode < (uint32_t)ESY_HB_SHUTDOWN_MODE_COUNT)
              ? ESY_ERR_NOT_SUPPORTED

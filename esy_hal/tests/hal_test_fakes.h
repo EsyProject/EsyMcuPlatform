@@ -18,6 +18,7 @@
 #include "esy_common/defs/peripheral/esy_i2c_defs.h"
 #include "esy_common/defs/peripheral/esy_spi_defs.h"
 #include "esy_common/defs/system/esy_system_defs.h"
+#include "esy_common/defs/system/esy_power_defs.h"
 #include "esy_common/defs/peripheral/esy_timer_defs.h"
 #include "esy_common/defs/peripheral/esy_timer_capture_defs.h"
 #include "esy_common/defs/peripheral/esy_uart_defs.h"
@@ -249,6 +250,9 @@ typedef struct {
   const esy_system_context_callbacks_t *system_context_callbacks;
   esy_err_t adc_validate_result;
   uint32_t adc_validate_order;
+  uint32_t explicit_sleep_calls;
+  esy_power_sleep_config_t explicit_sleep_config;
+  esy_power_sleep_result_t explicit_sleep_result;
 } platform_test_state_t;
 
 extern const platform_test_state_t *platform_test_state(void);
@@ -320,5 +324,8 @@ extern void platform_test_complete_spi_dma(
 extern void platform_test_complete_dma(bool error);
 
 void platform_test_set_adc_validation_result(esy_err_t result);
+
+extern void platform_test_set_explicit_sleep_result(
+    esy_power_sleep_result_t result);
 
 #endif /* ESY_HAL_TESTS_PLATFORM_TEST_FAKES_H */
