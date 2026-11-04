@@ -175,5 +175,30 @@ class NetworkConsumerTests(unittest.TestCase):
     def test_missing_raw_provider_is_reported(self):
         self.run_project(lwip=True, missing=True)
 
+    def test_threaded_core_callbacks_are_excluded_from_owner_state_access(self):
+        with tempfile.TemporaryDirectory(prefix="network core lock ") as directory:
+            for sanitizer in (None, "thread"):
+                with self.subTest(sanitizer=sanitizer):
+                    output = Path(directory) / (sanitizer or "native")
+                    command = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                               "-pthread", "-g", "-o", str(output)]
+                    if sanitizer:
+                        command += [f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer"]
+                    for relative in ("esy_middleware/network/include",
+                                     "esy_common/defs/include", "esy_common/ds/include",
+                                     "esy_common/utils/include",
+                                     "esy_test/fake/third_party/lwip"):
+                        command += ["-I", str(ROOT / relative)]
+                    for relative in ("esy_middleware/network/tests/network_core_lock_probe.c",
+                                     "esy_middleware/network/src/esy_network_lwip.c",
+                                     "esy_common/ds/src/esy_ring_buffer.c",
+                                     "esy_test/fake/third_party/lwip/fake_lwip.c"):
+                        command.append(str(ROOT / relative))
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    result = subprocess.run([str(output)], capture_output=True,
+                                            text=True, timeout=60)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

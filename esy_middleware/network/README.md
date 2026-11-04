@@ -62,9 +62,24 @@ its entry/exit hooks do not add cross-task or multicore safety to that model.
 
 For an independently driven lwIP stack, provide owner/core callbacks where its
 native raw API requires them; use NULL progress only if input/timers continue
-independently in the same documented core execution model. Optional owner entry
-and exit callbacks must be supplied as a pair. They do not make concurrent calls
-on the same endpoint safe.
+independently in the documented core execution model. Optional owner entry and
+exit callbacks must be supplied as a pair. They exclude native TCP/DNS callbacks
+while the application owner reads or changes callback-shared state, including
+state queries. They do not permit concurrent application callers on one endpoint.
+
+For classic ESP32 with ESP-IDF 5.3.4, enable
+`CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and `CONFIG_LWIP_CHECK_THREAD_SAFETY=y`.
+The consumer initializes ESP-NETIF and the default event loop before starting
+Wi-Fi. Link the native `idf::lwip` component through
+`esy_network_lwip_provider`, and inject the runtime descriptor returned by
+`esy_hal_wifi_get_network_runtime()` as described above. Its paired hooks use
+the native lwIP core lock; its progress hook performs no polling because the
+SDK's TCP/IP task owns input and timers. One application owner still serializes
+the endpoint and its borrowers. Keep ESP-NETIF, the event loop and the network
+interface alive until all endpoints have closed and deinitialized.
+ESP-IDF's core mutex is not recursive: call these endpoints from an ordinary
+application task without an outer core lock, never from native TCP/DNS callbacks
+or `tcpip_callback()` handlers that already hold that lock.
 
 Initialize an endpoint with `{0}` and exclusive receive storage:
 
@@ -224,10 +239,9 @@ a real raw endpoint with an injected software progress callback, without HAL,
 Pico SDK or OS symbols. Negative C11/C++17 probes require the basic stream to
 exclude connection callbacks, status types and endpoint states. These fixture providers do not replace native toolchain or network acceptance.
 
-Qualify the selected stack on hardware with DNS/link loss, native memory limits,
-TCP backpressure, last data plus FIN, close retry, sustained RX, suspend and
-OTA/Flash quiescence. Core execution/locking and timer progress must match the
-actual native provider configuration.
+The CMake consumer suite also executes a threaded core-lock probe with native
+threads and ThreadSanitizer. It runs independent TCP callbacks concurrently
+with owner state queries and listener rejection, using paired core hooks.
 
 ## Known Limits
 

@@ -21,11 +21,16 @@
  * A listener accepts one peer at a time. Retire that peer explicitly before
  * accepting the next one; this keeps borrowed session state observable.
  *
- * Every API and the returned transport callbacks must execute in the same lwIP
- * core context as raw TCP/DNS callbacks, serialized by one owner. With an OS,
- * use the provider's documented core execution/locking mechanism. No API is
- * ISR-safe, and no callback may concurrently access this handle. A different
- * core/task must post a bounded request to the owner rather than call directly.
+ * One owner serializes every API and returned transport callback. Raw TCP/DNS
+ * callbacks share its lwIP core execution region. A polling stack runs them on
+ * that owner; an independently driven stack supplies paired owner hooks that
+ * exclude its native callbacks through the stack's core lock. All callback-
+ * shared endpoint state, including state observations, is accessed under those
+ * hooks. No API is ISR-safe. A different application task must post a bounded
+ * request to the owner rather than call the handle directly.
+ * With nonrecursive core-lock hooks, the application must enter these APIs
+ * without an outer native core lock; native TCP/DNS callbacks must not call
+ * back into the endpoint. ESP-IDF's threaded provider uses this model.
  *
  * begin is asynchronous. The owner imposes its own DNS/connection deadline and
  * calls close to cancel; this adapter creates no independent timebase. Native
@@ -80,9 +85,11 @@ typedef struct {
    */
   void (*progress)(void *context);
   void *progress_context; /**< Borrowed until successful deinit; may be NULL. */
-  /** @brief Optional paired native core entry/exit hooks around raw API calls.
-   * They wrap raw API calls independently of explicit progress, must not recurse,
-   * make concurrent use of this handle safe. NULL requires no native locking. */
+  /** @brief Optional paired core entry/exit hooks for callback-shared state.
+   * They wrap raw API calls and state queries independently of explicit progress.
+   * A threaded stack must exclude native callbacks while a hook pair is held.
+   * They must not recurse and do not allow concurrent application callers.
+   * NULL requires callbacks to run on the same serialized polling owner. */
   void (*owner_enter)(void *context);
   void (*owner_leave)(void *context); /**< Must be paired with owner_enter. */
   void *owner_context; /**< Borrowed until successful deinit. */

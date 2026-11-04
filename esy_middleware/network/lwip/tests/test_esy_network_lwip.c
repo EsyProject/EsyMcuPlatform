@@ -29,6 +29,7 @@ typedef struct {
   bool connect_on_progress;
   bool error_on_progress;
   bool reenter_on_progress;
+  bool connect_on_owner_enter;
 } network_lwip_test_ctx_t;
 
 static network_lwip_test_ctx_t s_ctx;
@@ -410,7 +411,13 @@ void test_explicit_provider_progress_advances_io_and_rejects_recursive_operation
 }
 
 static void owner_enter(void *context) {
-  ++((network_lwip_test_ctx_t *)context)->owner_enters;
+  network_lwip_test_ctx_t *test = context;
+  ++test->owner_enters;
+  /* Native callback completion can precede acquiring a threaded stack's lock. */
+  if (test->connect_on_owner_enter) {
+    test->connect_on_owner_enter = false;
+    TEST_ASSERT_EQUAL(ERR_OK, fake_lwip_connect());
+  }
 }
 
 static void owner_leave(void *context) {
@@ -493,6 +500,28 @@ void test_network_owner_callbacks_are_paired_and_preserved_through_close_retry(v
   fake_lwip_fail(ERR_OK, ERR_OK, ERR_MEM, ERR_OK);
   TEST_ASSERT_EQUAL(ESY_ERR_BUSY, esy_network_lwip_close(&s_ctx.handle));
   TEST_ASSERT_EQUAL_UINT(s_ctx.owner_enters, s_ctx.owner_leaves);
+}
+
+void test_state_query_observes_native_completion_after_core_entry(void) {
+  s_ctx.config.owner_enter = owner_enter;
+  s_ctx.config.owner_leave = owner_leave;
+  s_ctx.config.owner_context = &s_ctx;
+  initialize();
+  TEST_ASSERT_EQUAL(ESY_OK,
+      esy_network_lwip_begin(&s_ctx.handle, "192.0.2.1", TEST_PORT));
+  unsigned entries = s_ctx.owner_enters;
+  s_ctx.connect_on_owner_enter = true;
+  TEST_ASSERT_EQUAL(ESY_NETWORK_CONNECTED,
+      esy_network_lwip_get_state(&s_ctx.handle));
+  TEST_ASSERT_EQUAL_UINT(entries + 1u, s_ctx.owner_enters);
+  TEST_ASSERT_FALSE(s_ctx.connect_on_owner_enter);
+  TEST_ASSERT_EQUAL_UINT(s_ctx.owner_enters, s_ctx.owner_leaves);
+  entries = s_ctx.owner_enters;
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE,
+      esy_network_lwip_listen(&s_ctx.handle, TEST_PORT, 1u));
+  TEST_ASSERT_EQUAL_UINT(entries + 1u, s_ctx.owner_enters);
+  TEST_ASSERT_EQUAL_UINT(s_ctx.owner_enters, s_ctx.owner_leaves);
+  TEST_ASSERT_EQUAL_UINT(1u, fake_lwip_live_pcbs());
 }
 
 void test_connection_getter_and_status_reject_invalid_inputs_without_overwriting_outputs(void) {

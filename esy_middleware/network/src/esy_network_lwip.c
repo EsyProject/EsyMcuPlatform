@@ -48,11 +48,11 @@ static esy_network_lwip_ctx_t *get_ctx(esy_network_lwip_t *handle) {
       (esy_network_lwip_ctx_t *)(void *)handle->priv.bytes;
 }
 
-static void enter_owner(esy_network_lwip_ctx_t *ctx) {
+static void enter_owner(const esy_network_lwip_ctx_t *ctx) {
   if (ctx->owner_enter != NULL) ctx->owner_enter(ctx->owner_context);
 }
 
-static void leave_owner(esy_network_lwip_ctx_t *ctx) {
+static void leave_owner(const esy_network_lwip_ctx_t *ctx) {
   if (ctx->owner_leave != NULL) ctx->owner_leave(ctx->owner_context);
 }
 
@@ -430,9 +430,13 @@ esy_err_t esy_network_lwip_listen(esy_network_lwip_t *handle, uint16_t port,
                                  uint8_t backlog) {
   esy_network_lwip_ctx_t *ctx = get_ctx(handle);
   if (ctx == NULL || port == 0u || backlog == 0u) return ESY_ERR_INVALID_ARG;
-  if (!ctx->initialized || ctx->state != ESY_NETWORK_IDLE) return ESY_ERR_STATE;
+  if (!ctx->initialized) return ESY_ERR_STATE;
   if (ctx->in_progress) return ESY_ERR_BUSY;
   enter_owner(ctx);
+  if (ctx->state != ESY_NETWORK_IDLE) {
+    leave_owner(ctx);
+    return ESY_ERR_STATE;
+  }
   struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
   esy_err_t result = ESY_OK;
   if (pcb == NULL) {
@@ -459,8 +463,11 @@ esy_err_t esy_network_lwip_listen(esy_network_lwip_t *handle, uint16_t port,
 esy_network_state_t esy_network_lwip_get_state(const esy_network_lwip_t *handle) {
   const esy_network_lwip_ctx_t *ctx = handle == NULL ? NULL :
       (const esy_network_lwip_ctx_t *)(const void *)handle->priv.bytes;
-  return ctx == NULL || !ctx->initialized ?
-      ESY_NETWORK_UNINITIALIZED : ctx->state;
+  if (ctx == NULL || !ctx->initialized) return ESY_NETWORK_UNINITIALIZED;
+  enter_owner(ctx);
+  esy_network_state_t state = ctx->state;
+  leave_owner(ctx);
+  return state;
 }
 
 esy_err_t esy_network_lwip_get_stream(esy_network_lwip_t *handle,
