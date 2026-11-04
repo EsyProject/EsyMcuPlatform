@@ -14,8 +14,7 @@
  * One global station backend is available. Direct callers must serialize every
  * operation, including queries and deinit, in task context on an SDK-supported
  * execution core; none is ISR-safe. Do not mix direct station-control calls with
- * an initialized Wi-Fi manager. The process owner must poll at a product-selected
- * interval. The network-runtime descriptor query is independent of station control.
+ * an initialized Wi-Fi manager. The owner must call process at a product-selected interval. The network-runtime descriptor query is independent of station control.
  *
  * Configuration is copied shallowly: SSID/password remain caller-owned and
  * immutable until deinit, including start/init failures and retry. A failed
@@ -23,8 +22,11 @@
  * reclaiming strings or handing ownership to a different client. Repeated start
  * replaces the current attempt and deadline. Deinit stops the backend, is safe
  * when already stopped, and permits subsequent start/init. Network clients must
- * be quiescent before deinit. The SDK's init-failure cleanup and hardware
- * shutdown behavior require port smoke validation.
+ * be quiescent before repeated start or deinit. Cleanup failure retains native
+ * ownership for another deinit attempt. ESP32 borrows the consumer-initialized
+ * esp-netif stack and default event loop, exclusively owns the Wi-Fi driver and
+ * default STA netif, disables Wi-Fi NVS and stores credentials only in RAM.
+ * Its native SDK owns its tasks, buffers, handlers and internal allocations.
  */
 
 #include <stdbool.h>
@@ -64,7 +66,9 @@ extern void esy_hb_wifi_default_cfg(esy_wifi_config_t *config);
 extern esy_err_t esy_hb_wifi_start_sta(const esy_wifi_config_t *config);
 
 /**
- * @brief Drive one non-blocking station connection processing iteration.
+ * @brief Drive one incremental station connection processing iteration.
+ * ESP32 queries association without waiting for it or DHCP. Native status and
+ * terminal stop operations contribute synchronous provider latency.
  *
  * @retval ESY_OK Connected.
  * @retval ESY_ERR_BUSY Connection is still in progress or a native retry is
@@ -124,6 +128,14 @@ extern esy_err_t esy_hb_wifi_get_ipv4_addr(esy_wifi_ipv4_addr_t *out_addr);
  * Quiesce and detach all borrowers before native shutdown or replacement;
  * callbacks must not reenter Wi-Fi lifecycle operations. The Pico polling port
  * uses NULL context and defensively ignores calls while not initialized.
+ * ESP32 progress is a no-op because native tasks drive TCP/IP. Its enter/leave
+ * acquire/release the native core lock and require both
+ * CONFIG_LWIP_TCPIP_CORE_LOCKING and CONFIG_LWIP_CHECK_THREAD_SAFETY; without
+ * those options this query rejects with NOT_SUPPORTED without changing output.
+ * The consumer-initialized TCP/IP stack must remain alive while hooks are used.
+ * Its core mutex is nonrecursive: use enter/leave only from an ordinary app
+ * owner task with no outer core lock, never from native TCP/DNS callbacks or
+ * tcpip_callback context. Endpoints using these hooks must not nest their calls.
  *
  * @param[out] out_runtime Written only on success.
  * @retval ESY_OK All three hooks supplied; native initialization is unchanged.
@@ -134,9 +146,15 @@ extern esy_err_t esy_hb_wifi_get_network_runtime(
     esy_wifi_network_runtime_t *out_runtime);
 
 /**
- * @brief Deinitialize the Wi-Fi backend.
+ * @brief Stop and release backend-owned native resources; retry on failure.
+ * Network borrowers must be quiescent. Success cancels the deadline and permits
+ * a new start; failure preserves ownership and all remaining cleanup stages.
+ * ESP32 does not destroy the borrowed esp-netif stack/default event loop or
+ * initialize/erase NVS. Pico's native deinit has no status and maps to ESY_OK.
+ * @retval ESY_OK Stopped, including repeated deinit.
+ * @retval <0 Native cleanup failed; keep owner/credentials alive and retry.
  */
-extern void esy_hb_wifi_deinit(void);
+extern esy_err_t esy_hb_wifi_deinit(void);
 
 #ifdef __cplusplus
 }

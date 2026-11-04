@@ -115,10 +115,13 @@ int main(void) {
   if (!esy_hal_wifi_is_connected()) return 7;
   if (esy_hal_wifi_get_ipv4_addr(&address) != ESY_OK) return 8;
   if (esy_hal_wifi_get_ipv4_addr(NULL) != ESY_ERR_INVALID_ARG) return 9;
-  esy_hal_wifi_deinit();
+  fake->deinit_result = ESY_ERR_IO;
+  if (esy_hal_wifi_deinit() != ESY_ERR_IO || !esy_hal_wifi_is_connected()) return 19;
+  fake->deinit_result = ESY_OK;
+  if (esy_hal_wifi_deinit() != ESY_OK) return 20;
   if (esy_hal_wifi_is_connected()) return 10;
   if (esy_hal_wifi_init_sta(&config) != ESY_OK) return 11;
-  esy_hal_wifi_deinit();
+  if (esy_hal_wifi_deinit() != ESY_OK) return 21;
   return 0;
 }
 '''
@@ -159,7 +162,8 @@ class WifiConsumerTests(unittest.TestCase):
             self.assertEqual(valid, result.returncode == 0, result.stdout + result.stderr)
             if not valid:
                 expected = ('ENABLE_ESY_WIFI_MANAGER requires' if not wifi else
-                            'not implemented' if platform in ('ESP32', 'STM32F4') else
+                            'ENABLE_ESY_WIFI requires ENABLE_ESY_SYSTEM' if platform == 'ESP32' else
+                            'not implemented' if platform == 'STM32F4' else
                             'Pico W-class' if platform not in ('PICO_W', 'PICO2_W') else
                             'requires consumer target esy_wifi_provider')
                 self.assertIn(expected, result.stderr)
@@ -201,9 +205,12 @@ class WifiConsumerTests(unittest.TestCase):
         self.run_case(provider=False)
 
     def test_unsupported_platforms_are_rejected(self):
-        for platform in ('PICO', 'PICO2', 'STM32F4', 'ESP32'):
+        for platform in ('PICO', 'PICO2', 'STM32F4'):
             with self.subTest(platform=platform):
                 self.run_case(platform=platform)
+
+    def test_esp32_station_requires_system_before_native_assembly(self):
+        self.run_case(platform='ESP32')
 
 
 if __name__ == '__main__':

@@ -138,9 +138,12 @@ esy_err_t esy_wifi_manager_process(esy_wifi_manager_t *manager);
  * @retval ESY_OK Stopped; a concurrent request after cancellation remains pending.
  * @retval ESY_ERR_INVALID_ARG NULL manager.
  * @retval ESY_ERR_STATE Uninitialized manager or invalid device.
- * @retval <0 Device acquisition/release failure, recorded as last_error.
+ * @retval <0 Device or native cleanup failure, recorded as last_error.
  * @note Stop network consumers before calling. A failed acquisition leaves
  * requests/backend unchanged. A registered manager requires a started registry.
+ * A backend cleanup failure invalidates connection/address snapshots and keeps
+ * the exclusive owner alive. Process returns STATE until stop/deinit cleanup
+ * succeeds; later connection requests remain pending behind that cleanup.
  */
 esy_err_t esy_wifi_manager_stop(esy_wifi_manager_t *manager);
 
@@ -151,6 +154,7 @@ esy_err_t esy_wifi_manager_stop(esy_wifi_manager_t *manager);
  * @retval ESY_ERR_INVALID_ARG NULL manager.
  * @retval ESY_ERR_STATE Not the owner, including repeated deinit.
  * @retval ESY_ERR_BUSY Still bound to a device; detach it first.
+ * @retval <0 Native cleanup failure; the backend and manager remain owned.
  * @note Failure leaves ownership/storage intact. Deinit is valid after a failed
  * connection attempt. Before reclaiming storage, unregister the device (or
  * deinit its quiescent registry then unregister the surviving binding).

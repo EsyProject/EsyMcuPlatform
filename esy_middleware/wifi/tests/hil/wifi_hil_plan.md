@@ -36,3 +36,23 @@ Do not include real credentials in public logs or test artifacts.
    Verify execution-from-Flash restrictions, bounded task quiescence when needed,
    watchdog service and network/OTA recovery. If OTA or a mechanism is absent,
    record the configuration-based reason it is not applicable.
+
+## Classic ESP32 WPA2 AES Compatibility
+
+Use the pinned native ESP-IDF consumer configuration and an AP that can select
+WPA2-only or WPA/WPA2 mixed authentication with a CCMP-only pairwise cipher.
+A second ESP32 SoftAP may provide the mixed case with
+`WIFI_AUTH_WPA_WPA2_PSK` and `WIFI_CIPHER_TYPE_CCMP`. Keep credentials out of
+logs; record the native AP authentication and cipher reports with each result.
+
+1. Use `ESY_WIFI_AUTH_WPA2_AES_PSK`, then connect to both AP configurations.
+   For the mixed case, confirm `esp_wifi_sta_get_ap_info()` reports
+   `WIFI_AUTH_WPA_WPA2_PSK` and `WIFI_CIPHER_TYPE_CCMP`. Require the manager to
+   reach CONNECTED, obtain DHCP IPv4 and sustain TCP traffic across repeated
+   owner polls without an `ESY_ERR_NOT_SUPPORTED` result or repeated station
+   stop/start cycles. Stop, reconnect and repeat to check the explicit lifecycle.
+2. Repeat with WPA-only authentication and with WPA2/mixed APs reporting TKIP
+   or TKIP+CCMP. Require rejection by the native authentication threshold or
+   the backend's CCMP check; never report a successful WPA2 AES connection for
+   these cases. An associated but incompatible cipher must terminate with
+   `ESY_ERR_NOT_SUPPORTED`. Reconnect to the mixed/CCMP AP to confirm recovery.

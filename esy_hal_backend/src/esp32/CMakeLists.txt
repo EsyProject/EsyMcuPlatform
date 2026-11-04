@@ -182,7 +182,16 @@ if(ENABLE_ESY_FLASH)
 endif()
 
 if(ENABLE_ESY_WIFI)
-    message(FATAL_ERROR "ENABLE_ESY_WIFI is not implemented for ESY_TARGET_PLATFORM=ESP32")
+    if(NOT ENABLE_ESY_SYSTEM)
+        message(FATAL_ERROR "ENABLE_ESY_WIFI requires ENABLE_ESY_SYSTEM")
+    endif()
+    foreach(esy_wifi_provider IN ITEMS esp_wifi esp_netif esp_event esp_timer lwip)
+        if(NOT TARGET idf::${esy_wifi_provider})
+            message(FATAL_ERROR "ESP32 Wi-Fi requires the native idf::${esy_wifi_provider} component")
+        endif()
+        list(APPEND MODULE_DEPS idf::${esy_wifi_provider})
+    endforeach()
+    list(APPEND MODULE_SRCS esy_hb_wifi.c)
 endif()
 
 # ---- Attach sources and dependencies to esy_hal_backend ----

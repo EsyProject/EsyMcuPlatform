@@ -21,6 +21,7 @@ typedef struct {
   esy_err_t process_result;
   esy_err_t address_result;
   esy_err_t runtime_result;
+  esy_err_t deinit_result;
   bool connected;
   uint32_t start_calls;
   uint32_t process_calls;

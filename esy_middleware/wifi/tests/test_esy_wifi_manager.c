@@ -42,6 +42,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+  s_ctx.fake->deinit_result = ESY_OK;
   (void)esy_device_registry_system_resume(&s_ctx.registry);
   (void)esy_device_registry_deinit(&s_ctx.registry);
   if (s_ctx.binding.manager != NULL) {
@@ -286,6 +287,59 @@ void test_stop_releases_activity_and_allows_fresh_connection(void) {
   TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_wifi_manager_get_ipv4_addr(&s_ctx.manager, &address));
   TEST_ASSERT_EQUAL(ESY_OK, esy_device_registry_runtime_suspend_idle(&s_ctx.registry));
   connect(); TEST_ASSERT_EQUAL_UINT32(2u, s_ctx.fake->start_calls);
+}
+
+void test_failed_stop_retains_owner_and_prevents_restart_until_cleanup_succeeds(void) {
+  initialize(); connect();
+  s_ctx.fake->deinit_result = ESY_ERR_IO;
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_wifi_manager_stop(&s_ctx.manager));
+  TEST_ASSERT_TRUE(s_ctx.manager.initialized);
+  TEST_ASSERT_EQUAL(ESY_WIFI_MANAGER_STATE_FAILED,
+                    esy_wifi_manager_get_state(&s_ctx.manager));
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_wifi_manager_get_last_error(&s_ctx.manager));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY,
+                    esy_wifi_manager_init(&s_ctx.other, &s_ctx.config));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_wifi_manager_request_connect(&s_ctx.manager));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_wifi_manager_process(&s_ctx.manager));
+  TEST_ASSERT_EQUAL_UINT32(1u, s_ctx.fake->start_calls);
+  TEST_ASSERT_EQUAL_UINT32(1u, s_ctx.fake->process_calls);
+  s_ctx.fake->deinit_result = ESY_OK;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_wifi_manager_stop(&s_ctx.manager));
+  connect();
+  TEST_ASSERT_EQUAL_UINT32(2u, s_ctx.fake->start_calls);
+}
+
+void test_failed_deinit_preserves_credentials_and_exclusive_owner_for_retry(void) {
+  initialize(); connect();
+  s_ctx.fake->deinit_result = ESY_ERR_TIMEOUT;
+  TEST_ASSERT_EQUAL(ESY_ERR_TIMEOUT, esy_wifi_manager_deinit(&s_ctx.manager));
+  TEST_ASSERT_TRUE(s_ctx.manager.initialized);
+  TEST_ASSERT_EQUAL_STRING("test", s_ctx.manager.config.sta_config.ssid);
+  TEST_ASSERT_EQUAL_STRING("secret", s_ctx.manager.config.sta_config.password);
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY,
+                    esy_wifi_manager_init(&s_ctx.other, &s_ctx.config));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_wifi_manager_process(&s_ctx.manager));
+  s_ctx.fake->deinit_result = ESY_OK;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_wifi_manager_deinit(&s_ctx.manager));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_wifi_manager_init(&s_ctx.other, &s_ctx.config));
+}
+
+void test_failed_pm_cleanup_reports_fault_semantics_without_marking_suspended(void) {
+  initialize(); bind_device(true); connect();
+  s_ctx.fake->deinit_result = ESY_ERR_IO;
+  /* Exercise the registered PM adapter directly so that this fixture can
+   * release its owner; the device core's permanent fault policy is tested there. */
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, s_ctx.binding.device.ops->pm_action(
+      &s_ctx.binding.device, ESY_DEVICE_PM_ACTION_SYSTEM_SUSPEND,
+      ESY_POWER_STATE_RETENTION));
+  TEST_ASSERT_FALSE(s_ctx.binding.suspended);
+  TEST_ASSERT_TRUE(s_ctx.manager.initialized);
+  TEST_ASSERT_EQUAL(ESY_ERR_IO, esy_wifi_manager_get_last_error(&s_ctx.manager));
+  TEST_ASSERT_EQUAL(ESY_ERR_STATE, esy_wifi_manager_process(&s_ctx.manager));
+  TEST_ASSERT_EQUAL(ESY_ERR_BUSY,
+                    esy_wifi_manager_init(&s_ctx.other, &s_ctx.config));
+  s_ctx.fake->deinit_result = ESY_OK;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_wifi_manager_stop(&s_ctx.manager));
 }
 
 void test_config_boundaries_and_auth_validation(void) {

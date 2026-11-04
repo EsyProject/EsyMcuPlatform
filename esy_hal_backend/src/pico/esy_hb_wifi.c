@@ -258,13 +258,14 @@ esy_err_t esy_hb_wifi_get_ipv4_addr(esy_wifi_ipv4_addr_t *out_addr) {
   return ESY_OK;
 }
 
-void esy_hb_wifi_deinit(void) {
+esy_err_t esy_hb_wifi_deinit(void) {
   if (!s_ctx.initialized) {
-    return;
+    return ESY_OK;
   }
 
   cyw43_arch_deinit();
   s_ctx.connected = false;
   s_ctx.connect_active = false;
   s_ctx.initialized = false;
+  return ESY_OK;
 }

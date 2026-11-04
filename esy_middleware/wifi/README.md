@@ -19,8 +19,8 @@ the consumer.
 
 The consumer defines `ENABLE_ESY_WIFI_MANAGER` and `ENABLE_ESY_WIFI` in its feature
 import file. Link `esy_wifi_manager`; its public dependencies supply common
-headers. Wi-Fi currently supports Pico W and Pico 2 W. Other ports reject the
-feature during configuration.
+headers. Wi-Fi supports Pico W, Pico 2 W and classic ESP32. Other ports reject
+the feature during configuration.
 
 The optional [build integration](../../docs/integration/build_integration.md),
 enabled by early import, supplies a default `esy_wifi_provider` on Pico W/Pico 2 W
@@ -49,6 +49,49 @@ provider compatible with the consumer's Pico SDK; threaded/background provider
 variants are outside this integration contract. The SDK comes from the consumer,
 not this module. Keep backend operations on an SDK-supported execution core and
 service the poll loop at an appropriate interval.
+
+### Classic ESP32
+
+Use the native ESP-IDF provider with `ENABLE_ESY_SYSTEM` and `ENABLE_ESY_WIFI`.
+SDK discovery supplies `idf::esp_wifi`, `idf::esp_netif`, `idf::esp_event`,
+`idf::esp_timer` and `idf::lwip`; no CYW43 provider target is used. Before the
+first station start, the consumer initializes esp-netif and creates the default
+event loop using `esp_netif_init()` and `esp_event_loop_create_default()`.
+The backend borrows these shared resources and never destroys them, initializes
+NVS or erases an NVS partition. It rejects an already initialized native Wi-Fi
+driver or an existing default station netif instead of adopting it. Exclude
+external native Wi-Fi lifecycle/control calls until backend deinit succeeds.
+
+The backend creates its station netif/default SDK handlers and native Wi-Fi
+driver, sets `nvs_enable=false` and selects `WIFI_STORAGE_RAM`. Credentials and
+Wi-Fi settings are not persisted by this path. Native start/stop/deinit may
+allocate, free or wait inside ESP-IDF; this is provider-owned lifecycle work.
+The native Wi-Fi, event and TCP/IP tasks drive association and DHCP independently
+of the manager. One existing consumer task still owns station start/process/stop;
+the platform creates no additional manager task or application event callback.
+Association completes before DHCP: the manager may be CONNECTED while its IPv4
+query still returns `STATE`.
+
+SSID length is 1..32 bytes. OPEN uses an empty password; PSK accepts an 8..63-byte
+passphrase or exactly 64 hexadecimal digits. WPA2 AES accepts WPA2-capable APs
+that also support WPA and requires CCMP after association; WPA-only APs and
+non-CCMP cipher reports remain unsupported in this mode. Mixed mode accepts
+WPA/WPA2 personal networks. The connect timeout
+uses the SDK's monotonic signed 64-bit microsecond clock, includes start latency,
+and covers the complete `uint32_t` millisecond range when the deadline fits
+`INT64_MAX`. Light sleep advances elapsed time; deep sleep starts a new session.
+Zero selects an immediate deadline after the first association sample. Polling
+determines deadline-observation latency. Completion, timeout and cancellation
+disable the one-shot attempt; only explicit start enables another attempt.
+The blocking HAL convenience init uses one-millisecond hardware busy delays and
+does not actively yield; prefer the incremental manager or HAL start/process.
+
+`esy_hal_wifi_get_network_runtime()` supplies a no-op progress hook and paired
+TCP/IP core-lock hooks when both `CONFIG_LWIP_TCPIP_CORE_LOCKING` and
+`CONFIG_LWIP_CHECK_THREAD_SAFETY` are enabled. Without both it returns
+`NOT_SUPPORTED`, leaving station control available. The hooks borrow the live
+TCP/IP stack and do not advance station deadlines or retry policy. Stop and
+detach all network clients before repeated station start, stop or deinit.
 
 ### Usage Example
 
@@ -111,6 +154,7 @@ failed init; retry init instead.
 | Init another instance | `BUSY`; original owner retained, new object untouched. |
 | Failed connection | Manager remains initialized and owns its backend resources; retry process, stop or cleanly deinit. |
 | Stop | Cancels requests published before cancellation and shuts down the backend; manager and binding remain usable. |
+| Failed native stop/deinit | Invalidates connection/address snapshots; retains manager, credentials and exclusive backend ownership for cleanup retry. Process returns `STATE` until stop/deinit succeeds. |
 | Deinit while bound | `BUSY`; caller must detach first. |
 | Successful deinit | Stops backend, clears storage and releases reservation; init may run again. |
 | Repeated deinit | `STATE`; no backend operation. |
@@ -142,6 +186,9 @@ connection I/O; the next process call reconnects, including a request arriving
 while suspended. Network clients need their own product quiescence/dependency
 policy before system suspend; a Wi-Fi binding alone does not represent active
 TCP transactions or OTA work.
+If native suspend cleanup fails after partial shutdown, the PM adapter returns
+`STATE` to fault the device graph and retains manager/provider ownership. It does
+not report a successful suspension or allow process to restart that provider.
 
 ### Errors and polling
 
@@ -168,8 +215,9 @@ the direct HAL/backend API remain borrowed until backend deinit instead.
 There is no manager heap allocation, task, timer, ISR or queue. A module context
 holds only the explicit exclusive-owner reservation. Runtime data remains in
 the caller-owned manager and optional binding. The Pico SDK may own hardware,
-network and allocation resources; those side effects depend on the selected port
-and provider configuration. Public concrete storage uses 32-bit C11 atomics and
+network and allocation resources. ESP-IDF owns its driver buffers, station netif,
+default handlers and native tasks; the consumer retains ownership of the shared
+TCP/IP stack and event loop. Public concrete storage uses 32-bit C11 atomics and
 C++ layout representations; callers access fields only through library APIs.
 
 ## Verification
@@ -186,8 +234,10 @@ python3 -B check_coverage.py build/artifacts/gcov/gcovr/coverage.json
 
 Unit tests cover initialization, exclusive ownership, binding failure/cleanup,
 credential copies and bounds, request coalescing, runtime/system suspend/resume,
-rollback, stop/reinit, delayed/changed IPv4 and error recording. CMake regressions
-exercise real module target interfaces with a reusable fake HAL backend facade and
+rollback, stop/reinit, delayed/changed IPv4, native cleanup failure retention and
+PM fault reporting. Reusable fakes preserve a failed deinit result until the test
+explicitly permits retry. CMake regressions exercise real module target
+interfaces with a reusable fake HAL backend facade and
 the real HAL forwarding source, C11/C++17 clients, feature-off isolation,
 missing providers and unsupported ports. Concurrent request/query producers,
 process/stop and runtime PM also run under ThreadSanitizer; memory checks run
@@ -198,18 +248,19 @@ CI runs source contracts, these regressions and a coverage gate requiring the
 complete manager production-source population and at least 85% line and branch
 coverage per file. Report paths must resolve to local production sources using
 the platform, module or test directory as an explicit root. Foreign namesakes
-and duplicate aliases are rejected. See
-[hardware qualification](tests/hil/wifi_hil_plan.md) for target test procedures.
+and duplicate aliases are rejected.
 
 ## Known Limits
 
 - One station backend and one initialized manager; no multi-radio support.
-- Direct consumers provide `esy_wifi_provider`; optional build integration
+- Direct Pico consumers provide `esy_wifi_provider`; optional build integration
   supplies a polling default on Pico W/Pico 2 W. Network configuration remains
   consumer-owned; no fixed `specs` target or RP2350 RTOS include path is injected.
-- Hardware connection timing, SDK initialization-failure cleanup, power/IRQ/DMA
-  shutdown and Flash/OTA coexistence depend on the selected target and SDK.
-- No AP mode, scanning, IPv6, event callbacks or automatic background task.
+- ESP32 supports the native station interface with RAM settings, DHCP IPv4 and
+  caller-driven connection deadlines. Authentication failures without an
+  established association remain pending until the deadline; no disconnect-reason
+  callback, automatic retry policy or persistent Wi-Fi credential store is exposed.
+- No AP mode, scanning, IPv6, public event callbacks or manager-owned task.
 
 The atomic implementation follows the [selected backend](../../docs/integration/atomic_backends.md).
 RP2040 uses Pico SDK IRQ-masked hardware spinlocks; requests and snapshots remain

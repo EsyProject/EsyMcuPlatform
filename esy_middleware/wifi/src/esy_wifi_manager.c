@@ -16,6 +16,7 @@
 typedef struct {
   /* Lifecycle calls are externally serialized; the backend has one owner. */
   esy_wifi_manager_t *owner;
+  bool cleanup_required;
 } esy_wifi_manager_ctx_t;
 
 static esy_wifi_manager_ctx_t s_ctx;
@@ -124,6 +125,14 @@ static esy_err_t finish_connected(esy_wifi_manager_t *manager) {
   return ret;
 }
 
+static void retain_failed_cleanup(esy_wifi_manager_t *manager, esy_err_t error) {
+  s_ctx.cleanup_required = true;
+  manager->connect_started = false;
+  atomic_store(&manager->state, ESY_WIFI_MANAGER_STATE_FAILED);
+  atomic_store(&manager->has_ipv4_addr, 0u);
+  atomic_store(&manager->last_error, error);
+}
+
 esy_err_t esy_wifi_manager_process(esy_wifi_manager_t *manager) {
   esy_err_t ret;
   if (manager == NULL) return ESY_ERR_INVALID_ARG;
@@ -133,6 +142,7 @@ esy_err_t esy_wifi_manager_process(esy_wifi_manager_t *manager) {
     atomic_store(&manager->last_error, ret);
     return ret;
   }
+  if (s_ctx.cleanup_required) return wifi_release(manager, ESY_ERR_STATE);
 
   if (atomic_load(&manager->state) == ESY_WIFI_MANAGER_STATE_CONNECTED) {
     if (esy_hal_wifi_is_connected()) {
@@ -189,7 +199,12 @@ esy_err_t esy_wifi_manager_stop(esy_wifi_manager_t *manager) {
   }
   /* Requests published after this cancellation remain pending for process(). */
   atomic_store(&manager->connect_requested, 0u);
-  esy_hal_wifi_deinit();
+  ret = esy_hal_wifi_deinit();
+  if (ret != ESY_OK) {
+    retain_failed_cleanup(manager, ret);
+    return wifi_release(manager, ret);
+  }
+  s_ctx.cleanup_required = false;
   manager->connect_started = false;
   atomic_store(&manager->has_ipv4_addr, 0u);
   atomic_store(&manager->state, ESY_WIFI_MANAGER_STATE_IDLE);
@@ -201,9 +216,14 @@ esy_err_t esy_wifi_manager_deinit(esy_wifi_manager_t *manager) {
   if (s_ctx.owner != manager) return ESY_ERR_STATE;
   if (manager->device != NULL) return ESY_ERR_BUSY;
   /* Lifecycle callers have quiesced request/query/process and PM endpoints. */
-  esy_hal_wifi_deinit();
+  esy_err_t ret = esy_hal_wifi_deinit();
+  if (ret != ESY_OK) {
+    retain_failed_cleanup(manager, ret);
+    return ret;
+  }
   memset(manager, 0, sizeof(*manager));
   s_ctx.owner = NULL;
+  s_ctx.cleanup_required = false;
   return ESY_OK;
 }
 
@@ -218,14 +238,22 @@ static esy_err_t wifi_device_pm_action(esy_device_t *device,
   manager = binding->manager;
   switch (action) {
     case ESY_DEVICE_PM_ACTION_RUNTIME_SUSPEND:
-    case ESY_DEVICE_PM_ACTION_SYSTEM_SUSPEND:
+    case ESY_DEVICE_PM_ACTION_SYSTEM_SUSPEND: {
       if (binding->suspended) return ESY_ERR_STATE;
-      esy_hal_wifi_deinit();
+      esy_err_t ret = esy_hal_wifi_deinit();
+      if (ret != ESY_OK) {
+        retain_failed_cleanup(manager, ret);
+        /* Native shutdown may already have released part of the provider.
+         * STATE faults the graph rather than advertising a reversible suspend. */
+        return ESY_ERR_STATE;
+      }
+      s_ctx.cleanup_required = false;
       atomic_store(&manager->state, ESY_WIFI_MANAGER_STATE_DISCONNECTED);
       manager->connect_started = false;
       atomic_store(&manager->has_ipv4_addr, 0u);
       binding->suspended = true;
       return ESY_OK;
+    }
     case ESY_DEVICE_PM_ACTION_RUNTIME_RESUME:
     case ESY_DEVICE_PM_ACTION_SYSTEM_RESUME:
       if (!binding->suspended) return ESY_ERR_STATE;

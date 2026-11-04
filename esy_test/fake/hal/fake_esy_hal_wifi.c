@@ -90,7 +90,9 @@ esy_err_t esy_hal_wifi_get_network_runtime(
   return s_ctx.state.runtime_result;
 }
 
-void esy_hal_wifi_deinit(void) {
+esy_err_t esy_hal_wifi_deinit(void) {
   s_ctx.state.deinit_calls++;
+  if (s_ctx.state.deinit_result != ESY_OK) return s_ctx.state.deinit_result;
   s_ctx.state.connected = false;
+  return ESY_OK;
 }

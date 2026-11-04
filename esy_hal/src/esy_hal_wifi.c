@@ -42,4 +42,4 @@ esy_err_t esy_hal_wifi_get_network_runtime(
   return ret;
 }
 
-void esy_hal_wifi_deinit(void) { esy_hb_wifi_deinit(); }
+esy_err_t esy_hal_wifi_deinit(void) { return esy_hb_wifi_deinit(); }
