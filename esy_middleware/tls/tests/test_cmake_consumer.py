@@ -79,6 +79,18 @@ add_subdirectory("${PLATFORM_ROOT}/esy_middleware/tls" tls)
         self.configure('set(ESY_MBEDTLS_PATH "${CMAKE_CURRENT_SOURCE_DIR}")\n'
                        "esy_configure_mbedtls_provider()\n", expected="complete Mbed TLS 3.6.x")
 
+    def test_helper_rejects_missing_build_info_instead_of_reading_version_header(self):
+        def prepare(source):
+            include = source / "provider/include/mbedtls"
+            include.mkdir(parents=True)
+            (include / "version.h").write_text(
+                '#define MBEDTLS_VERSION_STRING "3.6.7"\n', encoding="utf-8")
+            (source / "provider/CMakeLists.txt").write_text(
+                'message(FATAL_ERROR "Incomplete provider was executed")\n', encoding="utf-8")
+        self.configure('set(ESY_MBEDTLS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/provider")\n'
+                       "esy_configure_mbedtls_provider()\n", prepare=prepare,
+                       expected="must contain include/mbedtls/build_info.h")
+
     def test_helper_rejects_old_and_newer_incompatible_versions(self):
         for version in ("2.28.10", "3.7.0"):
             with self.subTest(version=version):
@@ -86,6 +98,8 @@ add_subdirectory("${PLATFORM_ROOT}/esy_middleware/tls" tls)
                     include = source / "provider/include/mbedtls"
                     include.mkdir(parents=True)
                     (include / "version.h").write_text(
+                        '#include "mbedtls/build_info.h"\n', encoding="utf-8")
+                    (include / "build_info.h").write_text(
                         f'#define MBEDTLS_VERSION_STRING "{version}"\n', encoding="utf-8")
                     (source / "provider/CMakeLists.txt").write_text(
                         'message(FATAL_ERROR "Incompatible provider was executed")\n', encoding="utf-8")
