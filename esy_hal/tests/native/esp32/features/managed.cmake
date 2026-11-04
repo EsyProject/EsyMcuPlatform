@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+# SPDX-License-Identifier: Apache-2.0
+
+include("${CMAKE_CURRENT_LIST_DIR}/peripherals.cmake")
+set(ENABLE_ESY_BOOTLOADER ON)
+set(ENABLE_ESY_OTA ON)
+set(ENABLE_ESY_OTA_FLASH ON)
+set(ENABLE_ESY_FAULT ON)
+set(ENABLE_ESY_COREDUMP ON)
+
+set(ENABLE_ESY_SPI_SCHEDULER ON)
+set(ENABLE_ESY_UART_TX_SCHEDULER ON)
+set(ENABLE_ESY_IO_SCHEDULER ON)

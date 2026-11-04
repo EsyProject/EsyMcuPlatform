@@ -167,6 +167,8 @@ target_link_libraries(consumer_cpp PRIVATE Esy::common)
                 "ENABLE_ESY_PROTO_MODBUS_UART_CHANNEL": "ON",
                 "ENABLE_ESY_SPI_SCHEDULER": "OFF",
                 "ENABLE_ESY_UART_TX_SCHEDULER": "ON",
+                "ENABLE_ESY_DMA_SCHEDULER": "OFF",
+                "ENABLE_ESY_PWM_SCHEDULER": "ON",
                 "USE_FULL_ASSERT": "ON",
                 "LV_USE_LOG": "OFF",
             }
@@ -427,13 +429,31 @@ file(APPEND "${{FIXTURE_EVENT_LOG}}" "project\n")
                                     device=None, native_app_update=False, native_uart=None,
                                     native_pwm=None, native_i2c=False,
                                     native_capture=False, native_spi=False, native_os_context=False,
-                                    native_freertos=False, native_random=True):
+                                    native_freertos=False, native_random=True, common_ds=True,
+                                    native_adc=False, native_wifi=(), native_flash=True,
+                                    missing_system=(), native_can=False, native_pm=False):
+        if platform == "ESP32" and native_uart and common_ds:
+            features += "\nset(ENABLE_ESY_COMMON_DS ON)\n"
         (directory / "esy_feature_import.cmake").write_text(features)
         native_provider = ("add_library(idf_app_update INTERFACE)\n"
                            "add_library(idf::app_update ALIAS idf_app_update)\n"
+                           "add_library(idf_partition INTERFACE)\n"
+                           "add_library(idf::esp_partition ALIAS idf_partition)\n"
                            if native_app_update else "")
+        if platform == "ESP32" and native_flash:
+            native_provider += ("add_library(idf_flash_provider INTERFACE)\n"
+                                "add_library(idf::spi_flash ALIAS idf_flash_provider)\n")
         if native_os_context:
             native_provider += "add_library(esy_os_context INTERFACE)\n"
+        if native_adc:
+            native_provider += ("add_library(idf_adc_provider INTERFACE)\n"
+                                "add_library(idf::esp_adc ALIAS idf_adc_provider)\n")
+        if native_can:
+            native_provider += ("add_library(idf_can_provider INTERFACE)\n"
+                                "add_library(idf::driver ALIAS idf_can_provider)\n")
+        if native_pm:
+            native_provider += ("add_library(idf_pm_provider INTERFACE)\n"
+                                "add_library(idf::esp_pm ALIAS idf_pm_provider)\n")
         if platform == "ESP32" and native_random:
             native_provider += ("add_library(idf_random_provider INTERFACE)\n"
                                 "add_library(idf::esp_hw_support ALIAS idf_random_provider)\n")
@@ -444,6 +464,8 @@ file(APPEND "${{FIXTURE_EVENT_LOG}}" "project\n")
         if native_uart:
             native_provider += ("add_library(idf_uart_provider INTERFACE)\n"
                                 f"add_library({native_uart} ALIAS idf_uart_provider)\n")
+            if backend_only and common_ds:
+                native_provider += "add_library(esy_common_ds INTERFACE)\n"
         if native_pwm:
             native_provider += ("add_library(idf_pwm_provider INTERFACE)\n"
                                 f"add_library({native_pwm} ALIAS idf_pwm_provider)\n")
@@ -456,9 +478,25 @@ file(APPEND "${{FIXTURE_EVENT_LOG}}" "project\n")
         if native_pwm == "idf::esp_driver_ledc" or native_i2c or native_capture or native_spi:
             native_provider += ("add_library(idf_gpio_provider INTERFACE)\n"
                                 "add_library(idf::esp_driver_gpio ALIAS idf_gpio_provider)\n")
-        if native_capture or native_i2c:
+        if native_capture:
+            native_provider += ("add_library(idf_capture_provider INTERFACE)\n"
+                                "add_library(idf::esp_driver_mcpwm ALIAS idf_capture_provider)\n")
+        if native_i2c:
             native_provider += ("add_library(idf_timer_provider INTERFACE)\n"
                                 "add_library(idf::esp_timer ALIAS idf_timer_provider)\n")
+        for provider in native_wifi:
+            native_provider += (f"if(NOT TARGET idf::{provider})\n"
+                                f"  add_library(idf_wifi_{provider} INTERFACE)\n"
+                                f"  add_library(idf::{provider} ALIAS idf_wifi_{provider})\n"
+                                "endif()\n")
+        if platform == "ESP32" and "set(ENABLE_ESY_SYSTEM ON)" in features:
+            for provider in ("esp_system", "esp_timer", "esp_rom"):
+                if provider in missing_system:
+                    continue
+                native_provider += (f"if(NOT TARGET idf::{provider})\n"
+                                    f"  add_library(idf_system_{provider} INTERFACE)\n"
+                                    f"  add_library(idf::{provider} ALIAS idf_system_{provider})\n"
+                                    "endif()\n")
         assembly = (f'add_subdirectory("{cmake_path(ROOT / "esy_hal_backend")}" backend)\n'
                     if backend_only else self.platform_assembly(directory))
         (directory / "CMakeLists.txt").write_text(f'''
@@ -505,7 +543,7 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                     self.assertNotIn("esy_hb_rtc.c", backend)
                     self.assertNotIn("esy_hal_system.c", hal)
 
-    def test_capture_irq_provider_does_not_enable_the_public_gpio_facade(self):
+    def test_capture_provider_does_not_enable_or_compile_the_gpio_facade(self):
         for platform in ("PICO2_W", "ESP32"):
             for backend_only in (False, True):
                 for enabled in (False, True):
@@ -520,13 +558,13 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                         self.configure(directory)
                         sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
                         dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
-                        for source in ("esy_hb_gpio.c", "esy_hb_timer_capture.c"):
-                            if enabled:
-                                self.assertIn(source, sources)
-                            else:
-                                self.assertNotIn(source, sources)
-                        providers = (("hardware_gpio", "hardware_irq") if platform == "PICO2_W"
-                                     else ("idf::esp_driver_gpio", "idf::esp_timer"))
+                        self.assertNotIn("esy_hb_gpio.c", sources)
+                        if enabled:
+                            self.assertIn("esy_hb_timer_capture.c", sources)
+                        else:
+                            self.assertNotIn("esy_hb_timer_capture.c", sources)
+                        providers = (() if platform == "PICO2_W"
+                                     else ("idf::esp_driver_gpio", "idf::esp_driver_mcpwm"))
                         for provider in providers:
                             if enabled:
                                 self.assertIn(provider, dependencies)
@@ -541,9 +579,9 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                             else:
                                 self.assertNotIn("esy_hal_timer_capture.c", hal)
 
-    def test_esp32_capture_requires_its_native_gpio_and_timer_providers(self):
+    def test_esp32_capture_requires_its_native_mcpwm_and_gpio_providers(self):
         for backend_only in (False, True):
-            for provider, fixture_target in (("esp_driver_gpio", "gpio"), ("esp_timer", "timer")):
+            for provider, fixture_target in (("esp_driver_gpio", "gpio"), ("esp_driver_mcpwm", "capture")):
                 with self.subTest(backend_only=backend_only, provider=provider), \
                         tempfile.TemporaryDirectory(prefix="esy capture missing provider ") as temporary:
                     directory = Path(temporary)
@@ -554,6 +592,33 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                     source.write_text(source.read_text().replace(
                         f"add_library(idf::{provider} ALIAS idf_{fixture_target}_provider)", ""))
                     self.configure(directory, f"capture requires native idf::{provider}")
+
+    def test_esp32_timer_and_watchdog_dependencies_close_without_system(self):
+        cases = (("TIMER", ("esp_timer",)),
+                 ("WATCHDOG", ("esp_hw_support", "hal", "esp_system")))
+        for feature, providers in cases:
+            for backend_only in ((True,) if feature == "TIMER" else (False, True)):
+                with self.subTest(feature=feature, backend_only=backend_only), \
+                        tempfile.TemporaryDirectory(prefix="esy standalone control provider ") as temporary:
+                    directory = Path(temporary)
+                    self.prepare_capability_consumer(directory, "ESP32",
+                        f"set(ENABLE_ESY_{feature} ON)\nset(ENABLE_ESY_SYSTEM OFF)\n",
+                        backend_only, native_random=False, native_wifi=providers)
+                    self.configure(directory)
+                    dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+                    sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+                    for provider in providers:
+                        self.assertIn(f"idf::{provider}", dependencies)
+                    self.assertIn(f"esy_hb_{feature.lower()}.c", sources)
+                    self.assertNotIn("esy_hb_system.c", sources)
+                    for missing in providers:
+                        source = directory / "CMakeLists.txt"
+                        original = source.read_text()
+                        source.write_text(original.replace(
+                            f"add_library(idf::{missing} ALIAS idf_wifi_{missing})", ""))
+                        self.configure(directory,
+                            f"ESP32 {feature.lower()} requires native idf::{missing}")
+                        source.write_text(original)
 
     def test_native_peripheral_dma_does_not_enable_the_generic_facade(self):
         for platform in ("PICO2_W", "STM32F4", "ESP32"):
@@ -646,7 +711,7 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                     "set(ENABLE_ESY_SYSTEM ON)\n", backend_only, native_os_context=True)
                 self.configure(directory)
                 dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
-                self.assertIn("esy_os_context", dependencies)
+                self.assertNotIn("esy_os", dependencies)
                 self.assertIn("idf::esp_hw_support", dependencies)
                 self.assertNotIn("app_update", dependencies)
                 sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
@@ -676,32 +741,59 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
             sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
             self.assertNotIn("esy_hb_flash.c", sources)
 
-    def test_esp32_system_assembles_native_os_context_without_app_update(self):
+    def test_esp32_system_assembles_backend_context_without_os(self):
         with tempfile.TemporaryDirectory(prefix="esy native system context ") as tmp:
             directory = Path(tmp)
             self.prepare_capability_consumer(directory, "ESP32",
-                "set(ENABLE_ESY_SYSTEM ON)\n", native_freertos=True)
+                "set(ENABLE_ESY_SYSTEM ON)\n", backend_only=True)
             self.configure(directory)
-            dependencies = (directory / "out/esy_os_context-dependencies.txt").read_text()
-            self.assertIn("native_freertos", dependencies)
-            self.assertNotIn("app_update", dependencies)
-            sources = (directory / "out/esy_os_context-sources.txt").read_text()
-            self.assertIn("esy_os_context.c", sources)
-            self.assertNotIn("app_update", (directory /
-                "out/esy_hal_backend-dependencies.txt").read_text())
+            dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+            sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+            self.assertNotIn("esy_os", dependencies)
+            self.assertIn("esy_hb_context.c", sources)
+            self.assertFalse((directory / "out/esy_os_context-sources.txt").exists())
 
-    def test_esp32_system_requires_os_context_independently_of_app_update(self):
-        for backend_only in (False, True):
-            for app_update in (False, True):
-                with self.subTest(backend_only=backend_only, app_update=app_update), \
-                        tempfile.TemporaryDirectory(prefix="esy system context provider ") as tmp:
-                    directory = Path(tmp)
-                    self.prepare_capability_consumer(directory, "ESP32",
-                        "set(ENABLE_ESY_SYSTEM ON)\nset(ESY_RTOS FreeRTOS)\n", backend_only,
-                        native_app_update=app_update)
-                    error = ("requires the native esy_os_context port target" if backend_only
-                             else "requires the native FreeRTOS provider target")
-                    self.configure(directory, error)
+    def test_esp32_capture_alone_assembles_context_without_os(self):
+        with tempfile.TemporaryDirectory(prefix="esy native capture context ") as temporary:
+            directory = Path(temporary)
+            self.prepare_capability_consumer(directory, "ESP32",
+                "set(ENABLE_ESY_SYSTEM OFF)\nset(ENABLE_ESY_TIMER_CAPTURE ON)\n",
+                backend_only=True, native_capture=True)
+            self.configure(directory)
+            sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+            dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+            self.assertIn("esy_hb_timer_capture.c", sources)
+            self.assertIn("esy_hb_context.c", sources)
+            self.assertNotIn("esy_hb_system.c", sources)
+            self.assertNotIn("esy_os", dependencies)
+
+    def test_esp32_can_alone_does_not_assemble_os_context(self):
+        with tempfile.TemporaryDirectory(prefix="esy native CAN context ") as temporary:
+            directory = Path(temporary)
+            self.prepare_capability_consumer(directory, "ESP32",
+                "set(ENABLE_ESY_CAN ON)\nset(ENABLE_ESY_SYSTEM OFF)\n"
+                "set(ENABLE_ESY_ADC OFF)\n", backend_only=True, native_can=True)
+            self.configure(directory)
+            sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+            dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+            self.assertIn("esy_hb_can.c", sources)
+            self.assertIn("esy_hb_context.c", sources)
+            self.assertNotIn("esy_os", dependencies)
+            self.assertNotIn("esy_hb_system.c", sources)
+            self.assertNotIn("esy_hb_adc.c", sources)
+            self.assertFalse((directory / "out/esy_os_context-sources.txt").exists())
+
+    def test_esp32_system_backend_never_requires_os_context(self):
+        for app_update in (False, True):
+            with self.subTest(app_update=app_update), \
+                    tempfile.TemporaryDirectory(prefix="esy system context provider ") as tmp:
+                directory = Path(tmp)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_SYSTEM ON)\n", backend_only=True,
+                    native_app_update=app_update)
+                self.configure(directory)
+                dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+                self.assertNotIn("esy_os", dependencies)
 
     def test_esp32_boot_requires_native_app_update_provider(self):
         for backend_only in (False, True):
@@ -759,6 +851,93 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                 else:
                     self.assertNotIn(provider, dependencies)
                     self.assertNotIn("esy_hb_uart.c", sources)
+
+    def test_esp32_uart_stream_requires_common_ds(self):
+        for backend_only in (False, True):
+            with self.subTest(backend_only=backend_only), tempfile.TemporaryDirectory(
+                    prefix="esy UART stream DS dependency ") as temporary:
+                directory = Path(temporary)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_UART ON)\n", backend_only,
+                    native_uart="idf::esp_driver_uart", common_ds=False)
+                self.configure(directory,
+                    "ENABLE_ESY_UART requires ENABLE_ESY_COMMON_DS for RX stream support")
+
+    def test_esp32_backend_rejects_another_native_idf_target(self):
+        for backend_only in (False, True):
+            for variable in ("IDF_TARGET", "CONFIG_IDF_TARGET"):
+                with self.subTest(backend_only=backend_only, variable=variable), \
+                        tempfile.TemporaryDirectory(prefix="esy ESP32 native target ") as temporary:
+                    directory = Path(temporary)
+                    self.prepare_capability_consumer(directory, "ESP32",
+                        f"set({variable} esp32s3)\n", backend_only)
+                    self.configure(directory, "requires the classic IDF_TARGET=esp32")
+
+    def test_esp32_early_import_rejects_native_target_before_sdk_discovery(self):
+        for selection in ("set(IDF_TARGET esp32s3)", "set(ENV{IDF_TARGET} esp32c3)"):
+            with self.subTest(selection=selection), tempfile.TemporaryDirectory(
+                    prefix="esy ESP32 early native target ") as temporary:
+                directory = Path(temporary)
+                (directory / "CMakeLists.txt").write_text(f'''
+cmake_minimum_required(VERSION 3.20)
+set(ESY_TARGET_DEVICE ESP32)
+{selection}
+include("{cmake_path(EARLY)}")
+project(rejected_native_target C)
+''')
+                result = self.configure(directory, "requires the classic IDF_TARGET=esp32")
+                self.assertNotIn("requires a local ESP-IDF checkout", result.stdout + result.stderr)
+
+    def test_esp32_network_provider_gate_and_explicit_precedence(self):
+        cases = ((False, True, False), (True, False, False),
+                 (True, True, False), (True, True, True))
+        for network, raw, explicit in cases:
+            with self.subTest(network=network, raw=raw, explicit=explicit), \
+                    tempfile.TemporaryDirectory(prefix="esy ESP32 network provider ") as temporary:
+                directory = Path(temporary)
+                providers = ("add_library(esy_network_lwip_provider INTERFACE)\n"
+                             "target_compile_definitions(esy_network_lwip_provider INTERFACE CONSUMER_PROVIDER)"
+                             if explicit else "add_library(idf::lwip INTERFACE IMPORTED)")
+                (directory / "CMakeLists.txt").write_text(f'''
+cmake_minimum_required(VERSION 3.20)
+project(native_network_provider C)
+set(ENABLE_ESY_NETWORK {'ON' if network else 'OFF'})
+set(ENABLE_ESY_NETWORK_LWIP {'ON' if raw else 'OFF'})
+set(CONFIG_LWIP_TCPIP_CORE_LOCKING {'OFF' if explicit else 'ON'})
+set(CONFIG_LWIP_CHECK_THREAD_SAFETY {'OFF' if explicit else 'ON'})
+{providers}
+include("{cmake_path(ROOT / 'cmake/ports/esp32/post_project.cmake')}")
+esy_port_esp32_configure_network_providers()
+if(TARGET esy_network_lwip_provider)
+  get_target_property(links esy_network_lwip_provider INTERFACE_LINK_LIBRARIES)
+  get_target_property(defs esy_network_lwip_provider INTERFACE_COMPILE_DEFINITIONS)
+  file(WRITE "${{CMAKE_BINARY_DIR}}/provider.txt" "${{links}}\n${{defs}}")
+endif()
+''')
+                self.configure(directory)
+                manifest = directory / "out/provider.txt"
+                self.assertEqual(explicit or (network and raw), manifest.exists())
+                if manifest.exists():
+                    self.assertIn("CONSUMER_PROVIDER" if explicit else "idf::lwip", manifest.read_text())
+
+    def test_esp32_default_raw_provider_rejects_missing_core_lock_configuration(self):
+        for missing in ("LWIP_TCPIP_CORE_LOCKING", "LWIP_CHECK_THREAD_SAFETY"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(
+                    prefix="esy ESP32 raw core locking ") as temporary:
+                directory = Path(temporary)
+                (directory / "CMakeLists.txt").write_text(f'''
+cmake_minimum_required(VERSION 3.20)
+project(native_network_configuration C)
+set(ENABLE_ESY_NETWORK ON)
+set(ENABLE_ESY_NETWORK_LWIP ON)
+set(CONFIG_LWIP_TCPIP_CORE_LOCKING ON)
+set(CONFIG_LWIP_CHECK_THREAD_SAFETY ON)
+set(CONFIG_{missing} OFF)
+add_library(idf::lwip INTERFACE IMPORTED)
+include("{cmake_path(ROOT / 'cmake/ports/esp32/post_project.cmake')}")
+esy_port_esp32_configure_network_providers()
+''')
+                self.configure(directory, "default raw lwIP provider requires")
 
     def test_esp32_i2c_requires_native_sdk_provider(self):
         for backend_only in (False, True):
@@ -976,6 +1155,66 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                     for capability in ("multicore", "usb_dev", "xio_spi", "xio_uart_rx", "xio_uart_tx"):
                         self.assertIn(f"{prefix}_{capability}.c", sources)
 
+    def test_esp32_can_sources_and_native_dependency_follow_the_gate(self):
+        for backend_only in (False, True):
+            for enabled in (False, True):
+                with self.subTest(backend_only=backend_only, enabled=enabled), \
+                        tempfile.TemporaryDirectory(prefix="esy ESP32 CAN gate ") as temporary:
+                    directory = Path(temporary)
+                    self.prepare_capability_consumer(directory, "ESP32",
+                        f"set(ENABLE_ESY_CAN {'ON' if enabled else 'OFF'})\n",
+                        backend_only, native_can=enabled, native_os_context=enabled)
+                    self.configure(directory)
+                    sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+                    dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+                    self.assertEqual(enabled, "esy_hb_can.c" in sources)
+                    self.assertEqual(enabled, "idf::driver" in dependencies)
+                    if not backend_only:
+                        sources = (directory / "out/esy_hal-sources.txt").read_text()
+                        self.assertEqual(enabled, "esy_hal_can.c" in sources)
+
+    def test_esp32_can_requires_only_its_native_driver_provider(self):
+        for driver in (False, True):
+            with self.subTest(driver=driver), \
+                    tempfile.TemporaryDirectory(prefix="esy ESP32 CAN provider ") as temporary:
+                directory = Path(temporary)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_CAN ON)\n", backend_only=True, native_can=driver)
+                self.configure(directory,
+                    None if driver else "ESP32 CAN requires the native idf::driver")
+
+    def test_esp32_explicit_power_sources_follow_the_gate(self):
+        for backend_only in (False, True):
+            for enabled in (False, True):
+                with self.subTest(backend_only=backend_only, enabled=enabled), \
+                        tempfile.TemporaryDirectory(prefix="esy ESP32 power gate ") as temporary:
+                    directory = Path(temporary)
+                    self.prepare_capability_consumer(directory, "ESP32",
+                        "set(ENABLE_ESY_SYSTEM ON)\n"
+                        f"set(ENABLE_ESY_LOW_POWER {'ON' if enabled else 'OFF'})\n",
+                        backend_only, native_os_context=True, native_pm=enabled)
+                    self.configure(directory)
+                    sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+                    dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+                    for source in ("esy_hb_low_power.c", "esy_hb_wakeup_timer.c"):
+                        self.assertEqual(enabled, source in sources)
+                    self.assertEqual(enabled, "idf::esp_pm" in dependencies)
+
+    def test_esp32_explicit_power_requires_native_pm(self):
+        with tempfile.TemporaryDirectory(prefix="esy ESP32 power provider ") as temporary:
+            directory = Path(temporary)
+            self.prepare_capability_consumer(directory, "ESP32",
+                "set(ENABLE_ESY_SYSTEM ON)\nset(ENABLE_ESY_LOW_POWER ON)\n",
+                native_os_context=True)
+            self.configure(directory, "ESP32 low power requires native idf::esp_pm")
+
+    def test_esp32_spi_dma_requires_native_memory_validation_provider(self):
+        with tempfile.TemporaryDirectory(prefix="esy ESP32 SPI DMA provider ") as temporary:
+            directory = Path(temporary)
+            self.prepare_capability_consumer(directory, "ESP32",
+                "set(ENABLE_ESY_SPI ON)\n", native_spi=True, native_random=False)
+            self.configure(directory, "ESP32 SPI DMA buffer validation requires idf::esp_hw_support")
+
     def test_adc_platform_constraint_applies_to_full_and_direct_backend_consumers(self):
         for platform in ("PICO", "PICO_W", "PICO2", "PICO2_W", "STM32F4", "ESP32"):
             for backend_only in (False, True):
@@ -984,8 +1223,10 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                     directory = Path(tmp)
                     self.prepare_capability_consumer(directory, platform,
                                                     "set(ENABLE_ESY_ADC ON)\n"
-                                                    "set(ENABLE_ESY_DMA ON)\n", backend_only)
-                    if platform != "STM32F4":
+                                                    "set(ENABLE_ESY_DMA ON)\n", backend_only,
+                                                    native_adc=platform == "ESP32",
+                                                    native_os_context=platform == "ESP32")
+                    if platform not in ("STM32F4", "ESP32"):
                         result = self.configure(directory, "ENABLE_ESY_ADC has no backend")
                         self.assertIn(f"ESY_TARGET_PLATFORM={platform}",
                                       result.stdout + result.stderr)
@@ -996,6 +1237,82 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/public-gpio-gate.txt" "${{ENABLE_ESY_GPIO}}")
                         if not backend_only:
                             sources = (directory / "out/esy_hal-sources.txt").read_text()
                             self.assertIn("esy_hal_adc.c", sources)
+
+    def test_esp32_adc_requires_native_provider_without_generic_dma(self):
+        for backend_only in (False, True):
+            with self.subTest(backend_only=backend_only), tempfile.TemporaryDirectory(
+                    prefix="esy ADC native provider ") as temporary:
+                directory = Path(temporary)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_ADC ON)\n", backend_only, native_os_context=True)
+                self.configure(directory, "ADC requires the native idf::esp_adc")
+
+    def test_esp32_adc_provider_follows_its_gate_without_generic_dma(self):
+        for backend_only in (False, True):
+            for enabled in (False, True):
+                with self.subTest(backend_only=backend_only, enabled=enabled), \
+                        tempfile.TemporaryDirectory(prefix="esy gated ADC provider ") as temporary:
+                    directory = Path(temporary)
+                    self.prepare_capability_consumer(directory, "ESP32",
+                        f"set(ENABLE_ESY_ADC {'ON' if enabled else 'OFF'})\n",
+                        backend_only, native_os_context=True, native_adc=True)
+                    self.configure(directory)
+                    dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+                    sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+                    self.assertEqual(enabled, "idf::esp_adc" in dependencies)
+                    self.assertEqual(enabled, "esy_hb_adc.c" in sources)
+                    self.assertNotIn("esy_hb_dma.c", sources)
+
+    def test_esp32_wifi_requires_system_and_each_native_provider(self):
+        providers = ("esp_wifi", "esp_netif", "esp_event", "esp_timer", "lwip")
+        for backend_only in (False, True):
+            for missing in providers:
+                with self.subTest(backend_only=backend_only, missing=missing), \
+                        tempfile.TemporaryDirectory(prefix="esy Wi-Fi native provider ") as temporary:
+                    directory = Path(temporary)
+                    self.prepare_capability_consumer(directory, "ESP32",
+                        "set(ENABLE_ESY_SYSTEM ON)\nset(ENABLE_ESY_WIFI ON)\n",
+                        backend_only, native_os_context=True,
+                        native_wifi=tuple(p for p in providers if p != missing),
+                        missing_system=(missing,))
+                    message = (f"ESP32 system requires native idf::{missing}" if missing == "esp_timer"
+                               else f"Wi-Fi requires the native idf::{missing}")
+                    self.configure(directory, message)
+
+    def test_esp32_system_requires_each_direct_native_provider(self):
+        for provider in ("esp_system", "esp_timer", "esp_rom"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory(
+                    prefix="esy ESP32 system dependency ") as temporary:
+                directory = Path(temporary)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_SYSTEM ON)\n", native_os_context=True,
+                    missing_system=(provider,))
+                self.configure(directory, f"ESP32 system requires native idf::{provider}")
+
+    def test_esp32_flash_requires_native_provider(self):
+        for backend_only in (False, True):
+            with self.subTest(backend_only=backend_only), tempfile.TemporaryDirectory(
+                    prefix="esy ESP32 Flash dependency ") as temporary:
+                directory = Path(temporary)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_FLASH ON)\n", backend_only, native_flash=False)
+                self.configure(directory, "Flash requires the native idf::spi_flash")
+
+    def test_esp32_wifi_native_sources_follow_its_gate(self):
+        providers = ("esp_wifi", "esp_netif", "esp_event", "esp_timer", "lwip")
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory(
+                    prefix="esy Wi-Fi native feature ") as temporary:
+                directory = Path(temporary)
+                self.prepare_capability_consumer(directory, "ESP32",
+                    "set(ENABLE_ESY_SYSTEM ON)\n"
+                    f"set(ENABLE_ESY_WIFI {'ON' if enabled else 'OFF'})\n",
+                    native_os_context=True, native_wifi=providers)
+                self.configure(directory)
+                dependencies = (directory / "out/esy_hal_backend-dependencies.txt").read_text()
+                sources = (directory / "out/esy_hal_backend-sources.txt").read_text()
+                self.assertEqual(enabled, "esy_hb_wifi.c" in sources)
+                self.assertEqual(enabled, "idf::esp_wifi" in dependencies)
 
     def test_stm32_flash_supports_verified_single_bank_device_families(self):
         for device in ("STM32F405RG", "STM32F407ZG", "STM32F415RG", "STM32F417ZG"):
@@ -2195,7 +2512,7 @@ endif()
             self.configure(source)
 
     def test_pico_network_provider_defaults_do_not_apply_to_other_platforms(self):
-        for platform in ("PICO", "PICO2", "STM32F4", "ESP32"):
+        for platform in ("PICO", "PICO2", "STM32F4"):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory(prefix="esy network platform ") as tmp:
                 directory = Path(tmp)
                 board_probe = '''

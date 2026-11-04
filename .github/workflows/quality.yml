@@ -86,6 +86,40 @@ jobs:
             esy_middleware/network/lwip/tests/build/artifacts/gcov/gcovr/
           if-no-files-found: ignore
 
+  native-esp32:
+    name: Classic ESP32 native (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    container:
+      image: espressif/idf:v5.3.4
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [core, peripherals, managed, radio, power]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build pinned ESP-IDF consumer and inspect final ELF
+        shell: bash
+        run: |
+          source "$IDF_PATH/export.sh"
+          python3 -B esy_hal/tests/native/esp32/build_native_consumer.py \
+            --build-root "$RUNNER_TEMP/esy-esp32-native" --profile "${{ matrix.profile }}"
+
+      - name: Upload native build evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: esp32-native-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/esy-esp32-native/${{ matrix.profile }}/esy-native-evidence.json
+            ${{ runner.temp }}/esy-esp32-native/${{ matrix.profile }}/esy_esp32_native.elf
+            ${{ runner.temp }}/esy-esp32-native/${{ matrix.profile }}/esy_esp32_native.map
+            ${{ runner.temp }}/esy-esp32-native/${{ matrix.profile }}/sdkconfig
+            ${{ runner.temp }}/esy-esp32-native/${{ matrix.profile }}/compile_commands.json
+            ${{ runner.temp }}/esy-esp32-native/${{ matrix.profile }}/bootloader/bootloader.elf
+          if-no-files-found: error
+
   release-readiness:
     name: Release tag checklist
     runs-on: ubuntu-24.04
@@ -93,6 +127,7 @@ jobs:
     needs:
       - host-tests
       - coverage
+      - native-esp32
     steps:
       - name: Checkout
         uses: actions/checkout@v4

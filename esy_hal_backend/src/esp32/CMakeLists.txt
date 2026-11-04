@@ -4,6 +4,16 @@
 
 # esy_hal_backend/src/esp32/CMakeLists.txt
 
+include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/ports/esp32/post_project.cmake")
+esy_port_esp32_validate_target()
+
+foreach(esy_pico_only_feature IN ITEMS ENABLE_ESY_MULTICORE ENABLE_ESY_USB_DEV ENABLE_ESY_XIO)
+    if(${esy_pico_only_feature})
+        message(FATAL_ERROR
+            "${esy_pico_only_feature} has no backend for ESY_TARGET_PLATFORM=${ESY_TARGET_PLATFORM}; supported platforms are PICO, PICO_W, PICO2 and PICO2_W")
+    endif()
+endforeach()
+
 # ---- Platform dependencies ----
 set(MODULE_DEPS
     esy_board
@@ -69,7 +79,10 @@ if(ENABLE_ESY_BOOTLOADER)
     if(NOT TARGET idf::app_update)
         message(FATAL_ERROR "ESP32 boot requires the native idf::app_update component")
     endif()
-    list(APPEND MODULE_DEPS idf::app_update)
+    if(NOT TARGET idf::esp_partition)
+        message(FATAL_ERROR "ESP32 boot requires the native idf::esp_partition component")
+    endif()
+    list(APPEND MODULE_DEPS idf::app_update idf::esp_partition)
     if(NOT CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
         message(FATAL_ERROR "ESP32 managed boot requires CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y")
     endif()
@@ -159,6 +172,14 @@ if(ENABLE_ESY_I2C)
     list(APPEND MODULE_SRCS esy_hb_i2c.c)
 endif()
 
+if(ENABLE_ESY_CAN)
+    if(NOT TARGET idf::driver)
+        message(FATAL_ERROR "ESP32 CAN requires the native idf::driver TWAI component")
+    endif()
+    list(APPEND MODULE_DEPS idf::driver)
+    list(APPEND MODULE_SRCS esy_hb_can.c)
+endif()
+
 if(ENABLE_ESY_UART)
     if(NOT TARGET idf::esp_hw_support)
         message(FATAL_ERROR "ESP32 UART event retirement requires idf::esp_hw_support")
@@ -192,7 +213,19 @@ if(ENABLE_ESY_SPI)
     list(APPEND MODULE_SRCS esy_hb_spi.c)
 endif()
 
+if(ENABLE_ESY_ADC)
+    if(NOT TARGET idf::esp_adc)
+        message(FATAL_ERROR "ESP32 ADC requires the native idf::esp_adc component")
+    endif()
+    list(APPEND MODULE_DEPS idf::esp_adc)
+    list(APPEND MODULE_SRCS esy_hb_adc.c)
+endif()
+
 if(ENABLE_ESY_FLASH)
+    if(NOT TARGET idf::spi_flash)
+        message(FATAL_ERROR "ESP32 Flash requires the native idf::spi_flash component")
+    endif()
+    list(APPEND MODULE_DEPS idf::spi_flash)
     list(APPEND MODULE_SRCS esy_hb_flash.c)
 endif()
 
@@ -210,22 +243,6 @@ if(ENABLE_ESY_WIFI)
 endif()
 
 # ---- Attach sources and dependencies to esy_hal_backend ----
-
-if(ENABLE_ESY_CAN)
-    if(NOT TARGET idf::driver)
-        message(FATAL_ERROR "ESP32 CAN requires the native idf::driver TWAI component")
-    endif()
-    list(APPEND MODULE_DEPS idf::driver)
-    list(APPEND MODULE_SRCS esy_hb_can.c)
-endif()
-
-if(ENABLE_ESY_ADC)
-    if(NOT TARGET idf::esp_adc)
-        message(FATAL_ERROR "ESP32 ADC requires the native idf::esp_adc component")
-    endif()
-    list(APPEND MODULE_DEPS idf::esp_adc)
-    list(APPEND MODULE_SRCS esy_hb_adc.c)
-endif()
 
 target_sources(esy_hal_backend PRIVATE ${MODULE_SRCS})
 

@@ -258,6 +258,25 @@ stack-free MSP switch. Set both `ESY_TEST_ARM_TOOLCHAIN_ROOT` and
 skips. A configured but missing provider fails. The handoff HIL plan describes
 application-entry, register and stack observations on the target.
 
+The [classic ESP32 native consumer](../esy_hal/tests/native/esp32/README.md)
+builds production sources against the pinned ESP-IDF v5.3.4 commit and its
+recommended Xtensa compiler. Its `core`, `peripherals`, `managed`, `radio` and
+`power` profiles cover feature isolation, optional OS wrappers, ADC1, TWAI CAN,
+UART RX streams, queued SPI DMA, managed boot/OTA/fault capture, explicit sleep
+and native Wi-Fi/raw TCP assembly. After sourcing
+the SDK's `export.sh`, run:
+
+```sh
+python3 -B esy_hal/tests/native/esp32/build_native_consumer.py \
+  --build-root /tmp/esy-esp32-native --profile all
+```
+
+The script uses an explicitly owned build tree outside the checkout, resets the
+generated SDK configuration from fixed inputs and inspects final ELF symbols.
+Its JSON evidence identifies the SDK/compiler and the source/diff fingerprints,
+including an uncommitted-worktree flag. The native ESP32 CI job runs the same
+entry and uploads per-profile ELF/map, configuration and evidence artifacts.
+
 Network-provider fixtures compile SDK interface sources using consumer lwipopts
 and native configuration headers. They cover independent Wi-Fi/TCP gates,
 disabled parent modules, bare-metal/FreeRTOS dependency selection, explicit
