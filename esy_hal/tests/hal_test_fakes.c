@@ -2075,6 +2075,7 @@ esy_err_t esy_hb_timer_capture_claim(
     esy_timer_capture_t *cap, const esy_timer_capture_config_t *config) {
   if (cap == NULL || config == NULL || config->inner.gpio == ESY_PIN_UNUSED)
     return ESY_ERR_INVALID_ARG;
+  if (s_state.capture_claim_result != ESY_OK) return s_state.capture_claim_result;
   if (cap->ctx != NULL) {
     return s_state.capture_owner == cap &&
                    cap->ctx == cap->backend.bytes && !s_state.capture_enabled &&
@@ -2557,4 +2558,8 @@ esy_err_t esy_hb_power_sleep(const esy_power_sleep_config_t *config,
   s_state.explicit_sleep_config = *config;
   *out_result = s_state.explicit_sleep_result;
   return s_state.low_power_result;
+}
+
+void platform_test_set_capture_claim_result(esy_err_t result) {
+  s_state.capture_claim_result = result;
 }

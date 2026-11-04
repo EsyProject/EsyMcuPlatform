@@ -59,8 +59,7 @@ if(ENABLE_ESY_FAULT)
         "-mgeneral-regs-only;-ffreestanding;-fno-builtin;-fno-stack-protector;-fno-lto")
 endif()
 
-# Capture uses the private GPIO IRQ provider without enabling the public facade.
-if(ENABLE_ESY_GPIO OR ENABLE_ESY_TIMER_CAPTURE)
+if(ENABLE_ESY_GPIO)
     list(APPEND MODULE_SRCS esy_hb_gpio.c)
     list(APPEND MODULE_DEPS hardware_gpio hardware_irq)
 endif()
@@ -89,7 +88,6 @@ endif()
 
 if(ENABLE_ESY_TIMER_CAPTURE)
     list(APPEND MODULE_SRCS esy_hb_timer_capture.c)
-    list(APPEND MODULE_DEPS hardware_timer)
 endif()
 
 if(ENABLE_ESY_I2C)

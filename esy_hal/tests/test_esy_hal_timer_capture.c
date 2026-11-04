@@ -398,3 +398,22 @@ void test_capture_partial_suspend_failure_faults_graph_and_preserves_claim(void)
   TEST_ASSERT_EQUAL_PTR(context, owner.ctx);
   TEST_ASSERT_EQUAL_PTR(&owner, platform_test_state()->capture_owner);
 }
+
+void test_capture_unsupported_claim_returns_before_board_or_native_side_effects(void) {
+  esy_timer_capture_t capture = {0};
+  esy_timer_capture_config_t config = {
+      .phys_index = TEST_TIMER_CAPTURE_INDEX,
+      .inner = {.gpio = TEST_GPIO_PIN, .channel = 2u, .tim_id = 1u}};
+  platform_test_set_capture_claim_result(ESY_ERR_NOT_SUPPORTED);
+
+  TEST_ASSERT_EQUAL(ESY_ERR_NOT_SUPPORTED,
+      esy_hal_timer_capture_init(&capture, &config));
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->board_configure_order);
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_init_calls);
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->board_reset_order);
+  TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->capture_release_order);
+  TEST_ASSERT_NULL(platform_test_state()->capture_owner);
+  TEST_ASSERT_NULL(capture.ctx);
+  TEST_ASSERT_NULL(capture.ops);
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_timer_capture_deinit(&capture));
+}

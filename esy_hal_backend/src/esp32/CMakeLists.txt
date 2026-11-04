@@ -76,8 +76,7 @@ if(ENABLE_ESY_BOOTLOADER)
     list(APPEND MODULE_SRCS esy_hb_boot.c)
 endif()
 
-# Capture uses the private GPIO IRQ provider without enabling the public facade.
-if(ENABLE_ESY_GPIO OR ENABLE_ESY_TIMER_CAPTURE)
+if(ENABLE_ESY_GPIO)
     list(APPEND MODULE_SRCS esy_hb_gpio.c)
 endif()
 
@@ -86,15 +85,13 @@ if(ENABLE_ESY_TIMER)
 endif()
 
 if(ENABLE_ESY_TIMER_CAPTURE)
-    if(NOT TARGET idf::esp_driver_gpio)
-        message(FATAL_ERROR
-            "ESP32 timer capture requires native idf::esp_driver_gpio")
-    endif()
-    if(NOT TARGET idf::esp_timer)
-        message(FATAL_ERROR
-            "ESP32 timer capture requires native idf::esp_timer")
-    endif()
-    list(APPEND MODULE_DEPS idf::esp_driver_gpio idf::esp_timer)
+    foreach(esy_capture_provider IN ITEMS esp_driver_mcpwm esp_driver_gpio)
+        if(NOT TARGET idf::${esy_capture_provider})
+            message(FATAL_ERROR
+                "ESP32 timer capture requires native idf::${esy_capture_provider}")
+        endif()
+        list(APPEND MODULE_DEPS idf::${esy_capture_provider})
+    endforeach()
     list(APPEND MODULE_SRCS esy_hb_timer_capture.c)
 endif()
 

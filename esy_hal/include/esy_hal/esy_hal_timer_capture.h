@@ -38,9 +38,25 @@
  * changing the live handle. Stop asynchronous work before unregister/deinit.
  * Failed init cleans partial state when possible. Cleanup failure retains the
  * handle and its resource claims: retry deinit successfully before another init.
- * Lifecycle calls run outside ISR callbacks; on Pico/ESP32, use the same core
- * as GPIO IRQ service registration. The slot and input GPIO (also the whole
- * timer on STM32F4) remain reserved across power suspend until final deinit.
+ * Lifecycle calls run outside ISR callbacks. ESP32 group owners serialize all
+ * lifecycle operations on the same task/core used for native IRQ allocation;
+ * another core is rejected before cleanup. The slot and input GPIO (also the
+ * whole timer on STM32F4) remain reserved across power suspend until final deinit.
+ * ESP32 creates provider-owned MCPWM timer/channel/IRQ resources during init
+ * and destroys them during suspend/deinit; these lifecycle calls may allocate
+ * inside IDF and block. ISR callbacks and steady capture queries do not allocate.
+ * Before ESP32 lifecycle calls, bind system-lifetime execution-context checks
+ * through esy_hal_system_set_context_callbacks() with ENABLE_ESY_SYSTEM, or
+ * call esy_os_init(), which installs that binding. SDK-only consumers provide
+ * native ISR/task-blocking predicates; the capture provider does not depend on
+ * the platform OS. An unbound context returns ESY_ERR_STATE.
+ * ESP32 capture configures floating inputs with internal pulls disabled; use
+ * external bias where required. Board setup must respect that electrical mode.
+ * Its MCPWM capture groups are exclusive to this backend while claimed; do not
+ * create native capture timers/channels separately or reconfigure claimed GPIOs.
+ * Claim checks arbitrate this backend's handles, not unrelated native drivers.
+ * Pico rejects capture initialization before board routing is changed. No GPIO
+ * interrupt timestamp fallback is provided.
  * Registered handles cannot be deinitialized directly. Successful deinit returns
  * an unregistered, quiescent handle to the zero state, ready for another init.
  */
@@ -73,7 +89,8 @@ extern void esy_hal_timer_capture_default_cfg(
  * @retval ESY_OK Success.
  * @retval ESY_ERR_STATE The handle already owns resources.
  * @retval ESY_ERR_BUSY Another handle owns the slot, GPIO, or capture timer.
- * @retval ESY_ERR_NOT_SUPPORTED The board cannot configure the selected input.
+ * @retval ESY_ERR_NOT_SUPPORTED Pico, an unsupported clock/IRAM-safe provider
+ * configuration, or the board cannot configure the selected input.
  * @retval <0     Error code; failed cleanup retains resources for deinit retry.
  */
 extern esy_err_t esy_hal_timer_capture_init(
@@ -105,6 +122,18 @@ extern esy_err_t esy_hal_timer_capture_deinit(esy_timer_capture_t *cap);
  * reads one complete ISR-published value; separate value/interval queries do
  * not form a coherent pair. On STM32F4 it wraps every 2^32 microseconds for TIM2/TIM5
  * and every 2^16 microseconds for the other supported timers.
+ * ESP32 latches a 32-bit APB tick counter and returns floor(ticks/ticks_per_us).
+ * At 80 MHz its native wrap is 53.6870912 seconds and timestamps range from
+ * 0 to 53,687,091 us; this is not a modulo-2^32 microsecond counter. Captures
+ * share their group counter, which may continue while another group channel
+ * is active. This is an APB-running-time domain: sleep/clock gating is not
+ * measured as elapsed wall time. Suspend/resume resets per-handle history.
+ * Do not subtract converted timestamps to calculate intervals.
+ * SDK capture callbacks run in ISR context; they must be bounded and nonblocking.
+ * The native capture latch is not an event queue; edges that overwrite the
+ * latch before ISR delivery are not individually counted or reconstructed.
+ * CONFIG_MCPWM_ISR_IRAM_SAFE=y is rejected because the generic callback/storage
+ * contract does not guarantee cache-disabled execution.
  *
  * @param[in]  cap        Timer capture handle.
  * @param[out] out_value  Captured timestamp value (microseconds).
@@ -123,9 +152,13 @@ extern esy_err_t esy_hal_timer_capture_get_value(
  * than one capture-counter wrap apart; additional wraps cannot be detected.
  * Every port reports zero with ESY_OK until two events have been captured.
  * The ISR computes and publishes a complete interval, including a legitimate
- * zero timestamp. Pico/ESP32 use a 32-bit microsecond domain; STM32F4 uses the
- * selected 16-bit or 32-bit counter width. Separate value/interval queries do
- * not form a coherent pair.
+ * zero timestamp. ESP32 subtracts the two native 32-bit APB tick values first,
+ * then truncates the delta to whole microseconds; consecutive captured edges
+ * must be strictly less than 53.6870912 seconds apart at 80 MHz. This bound
+ * applies to captured edges even if queries are less frequent; queries only
+ * return the most recent interval and do not count missed edges or wraps.
+ * STM32F4 uses its selected 16-bit or 32-bit microsecond counter width. Separate
+ * value/interval queries do not form a coherent pair.
  *
  * @param[in]  cap           Timer capture handle.
  * @param[out] out_interval  Time interval between captures (microseconds).
@@ -159,7 +192,8 @@ extern esy_err_t esy_hal_timer_capture_get_phys_index(
  *
  * Uses @ref esy_timer_capture_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation. ESP32 reports HARDWARE_LATCH for native MCPWM
+ * capture; Pico has no initialized capture provider.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in] cap Initialized capture handle; externally synchronized.

@@ -253,6 +253,7 @@ typedef struct {
   uint32_t explicit_sleep_calls;
   esy_power_sleep_config_t explicit_sleep_config;
   esy_power_sleep_result_t explicit_sleep_result;
+  esy_err_t capture_claim_result;
 } platform_test_state_t;
 
 extern const platform_test_state_t *platform_test_state(void);
@@ -327,5 +328,7 @@ void platform_test_set_adc_validation_result(esy_err_t result);
 
 extern void platform_test_set_explicit_sleep_result(
     esy_power_sleep_result_t result);
+
+void platform_test_set_capture_claim_result(esy_err_t result);
 
 #endif /* ESY_HAL_TESTS_PLATFORM_TEST_FAKES_H */

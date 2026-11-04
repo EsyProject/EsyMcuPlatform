@@ -6,10 +6,12 @@
 
 /**
  * @file esy_hb_timer_capture.h
- * @brief Timer capture HAL backend interface (handle-based, no internal allocation).
+ * @brief Timer capture HAL backend interface with caller-owned handle storage.
  *
  * Design notes:
- * - The caller provides the handle storage; the HAL backend must not allocate from heap.
+ * - The caller provides handle and callback storage. ESP32 lifecycle calls create
+ *   IDF-owned MCPWM timer/channel/IRQ resources, which may internally allocate
+ *   and block; no allocation occurs in the ISR or capture queries.
  * - Physical controller index and pin/timer mapping are provided via
  *   @ref esy_timer_capture_config_t.
  * - If a capability is not supported, the implementation should return
@@ -40,8 +42,20 @@ extern "C" {
  * configure hook must not change them. A suspended owner may claim its unchanged
  * identity again; an enabled or partially retired owner cannot be reinitialized.
  * Calls contend without waiting and return ESY_ERR_BUSY if reservation is busy.
- * On Pico/ESP32 claim, init, suspend and deinit must execute on the same core as
- * GPIO IRQ service registration. Never call lifecycle functions from an ISR.
+ * ESP32 group lifecycle calls must be externally serialized on the same task/core
+ * used for native IRQ allocation. Group owners use identical IRQ priority.
+ * Indices 0..5 are group-local logical reservations, not requested native channel
+ * numbers; see esy_timer_capture_config_t. Never call lifecycle from an ISR or
+ * with interrupts disabled. Pico returns NOT_SUPPORTED before board setup.
+ * CONFIG_MCPWM_ISR_IRAM_SAFE=y is unsupported on ESP32. Bind system-lifetime
+ * execution-context checks before ESP32 lifecycle calls (Esy OS init does this
+ * automatically; SDK-only consumers can install their own predicates). An
+ * unbound context rejects lifecycle calls with ESY_ERR_STATE.
+ * ESP32 capture groups and GPIO routing are exclusively owned by this backend;
+ * do not combine them with separate native capture drivers. Claim checks only
+ * arbitrate this module's handles. Native capture configures floating inputs
+ * with internal pulls disabled; board setup must use that mode and provide any
+ * required electrical bias externally.
  *
  * @param[in,out] cap Zero-initialized or suspended caller-owned handle.
  * @param[in] config Complete physical resource configuration.
@@ -49,6 +63,7 @@ extern "C" {
  * @retval ESY_ERR_BUSY Slot, GPIO, or timer already owned, or claim contended.
  * @retval ESY_ERR_STATE Handle is enabled, retiring, or on another owner core.
  * @retval ESY_ERR_INVALID_ARG Invalid configuration or pointer.
+ * @retval ESY_ERR_NOT_SUPPORTED Pico or an unsupported native provider configuration.
  */
 esy_err_t esy_hb_timer_capture_claim(
     esy_timer_capture_t *cap, const esy_timer_capture_config_t *config);
@@ -80,9 +95,12 @@ esy_err_t esy_hb_timer_capture_suspend(esy_timer_capture_t *cap);
  * must supply its peripheral clock/GPIO setup through the HAL MSP hooks and
  * route the vector to the configured physical capture index. Do not share the
  * timer or its IRQ lifecycle with PWM, logical timers, or another driver.
- * The backend configures a 1 MHz counter using the current APB/TIMPRE clock
+ * The STM32F4 backend configures a 1 MHz counter using the current APB/TIMPRE clock
  * tree; a clock that cannot divide exactly to 1 MHz is rejected with
  * ESY_ERR_NOT_SUPPORTED. Keep that clock tree unchanged while capturing.
+ * ESP32 uses native MCPWM capture, with one shared APB capture timer and up to
+ * three channels per group. The SDK selects each native channel. The final
+ * active channel retires the shared timer; other channels keep their domain.
  * Init also reserves resources when called directly. Failed initialization
  * retains the claim/native state for explicit suspend/deinit cleanup. HAL users
  * receive the HAL wrapper cleanup behavior instead.
@@ -104,7 +122,8 @@ extern esy_err_t esy_hb_timer_capture_init(
  *
  * Retires native IRQ/callback access before releasing the slot/GPIO/timer claim.
  * HAL calls suspend and resets board routing before this final release. Failure
- * retains ownership and context for retry. A zero handle returns ESY_OK.
+ * retains ownership and context for retry. A zero handle returns ESY_OK,
+ * including on Pico, where other capture operations are unsupported.
  *
  * @param[in,out] cap Capture handle.
  * @retval ESY_OK Native resources and claim released; ctx is NULL.
@@ -118,7 +137,13 @@ extern esy_err_t esy_hb_timer_capture_deinit(esy_timer_capture_t *cap);
  *
  * Values belong to a wrapping backend capture-counter domain that may reset
  * on initialization/resume. STM32F4 uses 32 bits for TIM2/TIM5 and 16 bits for
- * the other supported timers. This query reads one published capture value;
+ * the other supported timers. ESP32 converts its hardware-latched 32-bit APB
+ * counter to whole microseconds (80 MHz: wrap 53.6870912 s, maximum timestamp
+ * 53,687,091 us). This is not a modulo-2^32 microsecond domain. Group counters
+ * can continue while another channel is active. Sleep/clock gating does not
+ * advance the APB-running-time domain as elapsed wall time. Per-handle history
+ * resets on resume; native latches do not queue edges overwritten before ISR
+ * delivery. This query reads one published value;
  * separate value/interval queries do not form a coherent pair snapshot.
  *
  * @param[in]  cap   Capture handle
@@ -136,7 +161,10 @@ extern esy_err_t esy_hb_timer_capture_get_value(
  * Every port returns zero with ESY_OK before the second capture. Each query
  * reads one complete ISR-published interval. STM32F4 computes the difference
  * modulo the timer's 16-bit or 32-bit counter width. Events must be separated
- * by less than one counter wrap; multiple wraps are not detected.
+ * by less than one counter wrap; multiple wraps are not detected. ESP32
+ * subtracts raw 32-bit ticks before converting to whole microseconds; at
+ * 80 MHz consecutive captures must be strictly less than 53.6870912 s apart.
+ * Do not derive intervals by subtracting converted ESP32 timestamps.
  *
  * @param[in]  cap      Capture handle
  * @param[out] interval Output interval in microseconds
@@ -164,7 +192,7 @@ extern void esy_hb_timer_capture_handle_irq(uint32_t index);
  *
  * Uses @ref esy_timer_capture_cap_t, with identical bit meanings on every port.
  * Serialize with handle lifecycle. Board resources and configuration still
- * constrain each operation; DMA bits do not promise asynchronous completion.
+ * constrain each operation. HARDWARE_LATCH is set only for native timer capture.
  * Zero is valid. Ignore unknown bits; output is written only on success.
  *
  * @param[in]  cap      Capture handle
