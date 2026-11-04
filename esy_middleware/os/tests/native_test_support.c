@@ -90,7 +90,9 @@ void native_exit(int isr, void *mux, uint32_t key) {
   }
 }
 void native_yield(void) {++s_ctx.public.yields;}
+#ifndef ESY_OS_TEST_HAL_SYSTEM_FAKE
 bool esy_hal_system_is_in_isr(void) {return s_ctx.public.isr;}
+#endif
 int xPortInIsrContext(void) {return s_ctx.public.isr ? 1 : 0;}
 bool xPortCanYield(void) {return s_ctx.public.local_irq_mask == 0u;}
 void os_fixture_context_irq_disable(void) {s_ctx.public.local_irq_mask = 7u;}

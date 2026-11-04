@@ -11,6 +11,11 @@
 #include "task.h"
 #include "unity.h"
 
+#ifdef ESY_OS_TEST_HAL_SYSTEM_FAKE
+#include "fake_esy_hal_system.h"
+#include "native_test_support.h"
+#endif
+
 #include <setjmp.h>
 #include <string.h>
 
@@ -61,6 +66,7 @@ uint32_t os_fixture_tick_core_id(void) { ++s_ctx.unrelated_calls; return 0u; }
 void os_fixture_tick_isr_lock(void) { ++s_ctx.unrelated_calls; }
 void os_fixture_tick_isr_unlock(void) { ++s_ctx.unrelated_calls; }
 void os_fixture_yield_from_isr(int should_yield) { (void)should_yield; ++s_ctx.unrelated_calls; }
+#ifndef ESY_OS_TEST_HAL_SYSTEM_FAKE
 uint32_t esy_hal_system_irq_save(void) { ++s_ctx.unrelated_calls; return 0u; }
 void esy_hal_system_irq_restore(uint32_t status) { (void)status; ++s_ctx.unrelated_calls; }
 esy_err_t esy_hal_system_get_tick_partial_us(uint32_t rate, uint32_t *partial) {
@@ -72,8 +78,15 @@ esy_err_t esy_hal_system_suspend_tick(uint32_t rate, uint32_t *partial) {
 void esy_hal_system_resume_tick(void) { ++s_ctx.unrelated_calls; }
 bool esy_hal_system_tick_is_pending(void) { ++s_ctx.unrelated_calls; return false; }
 void esy_hal_system_reset(void) { ++s_ctx.unrelated_calls; }
+#endif
 
-void setUp(void) { memset(&s_ctx, 0, sizeof(s_ctx)); }
+void setUp(void) {
+  memset(&s_ctx, 0, sizeof(s_ctx));
+#ifdef ESY_OS_TEST_HAL_SYSTEM_FAKE
+  fake_esy_hal_system_reset();
+  native_test_support_reset();
+#endif
+}
 void tearDown(void) {}
 
 /* One process-lifetime scenario respects the immutable binding without a
@@ -96,8 +109,28 @@ void test_os_fatal_binding_and_dispatch_follow_one_boot_lifetime(void) {
 #ifdef ESY_PLATFORM_ESP32
   TEST_ASSERT_EQUAL_UINT32(0u, s_ctx.scheduler_queries);
 #endif
+#ifdef ESY_OS_TEST_HAL_SYSTEM_FAKE
+  /* Exercise the callbacks installed by init through the real ESP32 port. */
+  const esy_system_context_callbacks_t *callbacks =
+      fake_esy_hal_system_get_ctx()->context_callbacks;
+  TEST_ASSERT_NOT_NULL(callbacks);
+  TEST_ASSERT_NOT_NULL(callbacks->is_in_isr);
+  TEST_ASSERT_NOT_NULL(callbacks->can_block);
+  TEST_ASSERT_FALSE(callbacks->is_in_isr());
+  TEST_ASSERT_TRUE(callbacks->can_block());
+  native_test_support_get()->isr = true;
+  TEST_ASSERT_TRUE(callbacks->is_in_isr());
+  TEST_ASSERT_FALSE(callbacks->can_block());
+  native_test_support_get()->isr = false;
+  native_test_support_get()->local_irq_mask = 7u;
+  TEST_ASSERT_FALSE(callbacks->can_block());
+  native_test_support_get()->local_irq_mask = 0u;
+#endif
   TEST_ASSERT_EQUAL_INT(ESY_ERR_STATE, esy_os_set_fatal_handler(capture));
   esy_os_init();
+#ifdef ESY_OS_TEST_HAL_SYSTEM_FAKE
+  TEST_ASSERT_EQUAL_PTR(callbacks, fake_esy_hal_system_get_ctx()->context_callbacks);
+#endif
   TEST_ASSERT_EQUAL_INT(ESY_ERR_STATE, esy_os_set_fatal_handler(capture));
   uint32_t queries = s_ctx.scheduler_queries;
 
@@ -124,4 +157,10 @@ void test_os_fatal_binding_and_dispatch_follow_one_boot_lifetime(void) {
   TEST_ASSERT_EQUAL_UINT32(3u, s_ctx.capture_calls);
   TEST_ASSERT_EQUAL_UINT32(2u, s_ctx.halt_calls);
   TEST_ASSERT_EQUAL_UINT32(0u, s_ctx.unrelated_calls);
+#ifdef ESY_OS_TEST_HAL_SYSTEM_FAKE
+  TEST_ASSERT_EQUAL_PTR(callbacks, fake_esy_hal_system_get_ctx()->context_callbacks);
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_system_get_ctx()->reset_count);
+  TEST_ASSERT_EQUAL_UINT32(0u, fake_esy_hal_system_get_ctx()->irq_status);
+  TEST_ASSERT_FALSE(fake_esy_hal_system_get_ctx()->tick_suspended);
+#endif
 }

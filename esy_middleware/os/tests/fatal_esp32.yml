@@ -6,3 +6,13 @@
   :test:
     - ESY_PLATFORM_ESP32
     - configNUMBER_OF_CORES=2
+    - ESY_OS_TEST_HAL_SYSTEM_FAKE
+
+:paths:
+  :include:
+    - ../../../esy_test/fake/hal
+
+:files:
+  :support:
+    - ../src/freertos/port/esp32/esy_os_context.c
+    - ../../../esy_test/fake/hal/fake_esy_hal_system.c
