@@ -38,11 +38,12 @@ extern "C" {
  * HAL backend implementations may use this fixed-size storage to keep private
  * state and avoid dynamic memory allocation. Override globally when an embedded
  * backend needs more capacity; all HAL/backend/consumer translation units must
- * use the same value and be rebuilt together. Backend capacity assertions
- * validate the selected size.
+ * use the same value and be rebuilt together. The default includes the Pico
+ * XIO SPI context's DMA notification and atomic event state. Backend capacity
+ * assertions validate the selected size.
  */
 #ifndef ESY_SPI_PRIV_BYTES
-#define ESY_SPI_PRIV_BYTES 256
+#define ESY_SPI_PRIV_BYTES 264u
 #endif
 
 /* -------------------------------------------------------------------------- */

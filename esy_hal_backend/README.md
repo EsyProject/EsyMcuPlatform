@@ -342,6 +342,10 @@ All translation units must agree on the resulting object layouts, including
 embedded storage controlled by `ESY_UART_PRIV_BYTES` and `ESY_SPI_PRIV_BYTES`.
 Rebuild all consumers after changing these sizes; backend assertions reject
 insufficient storage.
+The default SPI backend reserve includes the Pico XIO SPI DMA notification and
+atomic event state. Its increase from 256 to 264 bytes adds eight bytes to each
+default SPI handle on Pico; rebuild common, HAL, backend, middleware and consumer
+objects together.
 The default UART backend reserve includes both XIO directions' notification and
 atomic event state. Its increase adds 32 bytes to each default UART handle;
 rebuild common, HAL, backend, middleware and consumer objects together. XIO splits

@@ -55,7 +55,7 @@ int main(void) {
 
 class XioStorageContractTests(unittest.TestCase):
     def layouts(self, program_bytes=64, sm_bytes=64, uart_bytes=None,
-                spi_bytes=256, overrides=()):
+                spi_bytes=264, overrides=()):
         layouts = []
         with tempfile.TemporaryDirectory(prefix="xio storage contract ") as tmp:
             directory = Path(tmp)
