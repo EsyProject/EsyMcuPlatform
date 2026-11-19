@@ -59,6 +59,7 @@ void esy_hal_xio_spi_default_cfg(esy_xio_spi_config_t *cfg) {
   cfg->instance = 0xFFu;
   cfg->sm_index = 0xFFu;
   cfg->slave_cs_sm_index = 0xFFu;
+  cfg->cs_policy = ESY_XIO_SPI_CS_TRANSACTION;
 }
 
 /* ============== DMA wrapper: complete DREQ/channel metadata ============== */
@@ -143,6 +144,26 @@ static const esy_spi_vtable_t k_xio_spi_ops = {
 
 static esy_err_t xio_spi_hardware_init(esy_spi_t *spi,
                                        esy_xio_spi_config_t *config) {
+  if (config->cs_policy != ESY_XIO_SPI_CS_TRANSACTION &&
+      config->cs_policy != ESY_XIO_SPI_CS_WORD)
+    return ESY_ERR_INVALID_ARG;
+  if (config->cs_policy == ESY_XIO_SPI_CS_WORD) {
+    if (config->role != ESY_SPI_ROLE_MASTER ||
+        config->pin_cs == ESY_PIN_UNUSED ||
+        config->pin_trigger != ESY_PIN_UNUSED ||
+        (config->pin_mosi != ESY_PIN_UNUSED &&
+         config->pin_mosi == config->pin_miso))
+      return ESY_ERR_NOT_SUPPORTED;
+    if (config->pin_cs == config->pin_sck ||
+        config->pin_cs == config->pin_mosi ||
+        config->pin_cs == config->pin_miso ||
+        config->pin_sck == ESY_PIN_UNUSED ||
+        config->pin_mosi == config->pin_sck ||
+        config->pin_miso == config->pin_sck ||
+        (unsigned)config->mode > ESY_SPI_MODE_3 || config->data_bits < 2u)
+      return ESY_ERR_INVALID_ARG;
+    if (config->data_bits > 16u) return ESY_ERR_NOT_SUPPORTED;
+  }
   /* Slave programs require a physical CS input to delimit frames. */
   if (config->role == ESY_SPI_ROLE_SLAVE && config->pin_cs == ESY_PIN_UNUSED)
     return ESY_ERR_NOT_SUPPORTED;

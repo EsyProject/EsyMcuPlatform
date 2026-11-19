@@ -63,6 +63,7 @@ extern "C" {
  * - instance / sm_index = 0xFF (caller must explicitly select)
  * - slave_cs_sm_index = 0xFF (select a second SM for slave MISO)
  * - cs_active_low = true; all other CS timing (ns) set to 0
+ * - cs_policy = ESY_XIO_SPI_CS_TRANSACTION (software CS per complete transfer)
  *
  * @param[out] cfg Output configuration pointer; must not be NULL.
  */
@@ -83,7 +84,8 @@ void esy_hal_xio_spi_default_cfg(esy_xio_spi_config_t *cfg);
  * @retval ESY_OK              Success.
  * @retval ESY_ERR_INVALID_ARG Invalid arguments (e.g., required pins not set,
  * instance/SM not specified).
- * @retval ESY_ERR_NOT_SUPPORTED Slave mode without a physical CS input.
+ * @retval ESY_ERR_NOT_SUPPORTED Slave mode without a physical CS input;
+ * unsupported WORD role/pins/trigger or unrepresentable CS timing.
  * @retval ESY_ERR_NO_MEM      Insufficient PIO instruction memory.
  * @retval ESY_ERR_BUSY        Hardware resource is busy/unavailable.
  * @retval ESY_ERR_FAIL        Other failures.
@@ -112,6 +114,16 @@ void esy_hal_xio_spi_default_cfg(esy_xio_spi_config_t *cfg);
  * CS deassertion; the master must still clock every requested frame.
  * Finite slave DMA uses its completed RX count, including dummy RX for TX-only,
  * without waiting for another CS/TXSTALL. Master DMA still waits for wire drain.
+ * - Pico cs_policy=ESY_XIO_SPI_CS_WORD delegates CS to PIO for every data_bits
+ * frame, including within a DMA buffer. It requires MASTER with a distinct CS,
+ * no trigger and no shared SDIO pin. All modes and both bit orders are supported;
+ * blocking widths remain 2..16 and DMA widths remain exactly 8 or 16. FIFO stalls
+ * keep CS inactive, and RX publication follows CS release and its inactive delay.
+ * Setup/hold/inactive requests round up to bounded PIO instruction delays;
+ * see esy_xio_spi_config_t for timing limits. The clock must stay fixed while
+ * initialized. No uniform conversion period is promised across FIFO stalls.
+ * Abort and deinit restore inactive CS and idle SCK. WORD uses one SM and 10
+ * (CPHA=0) or 11 (CPHA=1) instruction words per handle; CS need not adjoin SCK.
  */
 esy_err_t esy_hal_xio_spi_init(esy_spi_t *spi, esy_xio_spi_config_t *cfg);
 

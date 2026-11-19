@@ -103,7 +103,8 @@ ownership and the corresponding CS/SCLK edges.
    These are register/CPU iteration budgets, not OS timeouts or elapsed-time
    guarantees. A master configuration exceeding the cap rejects DMA with
    NOT_SUPPORTED before DMA claims or CS activity; blocking I/O remains valid.
-   XIO CS hold/inactive timing must also fit its 8192-core-cycle budget.
+   XIO TRANSACTION CS hold/inactive timing must also fit its 8192-core-cycle
+   budget. WORD executes those delays before RX publication in PIO instead.
 4. Inject native DMA stop/retirement failure. Require busy state, preserved
    endpoints/callback arguments and graph usage, with no early terminal callback.
    Retry explicit task-context abort; only successful retirement permits reuse,
@@ -193,6 +194,39 @@ ownership and the corresponding CS/SCLK edges.
    Verify callback byte counts, released buffers/device usage, and immediate
    successful deinit or graph suspend after retirement. Retain master-side
    physical wire-drain checks from the DMA/SPI plan.
+
+## Pico XIO Word CS Procedure
+
+1. Set `cs_policy=ESY_XIO_SPI_CS_WORD` on one MASTER handle with distinct CS,
+   SCK and data pins and no trigger. Capture all four modes, both bit orders,
+   both CS polarities and nonadjacent CS/SCK. Check 8/16-bit blocking and DMA,
+   plus 2/7/9/12/15-bit blocking: every word has exactly `data_bits` clocks and
+   one CS pulse, with correct loopback values and no extra final frame. Repeat
+   with MOSI unused (RX-only), then MISO unused (TX-only with dummy RX DMA).
+2. At integer and fractional dividers, measure setup, hold and inactive times
+   for zero, one-cycle, 16-cycle and just-over-limit requests. Accepted timings
+   must meet each requested minimum, including fractional-divider phase jitter.
+   Over-limit requests return NOT_SUPPORTED without program/SM leaks; retry
+   valid init. Record `clk_sys`, programmed divider and actual SCLK (four SM
+   cycles per bit for CPHA=0, six for CPHA=1). Keep `clk_sys` fixed during init
+   through teardown. There is no software timebase, wrap or reactivation here;
+   stopping the SM freezes instruction progress, while abort forces idle pins.
+3. Starve TX and backpressure RX separately, including transfers beyond FIFO
+   depth with the owner preempted. Every FIFO wait must hold CS inactive and
+   SCK idle. No per-word CPU/IRQ action may be needed. Inter-word gaps may grow;
+   this does not establish a fixed sampling rate. Verify a single DMA terminal
+   callback only after the final CS release and inactive interval, with the
+   correct byte counts and retained buffer ownership through callback return.
+4. Abort at each bit position, during each programmable delay, and during both
+   FIFO waits. Inject DMA cancellation failure: CS must already be inactive
+   and SCK idle while buffers remain borrowed for retry. After successful abort,
+   the next transfer starts at a fresh word, without stale RX or extra clocks.
+   Check deinit/reinit and graph suspend/resume restore policy and safe pins.
+   Exhaust SM/instruction memory and verify failed-init cleanup and retry.
+5. Reject WORD with SLAVE, MASTER_NO_CS, unused or aliased CS, SDIO, trigger,
+   invalid mode or unsupported width. Confirm invalid structural configurations
+   reject before board setup. Finally repeat a multi-word transfer with zero/
+   TRANSACTION policy: CS stays asserted around the complete transaction.
 
 ## Controller Ownership and Lifecycle Procedure
 

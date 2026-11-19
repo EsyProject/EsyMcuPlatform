@@ -38,6 +38,12 @@ extern "C" {
 /* Configuration Types                                                        */
 /* -------------------------------------------------------------------------- */
 
+/** @brief Chip-select scope for XIO SPI master transfers. */
+typedef enum {
+    ESY_XIO_SPI_CS_TRANSACTION = 0, /**< Software CS around the complete transfer; default. */
+    ESY_XIO_SPI_CS_WORD = 1,        /**< PIO CS around each data_bits-wide word. */
+} esy_xio_spi_cs_policy_t;
+
 /**
  * @brief XIO (PIO-based) SPI configuration structure
  *
@@ -88,13 +94,25 @@ typedef struct {
     bool     cs_active_low;  /**< CS active polarity; true means active-low */
     uint32_t cs_setup_ns;    /**< Minimum time from CS assertion to first SCK edge (nanoseconds) */
     uint32_t cs_hold_ns;     /**< Minimum time from last SCK edge to CS deassertion (nanoseconds) */
-    uint32_t cs_inactive_ns; /**< Minimum CS inactive time between consecutive transfers (nanoseconds) */
+    uint32_t cs_inactive_ns; /**< Minimum CS inactive time between transactions or WORD frames (nanoseconds) */
 
     /** @brief Caller-selected CS monitor SM for Pico slave MISO, distinct from
      * sm_index. Set to 0xFF when unused. No monitor is claimed in master mode
      * or when pin_miso is unused. Missing/conflicting slave selection is
      * INVALID_ARG before board/native resource changes. */
     uint8_t slave_cs_sm_index;
+
+    /** @brief CS scope; zero preserves transaction-level CS.
+     * WORD requires MASTER, a distinct valid CS, separate data pins, and no
+     * trigger. It supports both bit orders and all four SPI modes. Setup,
+     * hold and inactive requests are minimum intervals, rounded up to PIO
+     * cycles plus fixed instruction overhead. Each programmable interval is
+     * limited to 16 SM cycles; an unrepresentable request returns NOT_SUPPORTED.
+     * WORD uses four SM cycles per SCLK for CPHA=0 and six for CPHA=1.
+     * FIFO waits occur with CS inactive and may extend inter-word gaps. This
+     * does not promise a fixed sampling period. Keep clk_sys unchanged until
+     * deinit. The public layout changes: rebuild all consumers together. */
+    esy_xio_spi_cs_policy_t cs_policy;
 } esy_xio_spi_config_t;
 
 #ifdef __cplusplus

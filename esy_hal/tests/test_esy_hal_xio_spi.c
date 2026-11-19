@@ -143,6 +143,7 @@ void test_esy_hal_xio_spi_default_deinit_and_half_duplex_paths(void) {
   TEST_ASSERT_EQUAL_UINT8(0xFFu, cfg.instance);
   TEST_ASSERT_EQUAL_UINT8(0xFFu, cfg.sm_index);
   TEST_ASSERT_EQUAL_UINT8(0xFFu, cfg.slave_cs_sm_index);
+  TEST_ASSERT_EQUAL_INT(ESY_XIO_SPI_CS_TRANSACTION, cfg.cs_policy);
 
   init_xio_spi(&spi);
   TEST_ASSERT_EQUAL_INT32(
@@ -171,6 +172,9 @@ void test_esy_hal_xio_spi_device_runtime_suspend_and_lazy_resume(void) {
       .pin_sck = TEST_XIO_SCK_PIN,
       .pin_mosi = TEST_XIO_TX_PIN,
       .pin_miso = TEST_XIO_RX_PIN,
+      .pin_cs = TEST_GPIO_PIN,
+      .pin_trigger = ESY_PIN_UNUSED,
+      .cs_policy = ESY_XIO_SPI_CS_WORD,
       .role = ESY_SPI_ROLE_MASTER,
       .mode = ESY_SPI_MODE_0,
       .is_msb_first = true,
@@ -203,6 +207,87 @@ void test_esy_hal_xio_spi_device_runtime_suspend_and_lazy_resume(void) {
                           esy_device_get_state(&binding.device, &state));
   TEST_ASSERT_EQUAL_INT(ESY_DEVICE_STATE_ACTIVE, state);
   TEST_ASSERT_EQUAL_UINT32(2u, platform_test_state()->driver_init_calls);
+  TEST_ASSERT_EQUAL_INT(ESY_XIO_SPI_CS_WORD,
+      platform_test_state()->last_xio_spi_config.cs_policy);
+}
+
+static esy_xio_spi_config_t word_cs_config(void) {
+  esy_xio_spi_config_t config;
+  esy_hal_xio_spi_default_cfg(&config);
+  config.instance = 0u;
+  config.sm_index = 1u;
+  config.pin_sck = TEST_XIO_SCK_PIN;
+  config.pin_mosi = TEST_XIO_TX_PIN;
+  config.pin_miso = TEST_XIO_RX_PIN;
+  config.pin_cs = TEST_GPIO_PIN;
+  config.cs_policy = ESY_XIO_SPI_CS_WORD;
+  return config;
+}
+
+void test_xio_word_cs_preserves_mode_polarity_timing_and_dma_dispatch(void) {
+  for (unsigned mode = 0u; mode < 4u; ++mode) {
+    for (unsigned order = 0u; order < 2u; ++order) {
+      esy_spi_t spi = {0};
+      esy_xio_spi_config_t config = word_cs_config();
+      config.mode = (esy_spi_mode_t)mode;
+      config.is_msb_first = order != 0u;
+      config.cs_active_low = order == 0u;
+      config.cs_setup_ns = 50u;
+      config.cs_hold_ns = 60u;
+      config.cs_inactive_ns = 100u;
+      TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_init(&spi, &config));
+      const esy_xio_spi_config_t *received =
+          &platform_test_state()->last_xio_spi_config;
+      TEST_ASSERT_EQUAL_INT(ESY_XIO_SPI_CS_WORD, received->cs_policy);
+      TEST_ASSERT_EQUAL_INT(config.mode, received->mode);
+      TEST_ASSERT_EQUAL(config.is_msb_first, received->is_msb_first);
+      TEST_ASSERT_EQUAL(config.cs_active_low, received->cs_active_low);
+      TEST_ASSERT_EQUAL_UINT32(50u, received->cs_setup_ns);
+      TEST_ASSERT_EQUAL_UINT32(60u, received->cs_hold_ns);
+      TEST_ASSERT_EQUAL_UINT32(100u, received->cs_inactive_ns);
+      uint8_t tx[2] = {0x96u, 0x3au};
+      esy_dma_config_t dma = {.src = tx, .length = sizeof(tx),
+          .transfer_size = ESY_DMA_TRANSFER_SIZE_8};
+      TEST_ASSERT_EQUAL(ESY_OK,
+          esy_hal_spi_transfer_dma(&spi, &dma, NULL, NULL, NULL));
+      TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_deinit(&spi));
+    }
+  }
+  TEST_ASSERT_EQUAL_UINT32(8u, platform_test_state()->driver_transfer_dma_calls);
+}
+
+void test_xio_word_cs_rejects_unsupported_configs_before_board_work_and_retries(void) {
+  esy_spi_t spi = {0};
+  const esy_xio_spi_config_t base = word_cs_config();
+  for (unsigned scenario = 0u; scenario < 14u; ++scenario) {
+    esy_xio_spi_config_t config = base;
+    esy_err_t expected = ESY_ERR_NOT_SUPPORTED;
+    switch (scenario) {
+      case 0: config.role = ESY_SPI_ROLE_SLAVE; break;
+      case 1: config.role = ESY_SPI_ROLE_MASTER_NO_CS; break;
+      case 2: config.pin_cs = ESY_PIN_UNUSED; break;
+      case 3: config.pin_trigger = TEST_GPIO_PIN; break;
+      case 4: config.pin_miso = config.pin_mosi; break;
+      case 5: config.data_bits = 17u; break;
+      case 6: config.pin_cs = config.pin_sck; expected = ESY_ERR_INVALID_ARG; break;
+      case 7: config.pin_cs = config.pin_mosi; expected = ESY_ERR_INVALID_ARG; break;
+      case 8: config.pin_cs = config.pin_miso; expected = ESY_ERR_INVALID_ARG; break;
+      case 9: config.cs_policy = (esy_xio_spi_cs_policy_t)2;
+              expected = ESY_ERR_INVALID_ARG; break;
+      case 10: config.mode = (esy_spi_mode_t)-1; expected = ESY_ERR_INVALID_ARG; break;
+      case 11: config.pin_mosi = config.pin_sck; expected = ESY_ERR_INVALID_ARG; break;
+      case 12: config.pin_miso = config.pin_sck; expected = ESY_ERR_INVALID_ARG; break;
+      default: config.data_bits = 1u; expected = ESY_ERR_INVALID_ARG; break;
+    }
+    TEST_ASSERT_EQUAL(expected, esy_hal_xio_spi_init(&spi, &config));
+    TEST_ASSERT_NULL(spi.ctx);
+    TEST_ASSERT_NULL(spi.ops);
+    TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->board_configure_order);
+    TEST_ASSERT_EQUAL_UINT32(0u, platform_test_state()->driver_init_calls);
+  }
+  esy_xio_spi_config_t config = base;
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_init(&spi, &config));
+  TEST_ASSERT_EQUAL(ESY_OK, esy_hal_xio_spi_deinit(&spi));
 }
 
 void test_esy_hal_xio_spi_device_unregisters_before_start(void) {

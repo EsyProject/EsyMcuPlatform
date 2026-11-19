@@ -365,6 +365,15 @@ ownership handoff, not a mechanism for concurrent users to claim a handle.
   16-bit frames with 16-bit elements. Other frame/element combinations return
   `NOT_SUPPORTED` before DMA preparation; the blocking 2-to-16-bit frame API
   retains its documented least-significant-bit buffer representation.
+  Master `cs_policy=ESY_XIO_SPI_CS_WORD` makes PIO assert and release CS for each
+  `data_bits` frame within the same blocking or DMA transfer. The zero/default
+  `ESY_XIO_SPI_CS_TRANSACTION` retains software CS around the whole transfer.
+  WORD requires a distinct CS pin, separate data pins and no trigger; it uses
+  one SM, supports all modes and both bit orders, and keeps FIFO stalls outside
+  active CS. RX publication follows CS release and its inactive delay. Abort
+  and deinit restore inactive CS and idle SCK. WORD adds 10/11 instruction words
+  for CPHA=0/1 and does not require adjacent SCK/CS pins. Rebuild all consumers
+  together because `esy_xio_spi_config_t` has a new member.
 - Board resource policy is delegated to `esy_board`.
 - UART initialization lets `esy_board_uart_configure_pins()` complete the
   controller IRQ priority in a local configuration before HAL backend initialization.

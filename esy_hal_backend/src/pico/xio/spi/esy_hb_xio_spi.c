@@ -30,6 +30,8 @@
 #define XIO_SPI_DMA_MAX_CS_CYCLES 8192u
 #define XIO_SPI_DMA_TAIL_PIO_CYCLES 8u
 #define XIO_SPI_DMA_TAIL_SYNC_READS 16u
+#define XIO_SPI_WORD_DELAY_CYCLES 16u
+#define XIO_SPI_CLKDIV_SCALE 256u
 
 typedef struct {
   esy_hb_xio_program_t prog;
@@ -85,6 +87,7 @@ typedef struct {
   bool cs_monitor_loaded;
   bool initialized;
   uint8_t unit_bytes;
+  uint8_t cs_policy;
 } esy_xio_spi_ctx_t;
 
 _Static_assert(ESY_SPI_PRIV_BYTES >= sizeof(esy_xio_spi_ctx_t),
@@ -118,6 +121,56 @@ static inline bool is_three_wire_config(const esy_xio_spi_config_t *c) {
   return c->pin_mosi != ESY_PIN_UNUSED && c->pin_mosi == c->pin_miso;
 }
 
+/* Count elapsed SM cycles conservatively with a fractional divider: N cycles
+ * take at least floor(N * divider256 / 256) clk_sys cycles, regardless of the
+ * divider accumulator phase. These are bounded instruction delays, not a
+ * wrapping timestamp or a software wait that can become active again. */
+static esy_err_t word_cs_delay(uint32_t ns, uint32_t sys_hz,
+                              uint64_t divider256, uint8_t *delay) {
+  const uint64_t core_cycles = ((uint64_t)ns * sys_hz + 999999999ull) /
+                               1000000000ull;
+  uint64_t cycles = (core_cycles * XIO_SPI_CLKDIV_SCALE + divider256 - 1u) /
+                    divider256;
+  if (cycles == 0u) cycles = 1u;
+  if (cycles > XIO_SPI_WORD_DELAY_CYCLES) return ESY_ERR_NOT_SUPPORTED;
+  *delay = (uint8_t)(cycles - 1u);
+  return ESY_OK;
+}
+
+/* Called only while this exclusively owned SM is stopped. Preserve CPOL's
+ * existing GPIO output override: raw SCK zero is the configured idle level. */
+static void word_cs_set_idle(esy_xio_spi_ctx_t *c) {
+  const uint32_t cs_mask = 1u << c->pin_cs;
+  pio_sm_set_pins_with_mask(ctx_pio(c), c->sm_index,
+                           c->cs_active_low ? cs_mask : 0u,
+                           cs_mask | (1u << c->pin_sck));
+}
+
+static void word_cs_patch(esy_xio_spi_ctx_t *c,
+                          const esy_xio_spi_config_t *cfg,
+                          const uint8_t delays[3]) {
+  const bool cpha = (cfg->mode == ESY_SPI_MODE_1 || cfg->mode == ESY_SPI_MODE_3);
+  const uint bits = cpha ? xio_spi_cpha1_word_offset_word_bits
+                         : xio_spi_cpha0_word_offset_word_bits;
+  const uint setup = cpha ? xio_spi_cpha1_word_offset_word_setup
+                          : xio_spi_cpha0_word_offset_word_setup;
+  const uint hold = cpha ? xio_spi_cpha1_word_offset_word_hold
+                         : xio_spi_cpha0_word_offset_word_hold;
+  const uint inactive = cpha ? xio_spi_cpha1_word_offset_word_inactive
+                             : xio_spi_cpha0_word_offset_word_inactive;
+  PIO pio = ctx_pio(c);
+  const uint base = c->prog_offs;
+  /* Each handle owns its program allocation; no peer's instructions change. */
+  pio->instr_mem[base + bits] = pio_encode_set(pio_y, cfg->data_bits - 1u);
+  pio->instr_mem[base + setup] =
+      pio_encode_set(pio_pins, cfg->cs_active_low ? 0u : 1u) |
+      pio_encode_delay(delays[0]);
+  pio->instr_mem[base + hold] = pio_encode_nop() | pio_encode_delay(delays[1]);
+  pio->instr_mem[base + inactive] =
+      pio_encode_set(pio_pins, cfg->cs_active_low ? 1u : 0u) |
+      pio_encode_delay(delays[2]);
+}
+
 static inline void set_three_wire_direction(esy_xio_spi_ctx_t *c,
                                             bool is_output) {
   if (!c->is_three_wire) return;
@@ -126,12 +179,14 @@ static inline void set_three_wire_direction(esy_xio_spi_ctx_t *c,
 }
 
 static inline void cs_assert(esy_xio_spi_ctx_t *c) {
+  if (c->cs_policy == ESY_XIO_SPI_CS_WORD) return;
   if (!is_master(c) || (c->pin_cs == ESY_PIN_UNUSED)) return;
   if (c->role == ESY_SPI_ROLE_MASTER_NO_CS) return;
   gpio_put(c->pin_cs, c->cs_active_low ? 0 : 1);
   busy_wait_ns(effective_setup_ns(c));
 }
 static inline void cs_release(esy_xio_spi_ctx_t *c) {
+  if (c->cs_policy == ESY_XIO_SPI_CS_WORD) return;
   if (!is_master(c) || (c->pin_cs == ESY_PIN_UNUSED)) return;
   if (c->role == ESY_SPI_ROLE_MASTER_NO_CS) return;
   busy_wait_ns(c->cs_hold_ns);
@@ -255,13 +310,33 @@ static esy_err_t cs_monitor_init(esy_xio_spi_ctx_t *c,
 static esy_err_t xio_spi_load_and_config_master(
     esy_xio_spi_ctx_t *c, const esy_xio_spi_config_t *xcfg) {
   const bool use_trig = (xcfg->pin_trigger != ESY_PIN_UNUSED);
+  const bool word_cs = (xcfg->cs_policy == ESY_XIO_SPI_CS_WORD);
+  const bool cpha = (xcfg->mode == ESY_SPI_MODE_1 || xcfg->mode == ESY_SPI_MODE_3);
   const bool is_three_wire = is_three_wire_config(xcfg);
-  const uint32_t cycles_per_bit = use_trig ? 5u : 4u;
+  const uint32_t cycles_per_bit =
+      word_cs ? (cpha ? 6u : 4u) : (use_trig ? 5u : 4u);
   const uint32_t sck_hz = xcfg->speed_hz ? xcfg->speed_hz : 1000000u;
   if (sck_hz > UINT32_MAX / cycles_per_bit) return ESY_ERR_INVALID_ARG;
+  const uint32_t clk_sys_hz = clock_get_hz(clk_sys);
+  uint8_t word_delays[3] = {0};
+  if (word_cs) {
+    const uint64_t divider256 = ((uint64_t)clk_sys_hz * XIO_SPI_CLKDIV_SCALE) /
+                                (sck_hz * cycles_per_bit);
+    if (divider256 < XIO_SPI_CLKDIV_SCALE ||
+        divider256 > (65536ull * XIO_SPI_CLKDIV_SCALE))
+      return ESY_ERR_INVALID_ARG;
+    const uint32_t requests[3] = {
+        xcfg->cs_setup_ns, xcfg->cs_hold_ns, xcfg->cs_inactive_ns};
+    for (size_t i = 0u; i < 3u; ++i) {
+      esy_err_t timing = word_cs_delay(requests[i], clk_sys_hz, divider256,
+                                      &word_delays[i]);
+      if (timing != ESY_OK) return timing;
+    }
+  }
   const uint8_t input_pin = is_three_wire ? xcfg->pin_mosi : xcfg->pin_miso;
-  const pio_program_t *prog =
-      (!use_trig)
+  const pio_program_t *prog = word_cs
+      ? (cpha ? &xio_spi_cpha1_word_program : &xio_spi_cpha0_word_program)
+      : (!use_trig)
           ? ((xcfg->mode == ESY_SPI_MODE_0 || xcfg->mode == ESY_SPI_MODE_2)
                  ? &xio_spi_cpha0_program
                  : &xio_spi_cpha1_program)
@@ -273,7 +348,7 @@ static esy_err_t xio_spi_load_and_config_master(
       .instructions = NULL,
       .length = 0,
       .origin = -1,
-      .name =
+      .name = word_cs ? (cpha ? "xio_spi_cpha1_word" : "xio_spi_cpha0_word") :
           (!use_trig
                ? ((xcfg->mode == ESY_SPI_MODE_0 || xcfg->mode == ESY_SPI_MODE_2)
                       ? "xio_spi_cpha0"
@@ -302,13 +377,25 @@ static esy_err_t xio_spi_load_and_config_master(
     return rc;
   }
   c->prog_offs = (uint8_t)entry_offset;
+  c->cs_policy = xcfg->cs_policy;
+  c->pin_cs = xcfg->pin_cs;
+  c->pin_sck = xcfg->pin_sck;
+  c->cs_active_low = xcfg->cs_active_low;
+
+  if (word_cs) {
+    /* Drive the same inactive value through SIO and PIO before muxing CS. */
+    gpio_init(xcfg->pin_cs);
+    gpio_put(xcfg->pin_cs, xcfg->cs_active_low);
+    gpio_set_dir(xcfg->pin_cs, GPIO_OUT);
+    word_cs_set_idle(c);
+  }
 
   esy_hb_xio_sm_config_t sc = (esy_hb_xio_sm_config_t){0};
 
   sc.out_pin_base = xcfg->pin_mosi;
   sc.out_pin_count = (xcfg->pin_mosi != ESY_PIN_UNUSED) ? 1 : 0;
-  sc.set_pin_base = ESY_PIN_UNUSED;
-  sc.set_pin_count = 0;
+  sc.set_pin_base = word_cs ? xcfg->pin_cs : ESY_PIN_UNUSED;
+  sc.set_pin_count = word_cs ? 1u : 0u;
   sc.sideset_pin_base = xcfg->pin_sck;
   sc.sideset_pin_count = 1;
   sc.sideset_optional = use_trig ? 1u : 0u;
@@ -321,14 +408,13 @@ static esy_err_t xio_spi_load_and_config_master(
   c->in_shift_right = c->is_msb_first ? 0 : 1;
 
   sc.in_shift_right = c->in_shift_right;
-  sc.in_autopush = 1;
+  sc.in_autopush = word_cs ? 0u : 1u;
   sc.in_push_thresh = xcfg->data_bits;
   sc.out_shift_right = c->out_shift_right;
-  sc.out_autopull = 1;
+  sc.out_autopull = word_cs ? 0u : 1u;
   sc.out_pull_thresh = xcfg->data_bits;
   sc.enable_on_init = 0;
 
-  uint32_t clk_sys_hz = clock_get_hz(clk_sys);
   /* Triggered programs execute an extra loop-counter jump for every bit. */
   sc.clk_div_mul = sck_hz * cycles_per_bit;
   sc.clk_div_div = clk_sys_hz;
@@ -364,13 +450,16 @@ static esy_err_t xio_spi_load_and_config_master(
     pio_sm_set_in_pins(pio, smi, input_pin);
     hw_set_bits(&pio->input_sync_bypass, 1u << input_pin);
   }
-  if (xcfg->role == ESY_SPI_ROLE_MASTER && xcfg->pin_cs != ESY_PIN_UNUSED) {
+  if (!word_cs && xcfg->role == ESY_SPI_ROLE_MASTER &&
+      xcfg->pin_cs != ESY_PIN_UNUSED) {
     gpio_init(xcfg->pin_cs);
     gpio_set_dir(xcfg->pin_cs, GPIO_OUT);
     gpio_put(xcfg->pin_cs, xcfg->cs_active_low ? 1 : 0);
   }
 
-  if (use_trig) {
+  if (word_cs) {
+    word_cs_patch(c, xcfg, word_delays);
+  } else if (use_trig) {
     pio_gpio_init(pio, xcfg->pin_trigger);
     pio_sm_set_consecutive_pindirs(pio, smi, xcfg->pin_trigger, 1, false);
     hw_set_bits(&pio->input_sync_bypass, 1u << xcfg->pin_trigger);
@@ -632,6 +721,19 @@ esy_err_t esy_hb_xio_spi_init(esy_spi_t *spi,
                                   const esy_xio_spi_config_t *cfg) {
   if (!spi || !cfg) return ESY_ERR_INVALID_ARG;
   if (spi->ctx != NULL) return ESY_ERR_STATE;
+  if (cfg->cs_policy != ESY_XIO_SPI_CS_TRANSACTION &&
+      cfg->cs_policy != ESY_XIO_SPI_CS_WORD)
+    return ESY_ERR_INVALID_ARG;
+  if (cfg->cs_policy == ESY_XIO_SPI_CS_WORD) {
+    if (cfg->role != ESY_SPI_ROLE_MASTER || cfg->pin_cs == ESY_PIN_UNUSED ||
+        cfg->pin_trigger != ESY_PIN_UNUSED || is_three_wire_config(cfg))
+      return ESY_ERR_NOT_SUPPORTED;
+    if (cfg->pin_cs == cfg->pin_sck || cfg->pin_cs == cfg->pin_mosi ||
+        cfg->pin_cs == cfg->pin_miso || cfg->pin_mosi == cfg->pin_sck ||
+        cfg->pin_miso == cfg->pin_sck || (unsigned)cfg->mode > ESY_SPI_MODE_3)
+      return ESY_ERR_INVALID_ARG;
+    if (cfg->data_bits > 16u) return ESY_ERR_NOT_SUPPORTED;
+  }
   if (cfg->role == ESY_SPI_ROLE_SLAVE && cfg->pin_cs == ESY_PIN_UNUSED)
     return ESY_ERR_NOT_SUPPORTED;
   if (cfg->role == ESY_SPI_ROLE_SLAVE && cfg->pin_miso != ESY_PIN_UNUSED &&
@@ -696,11 +798,20 @@ esy_err_t esy_hb_xio_spi_deinit(esy_spi_t *spi) {
   esy_err_t ret = xio_spi_flush_dma_reservations(c);
   if (ret != ESY_OK) return ret;
   esy_hb_xio_sm_stop(&c->sm);
+  if (c->cs_policy == ESY_XIO_SPI_CS_WORD) word_cs_set_idle(c);
   cs_monitor_release(c);
   esy_hb_xio_sm_release(&c->sm);
   esy_hb_xio_program_deinit(&c->prog);
 
-  if (c->pin_sck != ESY_PIN_UNUSED) {
+  if (c->cs_policy == ESY_XIO_SPI_CS_WORD) {
+    /* gpio_set_function clears overrides: preload physical CPOL for SIO. */
+    gpio_put(c->pin_cs, c->cs_active_low);
+    gpio_set_dir(c->pin_cs, GPIO_OUT);
+    gpio_set_function(c->pin_cs, GPIO_FUNC_SIO);
+    gpio_put(c->pin_sck, c->cpol != 0u);
+    gpio_set_dir(c->pin_sck, GPIO_OUT);
+    gpio_set_function(c->pin_sck, GPIO_FUNC_SIO);
+  } else if (c->pin_sck != ESY_PIN_UNUSED) {
     gpio_set_outover(c->pin_sck, GPIO_OVERRIDE_NORMAL);
     gpio_set_inover(c->pin_sck, GPIO_OVERRIDE_NORMAL);
   }
@@ -1022,7 +1133,10 @@ static void xio_spi_dma_error(void *arg) {
 /* Both native routes retire before caller storage or its graph lease returns.
  * Error paths stop the SM before bounded native DMA cancellation. */
 static esy_err_t retire_dma(esy_xio_spi_ctx_t *c, bool reset_sm, bool from_isr) {
-  if (reset_sm) pio_sm_set_enabled(ctx_pio(c), c->sm_index, false);
+  if (reset_sm) {
+    pio_sm_set_enabled(ctx_pio(c), c->sm_index, false);
+    if (c->cs_policy == ESY_XIO_SPI_CS_WORD) word_cs_set_idle(c);
+  }
   esy_err_t tx = ESY_OK, rx = ESY_OK;
   if (c->tx_owned) {
     size_t remaining = SIZE_MAX;
@@ -1084,9 +1198,11 @@ esy_err_t esy_hb_xio_spi_abort(esy_spi_t *spi) {
   return ret;
 }
 
-/* Once RX sampled the last frame, each master program reaches its idle
- * WAIT/TX stall within eight PIO cycles, including delay slots. Budget from
- * the programmed 16.8 divider, independently of OS ticks or external triggers.
+/* Once RX publishes the last frame, each master program reaches its idle
+ * WAIT/TX stall within eight PIO cycles, including delay slots. WORD publishes
+ * only after CS release and its inactive delay, so these delays precede RX DMA.
+ * Budget from the programmed 16.8 divider, independently of OS ticks or external
+ * triggers.
  * Slave frame completion depends on the RX count, never on another SCK/CS edge. */
 static uint64_t xio_spi_tail_budget(const esy_xio_spi_ctx_t *c) {
   if (!is_master(c)) return 0u;
@@ -1189,7 +1305,8 @@ esy_err_t esy_hb_xio_spi_transfer_dma(esy_spi_t *spi,
 
   if (xio_spi_tail_budget(c) > XIO_SPI_DMA_MAX_TAIL_READS)
     return ESY_ERR_NOT_SUPPORTED;
-  if (is_master(c) && c->role != ESY_SPI_ROLE_MASTER_NO_CS && c->pin_cs != ESY_PIN_UNUSED) {
+  if (c->cs_policy != ESY_XIO_SPI_CS_WORD && is_master(c) &&
+      c->role != ESY_SPI_ROLE_MASTER_NO_CS && c->pin_cs != ESY_PIN_UNUSED) {
     const uint64_t cs_cycles = (((uint64_t)c->cs_hold_ns + c->cs_inactive_ns) *
         clock_get_hz(clk_sys) + 999999999ull) / 1000000000ull;
     if (cs_cycles > XIO_SPI_DMA_MAX_CS_CYCLES) return ESY_ERR_NOT_SUPPORTED;

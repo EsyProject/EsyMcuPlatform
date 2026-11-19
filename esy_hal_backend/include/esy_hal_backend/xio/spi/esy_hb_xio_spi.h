@@ -66,6 +66,11 @@ extern "C" {
  * suspend or deinit. Master and MISO-less slave modes claim no extra SM.
  * Repeated init returns STATE without changing live resources. A failed first
  * init releases its temporary program/SM and leaves the handle unused for retry.
+ * Pico cs_policy=WORD delegates each frame's CS to PIO; TRANSACTION (zero)
+ * retains software CS. WORD requires MASTER with distinct CS/SCK/data pins,
+ * no SDIO and no trigger. It uses one SM and 10/11 instruction words for
+ * CPHA=0/1. Timing limits and clock stability are specified by the configuration;
+ * FIFO waits hold CS inactive. Abort/deinit restore inactive CS and idle SCK.
  *
  * @param[in,out] spi  SPI handle (caller-provided storage)
  * @param[in]     cfg  XIO SPI configuration (@ref esy_xio_spi_config_t)

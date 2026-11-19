@@ -58,6 +58,7 @@ cat > "${contract_source}" <<'EOF'
 #include "esy_common/defs/diagnostics/esy_diagnostics_defs.h"
 #include "esy_common/defs/peripheral/esy_adc_defs.h"
 #include "esy_common/defs/peripheral/esy_gpio_defs.h"
+#include "esy_common/defs/peripheral/xio/esy_xio_spi_defs.h"
 
 #if defined(ESY_LCD_PRIV_BYTES) || defined(ESY_TOUCH_PRIV_BYTES)
 #error "Middleware runtime storage must not be defined by common value headers"
@@ -76,6 +77,8 @@ typedef void (*esy_touch_spi_get_write_buffer)(void);
 #define CONTRACT_ASSERT _Static_assert
 #endif
 CONTRACT_ASSERT(ESY_GPIO_IRQ_NONE == 0, "GPIO NONE trigger value changed");
+CONTRACT_ASSERT(ESY_XIO_SPI_CS_TRANSACTION == 0, "Zero must retain transaction CS");
+CONTRACT_ASSERT(ESY_XIO_SPI_CS_WORD == 1, "XIO word CS policy value changed");
 CONTRACT_ASSERT(ESY_GPIO_IRQ_RISING == 1, "GPIO rising trigger value changed");
 CONTRACT_ASSERT(ESY_GPIO_IRQ_FALLING == 2, "GPIO falling trigger value changed");
 CONTRACT_ASSERT(ESY_GPIO_IRQ_BOTH == 3, "GPIO both-edge trigger value changed");

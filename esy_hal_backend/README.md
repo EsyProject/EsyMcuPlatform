@@ -780,6 +780,31 @@ TX-only, and an empty TX FIFO rather than a future CS/TXSTALL. Master DMA retain
 its physical wire-drain check. The [SPI buffer HIL plan](../esy_hal/tests/hil/spi_buffer_contract_hil_plan.md)
 covers completion accounting and wire timing.
 
+Pico master `cs_policy=ESY_XIO_SPI_CS_WORD` selects a separate PIO program that
+drives CS with SET and SCK with side-set, without a pin adjacency requirement.
+The zero/default TRANSACTION policy retains software CS around the complete
+transfer. WORD requires MASTER, an explicit distinct CS pin, separate data pins
+and no external trigger; unsupported combinations reject before native claims.
+All four modes and both bit orders retain the same blocking and DMA frame formats.
+One handle owns one SM and 10 instruction words for CPHA=0 or 11 for CPHA=1.
+Explicit TX pull and RX push both occur while CS is inactive; RX publication is
+after CS release and the inactive delay. A FIFO stall can extend the word gap,
+so this policy supplies framing rather than a fixed conversion period. Abort
+stops the SM and restores inactive CS/idle SCK before cancelling DMA. Deinit
+hands those idle outputs to SIO with the physical CPOL level preloaded before
+the SDK clears the output override during pin-mux selection.
+
+WORD uses four SM cycles per SCLK with CPHA=0 and six with CPHA=1. The divider
+uses the existing 16.8 quantization, so actual SCLK may slightly exceed the
+requested speed. Setup/hold/inactive nanosecond requests round up conservatively
+to 1..16 SM cycles per programmable interval, plus fixed instruction overhead;
+an unrepresentable request returns NOT_SUPPORTED during init. Zero selects the
+shortest interval, not zero elapsed time. Timing derives from `clk_sys` at init,
+which must remain fixed until deinit; these are hardware instruction delays,
+not wrapping timestamps. The DMA tail budget starts after RX publication and
+therefore excludes those already completed delays. Rebuild HAL, backend and all
+consumers together after the public configuration layout change.
+
 `esy_hb_boot_jump_to_app()` receives only the application image/vector
 base address. Any platform-specific handoff details, including vector-table
 register updates, stack setup, cache/memory remapping, or bootloader handoff

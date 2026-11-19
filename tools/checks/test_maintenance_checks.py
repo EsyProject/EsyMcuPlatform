@@ -58,6 +58,19 @@ class MaintenanceChecks(unittest.TestCase):
             self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn('unsupported SPI speed changes must preserve', result.stderr)
 
+    def test_backend_contract_rejects_word_rx_publication_before_cs_release(self):
+        with tempfile.TemporaryDirectory(prefix='word CS contract ') as directory:
+            root = Path(directory)
+            checker = self.backend_contract_fixture(root)
+            source = root / 'esy_hal_backend/src/pico/xio/spi/esy_hb_xio_spi.pio'
+            source.write_text(source.read_text().replace(
+                'public word_inactive:',
+                '    push block side 0\npublic word_inactive:', 1))
+            result = subprocess.run(['bash', str(checker)], capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('WORD CPHA0 must wait on FIFOs only outside active CS',
+                          result.stderr)
+
     def allocation_fixture(self, root):
         for directory in ('esy_common', 'esy_hal', 'esy_hal_backend', 'esy_middleware'):
             (root / directory).mkdir()

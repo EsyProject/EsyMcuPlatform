@@ -369,6 +369,29 @@ require('*caps = 0u' in body(esp32_adc, 'esy_hb_adc_get_caps'),
 
 xio_spi = (root / 'src/pico/xio/spi/esy_hb_xio_spi.c').read_text()
 xio_pio = (root / 'src/pico/xio/spi/esy_hb_xio_spi.pio').read_text()
+for phase in (0, 1):
+    program = re.search(rf'\.program xio_spi_cpha{phase}_word\b(.*?)(?=\.program|\Z)',
+                        xio_pio, re.S).group(1)
+    require(program.index('pull block') < program.index('word_setup:') <
+            program.index('word_hold:') < program.index('word_inactive:') <
+            program.index('push block') and
+            'jmp y-- word_bitloop' in program and '.side_set 1\n' in program,
+            f'Pico XIO WORD CPHA{phase} must wait on FIFOs only outside active CS')
+master = body(xio_spi, 'xio_spi_load_and_config_master')
+require('sc.in_autopush = word_cs ? 0u : 1u' in master and
+        'sc.out_autopull = word_cs ? 0u : 1u' in master and
+        'sc.set_pin_base = word_cs ? xcfg->pin_cs' in master,
+        'Pico XIO WORD must use independent CS and explicit FIFO operations')
+for name in ('cs_assert', 'cs_release'):
+    require('if (c->cs_policy == ESY_XIO_SPI_CS_WORD) return;' in body(xio_spi, name),
+            f'Pico XIO WORD must not drive software CS in {name}')
+retire = body(xio_spi, 'retire_dma')
+require(retire.index('pio_sm_set_enabled(ctx_pio(c), c->sm_index, false)') <
+        retire.index('word_cs_set_idle(c)') < retire.index('esy_hb_dma_abort') and
+        'pio_encode_jmp(c->prog_offs)' in retire,
+        'Pico XIO WORD abort must stop, release CS, then retire DMA and restart at PULL')
+require('word_cs_set_idle(c)' in body(xio_spi, 'esy_hb_xio_spi_deinit'),
+        'Pico XIO WORD teardown must restore idle CS and SCK')
 monitor = body(xio_spi, 'cs_monitor_init')
 require('esy_hb_resource_assembly_try_acquire()' in monitor and
         'config->slave_cs_sm_index' in monitor and 'pio_sm_claim(pio, smi)' in monitor and
