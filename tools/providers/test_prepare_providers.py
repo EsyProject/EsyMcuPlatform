@@ -160,7 +160,7 @@ class ProviderPreparationTests(unittest.TestCase):
         remote.mkdir()
         self.git(remote, "init", "--quiet")
         for relative in self.providers[name]["required_files"]:
-            path = remote / relative
+            path = remote / self.providers[name].get("source_subdirectory", "") / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("pinned upstream input\n", encoding="utf-8")
         self.git(remote, "add", ".")
@@ -287,11 +287,13 @@ class ProviderPreparationTests(unittest.TestCase):
         baseline = json.loads(SCRIPT.with_name("providers.lock.json").read_text(encoding="utf-8"))
         self.assertEqual(list(DEFAULTS), baseline["default_providers"])
         for name in DEFAULTS:
-            if name == "fatfs":
+            if baseline["providers"][name]["kind"] == "zip":
                 archive = self.root / "local FatFs archive.zip"
                 archive.write_bytes(self.zip_bytes())
                 self.providers[name]["url"] = archive.as_uri()
             else:
+                self.providers[name]["kind"] = "git"
+                self.providers[name].pop("sha256", None)
                 self.local_git_provider(name)
         self.write_lock()
         setup = self.platform / "setup.sh"
@@ -518,15 +520,28 @@ class ProviderPreparationTests(unittest.TestCase):
         self.assertEqual(f"ESY_FATFS_PATH={managed / 'source'}\n", stdout)
         opened.assert_not_called()
 
-    def test_locked_fatfs_request_uses_the_official_archive_page_as_referer(self):
-        baseline = json.loads(SCRIPT.with_name("providers.lock.json").read_text(encoding="utf-8"))
-        provider = baseline["providers"]["fatfs"]
-        destination = self.root / "request payload.zip"
-        with mock.patch.object(self.tool, "urlopen", return_value=io.BytesIO(b"payload")) as opened:
-            self.tool.download_archive(provider["url"], destination, provider["referer"])
-        request = opened.call_args.args[0]
-        self.assertEqual("https://elm-chan.org/fsw/ff/arc/ff16.zip", request.full_url)
-        self.assertEqual("https://elm-chan.org/fsw/ff/archives.html", request.get_header("Referer"))
+    def test_git_source_subdirectory_uses_separate_cache_and_preserves_previous_archive(self):
+        previous = self.prepare_archive(self.zip_bytes())
+        before = {path.relative_to(previous): path.read_bytes()
+                  for path in previous.rglob("*") if path.is_file()}
+        self.providers["fatfs"]["kind"] = "git"
+        self.providers["fatfs"].pop("sha256")
+        remote, managed = self.local_git_provider("fatfs")
+        result = self.run_cli("--provider", "fatfs")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotEqual(previous, managed)
+        self.assertEqual(f"ESY_FATFS_PATH={managed / 'source'}\n", result.stdout)
+        self.assertEqual("pinned upstream input\n", (managed / "source/ff.c").read_text())
+        self.assertEqual(self.providers["fatfs"]["revision"], self.git(managed, "rev-parse", "HEAD"))
+        status, stdout, stderr, opened = self.run_main("--provider", "fatfs", "--offline")
+        self.assertEqual(0, status, stderr)
+        self.assertEqual(f"ESY_FATFS_PATH={managed / 'source'}\n", stdout)
+        opened.assert_not_called()
+        self.assertEqual(before, {path.relative_to(previous): path.read_bytes()
+                                  for path in previous.rglob("*") if path.is_file()})
+        cached = self.run_cache_cli("--json")
+        self.assertEqual(0, cached.returncode, cached.stderr)
+        self.assertEqual(str(managed / "source"), json.loads(cached.stdout)["ESY_FATFS_PATH"])
 
     def test_zip_referer_is_sent_over_http_and_preserved_across_retries(self):
         payload = self.zip_bytes()

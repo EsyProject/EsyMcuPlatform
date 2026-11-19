@@ -56,10 +56,9 @@
     },
     "fatfs": {
       "version": "R0.16",
-      "kind": "zip",
-      "url": "https://elm-chan.org/fsw/ff/arc/ff16.zip",
-      "referer": "https://elm-chan.org/fsw/ff/archives.html",
-      "sha256": "99f7dc1f7e095356e4a9e3dbe29959090d8b948afe2bbc5441e52fdf4b85449e",
+      "kind": "git",
+      "url": "https://github.com/abbrev/fatfs.git",
+      "revision": "5f85a520a9edfee2d9aef826ab38bbbb6b39e3aa",
       "directory": "fatfs-r016",
       "environment": "ESY_FATFS_PATH",
       "source_subdirectory": "source",

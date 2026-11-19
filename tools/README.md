@@ -47,8 +47,20 @@ from an independent library checkout and needs no consuming firmware project.
 Run `./setup.sh` once from the library root to prepare its seven host-test
 providers: `corejson`, `coremqtt`, `llhttp`, `mbedtls`, `littlefs`, `fatfs` and
 `lvgl`. [The tracked test-provider lock](providers/providers.lock.json) records
-their official locations, exact Git revisions and archive checksums. Local
+their source locations, exact Git revisions and archive checksums. Local
 verification and CI use the same baseline.
+
+FatFs host tests use the unmodified R0.16 release from the
+[abbrev/fatfs mirror](https://github.com/abbrev/fatfs/tree/5f85a520a9edfee2d9aef826ab38bbbb6b39e3aa),
+pinned to commit `5f85a520a9edfee2d9aef826ab38bbbb6b39e3aa`. All nine files in its
+`source/` directory were verified byte-for-byte against the official
+[R0.16 archive](https://elm-chan.org/fsw/ff/arc/ff16.zip), whose SHA256 is
+`99f7dc1f7e095356e4a9e3dbe29959090d8b948afe2bbc5441e52fdf4b85449e`.
+The fixed commit is required: the mirror's `R0.16` tag includes a later Unicode
+patch. Setup fetches the commit directly from GitHub and does not contact the
+upstream archive server, which rejects some CI runners with HTTP 403. The Git
+provider uses a separate cache directory; previous archive caches remain
+untouched for older platform checkouts.
 
 The default cache is `$XDG_CACHE_HOME/esymcuplatform/providers`, or
 `~/.cache/esymcuplatform/providers` when `XDG_CACHE_HOME` is unset. Managed
@@ -76,13 +88,11 @@ RTOS kernels and target toolchains remain inputs to real firmware builds.
 Managed Git inputs must match their locked revisions with clean worktrees and
 initialized submodules. Archive downloads are SHA256-verified before extraction;
 reused archive trees are checked against their recorded file hashes. Setup
-identifies archive requests with an EsyMcuPlatform User-Agent. The FatFs lock
-also records its official archive page as the HTTP `Referer`, matching a
-download initiated from that page. This request hint does not change the
-archive checksum, cache identity or verification record, so existing verified
-caches remain reusable offline. Other providers send no Referer unless their
-lock entry supplies one. Setup makes up to three attempts for HTTP 403, 408,
-429, 500, 502, 503 and 504, connection failures,
+identifies archive requests with an EsyMcuPlatform User-Agent and sends an HTTP
+`Referer` only when an archive entry supplies one. This request hint does not
+change the archive checksum, cache identity or verification record. Setup
+makes up to three archive download attempts for HTTP 403, 408, 429, 500, 502,
+503 and 504, connection failures,
 timeouts or interrupted responses. Retries wait two then four seconds; each
 request uses a 60-second socket timeout. A persistent download failure reports
 the URL and attempt count. Other HTTP errors and checksum failures stop
@@ -130,8 +140,8 @@ procedures, see [TLS](../esy_middleware/tls/README.md) and
 
 Filesystem adapter-header checks and backend tests use cached official littlefs
 2.11.2 and FatFs R0.16, with `ESY_LITTLEFS_PATH` and `ESY_FATFS_PATH` available as
-explicit overrides. Setup provisions the pinned littlefs revision and verifies
-the official FatFs archive checksum in both local and CI runs.
+explicit overrides. Setup provisions the pinned littlefs and FatFs revisions
+in both local and CI runs and verifies each checkout before reusing it.
 The module runner stages FatFs beside the platform-owned configuration without
 changing upstream inputs, runs both actual libraries, and isolates sanitizer
 artifacts. Core-only filesystem tests need neither provider; the full quality
