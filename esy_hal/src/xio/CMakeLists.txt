@@ -1,4 +1,6 @@
-# esy_hal/src/xio/CMakeLists.txt
+# SPDX-FileCopyrightText: 2026 EsyProject contributors
+#
+# SPDX-License-Identifier: Apache-2.0
 
 set(MODULE_SRCS "")
 
@@ -17,6 +19,10 @@ endif()
 
 if(ENABLE_ESY_XIO_SPI)
     list(APPEND MODULE_SRCS esy_hal_xio_spi.c)
+endif()
+
+if(ENABLE_ESY_XIO_PROGRAM)
+    list(APPEND MODULE_SRCS esy_hal_xio_program.c)
 endif()
 
 # ---- Attach selected XIO sources to the top-level esy_hal target ----

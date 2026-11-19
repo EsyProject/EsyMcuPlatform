@@ -13,6 +13,11 @@ handle-oriented wrappers for system, GPIO, device GPIO PM, DMA, UART, SPI, I2C, 
 PWM, ADC, timers, flash, watchdog, USB device, Wi-Fi, low-power, multicore, and
 XIO-backed peripherals.
 
+The [RP PIO program executor](docs/xio_program.md) adds explicit PIO v0
+bytecode, caller-owned program/SM resources, synchronized SM start and finite
+32-bit FIFO DMA. It is independent of the XIO SPI/UART interfaces and contains
+no device-specific waveform or acquisition policy.
+
 The [calendar RTC](rtc.md) adds provider-backed UTC reads/writes, one-shot
 alarms and optional calibration, including a portable software provider.
 

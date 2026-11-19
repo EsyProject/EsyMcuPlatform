@@ -8,6 +8,7 @@
 import argparse
 import errno
 import hashlib
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -16,12 +17,20 @@ import stat
 import subprocess
 import sys
 import tempfile
-from urllib.request import urlopen
+import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import zipfile
 
 from provider_cache import default_cache_directory, load_lock, managed_provider_directory
 
 STAMP = ".esy-provider.json"
+ARCHIVE_DOWNLOAD_ATTEMPTS = 3
+ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS = 60
+ARCHIVE_RETRY_DELAY_SECONDS = 2
+# Public archive hosts can intermittently reject CI requests with HTTP 403.
+ARCHIVE_RETRY_HTTP_CODES = (403, 408, 429, 500, 502, 503, 504)
+ARCHIVE_USER_AGENT = "EsyMcuPlatform-provider-setup/1.0 (+https://github.com/EsyProject/EsyMcuPlatform)"
 
 
 class ProviderError(RuntimeError):
@@ -111,8 +120,25 @@ def prepare_git(path, provider):
 
 
 def download_archive(url, destination):
-    with urlopen(url, timeout=60) as response, destination.open("wb") as output:
-        shutil.copyfileobj(response, output)
+    request = Request(url, headers={"User-Agent": ARCHIVE_USER_AGENT})
+    for attempt in range(1, ARCHIVE_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS) as response, \
+                    destination.open("wb") as output:
+                shutil.copyfileobj(response, output)
+            return
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
+            retryable = not isinstance(error, HTTPError) or error.code in ARCHIVE_RETRY_HTTP_CODES
+            if isinstance(error, HTTPError):
+                error.close()
+            destination.unlink(missing_ok=True)
+            if not retryable or attempt == ARCHIVE_DOWNLOAD_ATTEMPTS:
+                raise ProviderError(
+                    f"Archive download failed after {attempt} attempt(s): {url}: {error}") from error
+            delay = ARCHIVE_RETRY_DELAY_SECONDS * 2 ** (attempt - 1)
+            print(f"[providers] archive download attempt {attempt}/{ARCHIVE_DOWNLOAD_ATTEMPTS} "
+                  f"failed: {url}: {error}; retrying in {delay}s", file=sys.stderr)
+            time.sleep(delay)
 
 
 def prepare_zip(path, provider):

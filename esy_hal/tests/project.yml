@@ -61,6 +61,8 @@
     - ../src/esy_hal_watchdog.c
     - ../src/esy_hal_wakeup_timer.c
     - ../src/xio/esy_hal_xio_spi.c
+    - ../src/xio/esy_hal_xio_program.c
+    - ../../esy_test/fake/hal/fake_esy_hal_xio_program.c
     - ../src/xio/esy_hal_xio_uart.c
     - ../src/xio/esy_hal_xio_uart_tx.c
     - ../src/xio/esy_hal_xio_uart_rx.c
@@ -80,6 +82,7 @@
 :defines:
   :test:
     - TEST
+    - FAKE_ESY_XIO_PROGRAM_PROVIDER
     - OTA_SLOT_A_ADDR=0x10000000u
     - OTA_SLOT_B_ADDR=0x10010000u
     - OTA_SLOT_A_META_ADDR=0x1000F000u

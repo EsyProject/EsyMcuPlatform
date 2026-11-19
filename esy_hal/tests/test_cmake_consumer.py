@@ -45,6 +45,11 @@ if(USE_FAKE)
     target_sources(esy_hal_backend PRIVATE "${ROOT}/esy_test/fake/hal/fake_esy_hal_can_provider.c")
     target_include_directories(esy_hal_backend PRIVATE "${ROOT}/esy_test/fake/hal")
   endif()
+  if(ENABLE_ESY_XIO_PROGRAM)
+    target_sources(esy_hal_backend PRIVATE "${ROOT}/esy_test/fake/hal/fake_esy_hal_xio_program.c")
+    target_include_directories(esy_hal_backend PRIVATE "${ROOT}/esy_test/fake/hal")
+    target_compile_definitions(esy_hal_backend PRIVATE FAKE_ESY_XIO_PROGRAM_PROVIDER)
+  endif()
   target_include_directories(esy_hal_backend PRIVATE "${ROOT}/esy_hal/tests" "${ROOT}/esy_hal/include" "${UNITY}")
   target_compile_definitions(esy_hal_backend PRIVATE OTA_SLOT_A_ADDR=0x10000000u OTA_SLOT_B_ADDR=0x10010000u OTA_SLOT_A_META_ADDR=0x1000F000u OTA_SLOT_B_META_ADDR=0x1001F000u OTA_SLOT_TOTAL_SIZE=0x10000u)
   if(NOT ENABLE_ESY_DMA)
@@ -122,7 +127,36 @@ class FeatureAssembly(unittest.TestCase):
 
     def test_all_disabled_targets_build_without_placeholder_api(self):
         self.build('', fake=False, omit_pico_rand=True,
-                   expected=('esy_hal_empty.c', 'esy_hb_empty.c'))
+                   expected=('esy_hal_empty.c', 'esy_hb_empty.c'),
+                   absent=('esy_hal_xio_program.c', 'program/esy_hb_xio_program.c'))
+
+    def test_xio_program_parent_and_native_dma_sources_link_without_os(self):
+        self.build('set(ENABLE_ESY_XIO ON)\nset(ENABLE_ESY_XIO_PROGRAM ON)', r'''
+#include "esy_hal/xio/esy_hal_xio_program.h"
+static esy_xio_program_t program;
+static esy_xio_program_sm_t sm;
+static const uint16_t code[] = {0xa042u};
+int main(void) {
+  const esy_xio_program_config_t cfg = {.instructions=code,.instruction_count=1u};
+  const esy_xio_program_sm_config_t hw = {.instance=0u,.sm_index=0u};
+  if (esy_hal_xio_program_init(&program,&cfg) != ESY_OK) return 1;
+  if (esy_hal_xio_program_sm_init(&sm,&program,&hw) != ESY_OK) return 2;
+  if (esy_hal_xio_program_sm_reset(&sm) != ESY_OK) return 3;
+  if (esy_hal_xio_program_sm_deinit(&sm) != ESY_OK) return 4;
+  return esy_hal_xio_program_deinit(&program) != ESY_OK;
+}
+''', expected=('esy_hal_xio_program.c', 'program/esy_hb_xio_program.c',
+               'esy_hb_dma.c', 'hardware_dma', 'hardware_pio'),
+            absent=('esy_hal_dma.c', 'esy_os', 'esy_hal_spi_io.c'),
+            process_exports=('esy_hal_xio_program_start_group',))
+
+    def test_xio_program_requires_its_parent(self):
+        self.build('set(ENABLE_ESY_XIO_PROGRAM ON)',
+                   error='ENABLE_ESY_XIO_PROGRAM requires ENABLE_ESY_XIO')
+
+    def test_xio_program_rejects_non_pico_platform(self):
+        self.build('set(ENABLE_ESY_XIO ON)\nset(ENABLE_ESY_XIO_PROGRAM ON)',
+                   platform='STM32F4', error='ENABLE_ESY_XIO has no backend')
 
     def test_timer_requires_system(self):
         self.build('set(ENABLE_ESY_TIMER ON)', error='ENABLE_ESY_TIMER requires ENABLE_ESY_SYSTEM')

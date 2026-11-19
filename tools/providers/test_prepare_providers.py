@@ -7,6 +7,7 @@
 import contextlib
 import errno
 import hashlib
+from http.client import IncompleteRead
 import importlib.util
 import io
 import json
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from urllib.error import HTTPError, URLError
 import zipfile
 
 
@@ -527,6 +529,85 @@ class ProviderPreparationTests(unittest.TestCase):
         self.assertFalse((self.tool.managed_provider_directory(self.cache, self.providers["fatfs"])).exists())
         self.assertFalse(capture.exists())
         self.assertEqual(1, opened.call_count)
+
+    def test_zip_transient_download_errors_retry_with_client_identity_and_verify_payload(self):
+        payload = self.zip_bytes()
+        url = self.providers["fatfs"]["url"]
+        errors = [HTTPError(url, code, "Temporary rejection", {}, None)
+                  for code in (403, 408, 429, 500, 502, 503, 504)]
+        errors.extend((URLError("Connection failed"), TimeoutError("Read timed out"),
+                       ConnectionResetError("Connection reset"), IncompleteRead(b"partial", 10)))
+        for index, error in enumerate(errors):
+            with self.subTest(error=error):
+                directory = self.cache / str(index)
+                with mock.patch.object(self.tool.time, "sleep") as sleep:
+                    status, stdout, stderr, opened = self.run_main(
+                        "--directory", directory, "--provider", "fatfs",
+                        download=[error, io.BytesIO(payload)])
+                self.assertEqual(0, status, stderr)
+                self.assertEqual(2, opened.call_count)
+                sleep.assert_called_once_with(2)
+                self.assertIn(url, stderr)
+                self.assertIn("retrying", stderr)
+                for call in opened.call_args_list:
+                    request = call.args[0]
+                    self.assertEqual(url, request.full_url)
+                    self.assertIn("EsyMcuPlatform", request.get_header("User-agent"))
+                    self.assertEqual(60, call.kwargs["timeout"])
+                managed = self.tool.managed_provider_directory(directory, self.providers["fatfs"])
+                self.assertEqual("pinned source\n", (managed / "source/ff.c").read_text())
+                self.assertEqual([managed], list(directory.iterdir()))
+                self.tool.validate_managed(managed, self.providers["fatfs"])
+
+    def test_zip_permanent_http_error_fails_without_retry_or_publication(self):
+        url = self.providers["fatfs"]["url"]
+        with mock.patch.object(self.tool.time, "sleep") as sleep:
+            status, stdout, stderr, opened = self.run_main(
+                "--directory", self.cache, "--provider", "fatfs",
+                download=HTTPError(url, 404, "Not Found", {}, None))
+        self.assertEqual(1, status, stderr)
+        self.assertIn(url, stderr)
+        self.assertIn("404", stderr)
+        self.assertIn("1 attempt(s)", stderr)
+        self.assertEqual(1, opened.call_count)
+        sleep.assert_not_called()
+        self.assertEqual([], list(self.cache.iterdir()))
+
+    def test_zip_persistent_rejection_exhausts_retries_without_publishing_or_running_command(self):
+        url = self.providers["fatfs"]["url"]
+        capture = self.root / "must not execute.json"
+        with mock.patch.object(self.tool.time, "sleep") as sleep:
+            status, stdout, stderr, opened = self.run_main(
+                "--directory", self.cache, "--provider", "fatfs", "--exec",
+                *self.child_command(capture),
+                download=HTTPError(url, 403, "Forbidden", {}, None))
+        self.assertEqual(1, status, stderr)
+        self.assertIn(url, stderr)
+        self.assertIn("403", stderr)
+        self.assertIn("3 attempt(s)", stderr)
+        self.assertEqual(3, opened.call_count)
+        self.assertEqual([mock.call(2), mock.call(4)], sleep.call_args_list)
+        self.assertEqual([], list(self.cache.iterdir()))
+        self.assertFalse(capture.exists())
+
+    def test_zip_interrupted_body_is_discarded_before_retry(self):
+        payload = self.zip_bytes()
+
+        class InterruptedBody(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise IncompleteRead(b"interrupted", 10)
+                return super().read(8)
+
+        with mock.patch.object(self.tool.time, "sleep"):
+            status, stdout, stderr, opened = self.run_main(
+                "--directory", self.cache, "--provider", "fatfs",
+                download=[InterruptedBody(payload), io.BytesIO(payload)])
+        self.assertEqual(0, status, stderr)
+        self.assertEqual(2, opened.call_count)
+        managed = self.tool.managed_provider_directory(self.cache, self.providers["fatfs"])
+        self.tool.validate_managed(managed, self.providers["fatfs"])
+        self.assertEqual([managed], list(self.cache.iterdir()))
 
     def test_zip_tampering_nonrequired_files_or_added_files_is_rejected_without_repair(self):
         managed = self.prepare_archive(self.zip_bytes())

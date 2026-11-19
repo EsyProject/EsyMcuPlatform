@@ -76,7 +76,13 @@ RTOS kernels and target toolchains remain inputs to real firmware builds.
 Managed Git inputs must match their locked revisions with clean worktrees and
 initialized submodules. Archive downloads are SHA256-verified before extraction;
 reused archive trees are checked against their recorded file hashes. Setup
-leaves invalid or modified caches untouched. Repair the reported input or
+identifies archive requests with an EsyMcuPlatform User-Agent and makes up to
+three attempts for HTTP 403, 408, 429, 500, 502, 503 and 504, connection failures,
+timeouts or interrupted responses. Retries wait two then four seconds; each
+request uses a 60-second socket timeout. A persistent download failure reports
+the URL and attempt count. Other HTTP errors and checksum failures stop
+immediately without publishing a cache entry or running a requested command.
+Setup leaves invalid or modified caches untouched. Repair the reported input or
 select a different cache before retrying. Recheck the prepared inputs without
 network access with:
 

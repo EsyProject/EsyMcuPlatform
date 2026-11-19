@@ -8,6 +8,10 @@ include("${CMAKE_CURRENT_LIST_DIR}/../cmake/esy_port.cmake")
 
 set(MODULE_NAME esy_hal_backend)
 
+if(ENABLE_ESY_XIO_PROGRAM AND NOT ENABLE_ESY_XIO)
+    message(FATAL_ERROR "ENABLE_ESY_XIO_PROGRAM requires ENABLE_ESY_XIO")
+endif()
+
 add_library(${MODULE_NAME} STATIC)
 
 target_include_directories(${MODULE_NAME}
