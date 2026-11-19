@@ -76,8 +76,13 @@ RTOS kernels and target toolchains remain inputs to real firmware builds.
 Managed Git inputs must match their locked revisions with clean worktrees and
 initialized submodules. Archive downloads are SHA256-verified before extraction;
 reused archive trees are checked against their recorded file hashes. Setup
-identifies archive requests with an EsyMcuPlatform User-Agent and makes up to
-three attempts for HTTP 403, 408, 429, 500, 502, 503 and 504, connection failures,
+identifies archive requests with an EsyMcuPlatform User-Agent. The FatFs lock
+also records its official archive page as the HTTP `Referer`, matching a
+download initiated from that page. This request hint does not change the
+archive checksum, cache identity or verification record, so existing verified
+caches remain reusable offline. Other providers send no Referer unless their
+lock entry supplies one. Setup makes up to three attempts for HTTP 403, 408,
+429, 500, 502, 503 and 504, connection failures,
 timeouts or interrupted responses. Retries wait two then four seconds; each
 request uses a 60-second socket timeout. A persistent download failure reports
 the URL and attempt count. Other HTTP errors and checksum failures stop

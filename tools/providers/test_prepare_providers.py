@@ -8,6 +8,7 @@ import contextlib
 import errno
 import hashlib
 from http.client import IncompleteRead
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
@@ -18,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from urllib.error import HTTPError, URLError
@@ -516,8 +518,81 @@ class ProviderPreparationTests(unittest.TestCase):
         self.assertEqual(f"ESY_FATFS_PATH={managed / 'source'}\n", stdout)
         opened.assert_not_called()
 
+    def test_locked_fatfs_request_uses_the_official_archive_page_as_referer(self):
+        baseline = json.loads(SCRIPT.with_name("providers.lock.json").read_text(encoding="utf-8"))
+        provider = baseline["providers"]["fatfs"]
+        destination = self.root / "request payload.zip"
+        with mock.patch.object(self.tool, "urlopen", return_value=io.BytesIO(b"payload")) as opened:
+            self.tool.download_archive(provider["url"], destination, provider["referer"])
+        request = opened.call_args.args[0]
+        self.assertEqual("https://elm-chan.org/fsw/ff/arc/ff16.zip", request.full_url)
+        self.assertEqual("https://elm-chan.org/fsw/ff/archives.html", request.get_header("Referer"))
+
+    def test_zip_referer_is_sent_over_http_and_preserved_across_retries(self):
+        payload = self.zip_bytes()
+        referer = "https://invalid.example/archives.html"
+        observed = []
+
+        class ArchiveHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                observed.append(self.headers.get("Referer"))
+                # Reject a direct request, and reject the first referred request once.
+                if self.headers.get("Referer") != referer or observed.count(referer) == 1:
+                    self.send_error(403, "Use the archive page")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, message, *arguments):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), ArchiveHandler) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                self.providers["fatfs"]["url"] = f"http://127.0.0.1:{server.server_port}/fixture.zip"
+                self.write_lock()
+                real_urlopen = self.tool.urlopen
+                with mock.patch.object(self.tool.time, "sleep"):
+                    status, stdout, stderr, opened = self.run_main(
+                        "--provider", "fatfs", download=real_urlopen)
+                self.assertEqual(1, status, stderr)
+                self.assertEqual([None, None, None], observed)
+                self.assertEqual([], list(self.cache.iterdir()))
+                self.providers["fatfs"]["referer"] = referer
+                self.write_lock()
+                with mock.patch.object(self.tool.time, "sleep"):
+                    status, stdout, stderr, opened = self.run_main(
+                        "--provider", "fatfs", download=real_urlopen)
+                self.assertEqual(0, status, stderr)
+                self.assertEqual([referer, referer], observed[3:])
+                managed = self.tool.managed_provider_directory(self.cache, self.providers["fatfs"])
+                self.tool.validate_managed(managed, self.providers["fatfs"])
+            finally:
+                server.shutdown()
+                worker.join(timeout=5)
+
+    def test_zip_referer_changes_reuse_preexisting_cache_without_network_or_stamp_updates(self):
+        managed = self.prepare_archive(self.zip_bytes())
+        before = {path.relative_to(managed): path.read_bytes()
+                  for path in managed.rglob("*") if path.is_file()}
+        original_digest = hashlib.sha256(
+            json.dumps(self.providers["fatfs"], sort_keys=True).encode("utf-8")).hexdigest()
+        self.assertEqual(original_digest, json.loads((managed / self.tool.STAMP).read_text())["lock_sha256"])
+        for referer in ("https://invalid.example/archives.html", "https://invalid.example/"):
+            self.providers["fatfs"]["referer"] = referer
+            self.write_lock()
+            status, stdout, stderr, opened = self.run_main("--provider", "fatfs", "--offline")
+            self.assertEqual(0, status, stderr)
+            opened.assert_not_called()
+            self.assertEqual(before, {path.relative_to(managed): path.read_bytes()
+                                      for path in managed.rglob("*") if path.is_file()})
+
     def test_zip_checksum_failure_does_not_publish_cache_or_run_command(self):
         payload = self.zip_bytes()
+        self.providers["fatfs"]["referer"] = "https://invalid.example/archives.html"
         self.providers["fatfs"]["sha256"] = "0" * 64
         self.write_lock()
         capture = self.root / "must not execute.json"
@@ -553,6 +628,7 @@ class ProviderPreparationTests(unittest.TestCase):
                     request = call.args[0]
                     self.assertEqual(url, request.full_url)
                     self.assertIn("EsyMcuPlatform", request.get_header("User-agent"))
+                    self.assertIsNone(request.get_header("Referer"))
                     self.assertEqual(60, call.kwargs["timeout"])
                 managed = self.tool.managed_provider_directory(directory, self.providers["fatfs"])
                 self.assertEqual("pinned source\n", (managed / "source/ff.c").read_text())

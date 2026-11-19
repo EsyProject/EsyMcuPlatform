@@ -65,7 +65,9 @@ def validate_layout(path, provider):
 
 
 def lock_digest(provider):
-    encoded = json.dumps(provider, sort_keys=True).encode("utf-8")
+    # The link source changes the HTTP request, not the locked archive contents.
+    identity = {key: value for key, value in provider.items() if key != "referer"}
+    encoded = json.dumps(identity, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -119,8 +121,11 @@ def prepare_git(path, provider):
         run_checked(git + ["submodule", "update", "--init", "--recursive", "--depth=1"])
 
 
-def download_archive(url, destination):
-    request = Request(url, headers={"User-Agent": ARCHIVE_USER_AGENT})
+def download_archive(url, destination, referer=None):
+    headers = {"User-Agent": ARCHIVE_USER_AGENT}
+    if referer is not None:
+        headers["Referer"] = referer
+    request = Request(url, headers=headers)
     for attempt in range(1, ARCHIVE_DOWNLOAD_ATTEMPTS + 1):
         try:
             with urlopen(request, timeout=ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS) as response, \
@@ -143,7 +148,7 @@ def download_archive(url, destination):
 
 def prepare_zip(path, provider):
     archive_path = path.parent / "download.zip"
-    download_archive(provider["url"], archive_path)
+    download_archive(provider["url"], archive_path, provider.get("referer"))
     if hash_file(archive_path) != provider["sha256"]:
         raise ProviderError(f"Archive SHA256 mismatch: {provider['url']}")
     with zipfile.ZipFile(archive_path) as archive:
