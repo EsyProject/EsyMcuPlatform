@@ -328,6 +328,11 @@ The gate also runs `esy_middleware/core_lockout/tests/test_cmake_consumer.py`
 to verify standalone C11/C++17 target consumers, disabled-module assembly, and
 Flash-independent execution and rejection of missing system/OS dependencies.
 
+The ADC and CCD module consumer checks verify independent device features,
+C11/C++17 public headers and linkage without sensor, HAL or OS dependencies.
+Their module-owned Ceedling projects are discovered by the normal test and
+coverage scans, and each suite also runs with isolated sanitizer artifacts.
+
 Dual Flash store checks compile independent C11/C++17 public-header consumers and
 link/execute the real module with the reusable Flash fake, without an OS. They
 cover disabled-module assembly and rejection of missing Flash support. The

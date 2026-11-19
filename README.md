@@ -193,6 +193,8 @@ for a custom build. Application hardware and RTOS calls use `esy_hal` and
 | String-keyed configuration over a replaceable file backend | [Settings](esy_middleware/settings/README.md) |
 | Remote configuration, image upload/slot enumeration/confirmation/rollback, RAM statistics, structured diagnostics and fault-record collection | [Remote manager](esy_middleware/remote_manager/README.md), with normalized owner operations, a caller-owned statistics table, optional provider adapters and ProtoBin payload conversion |
 | Sensor channels, units, sampling and events | [Sensors](esy_middleware/sensor/README.md) |
+| External ADC conversion-code decoding | [ADC devices](esy_middleware/adc/README.md) |
+| CCD timing plans and confirmed-readout qualification | [CCD devices](esy_middleware/ccd/README.md) |
 | Named health queries and explicit self-tests | [Diagnostics](esy_middleware/diagnostics/README.md), with caller-owned sources and Remote Manager typed results |
 | Logging and crash capture | [Logger](esy_middleware/logger/README.md), [coredump](esy_middleware/coredump/README.md) |
 | GUI, physical input and display transport | [LVGL](esy_middleware/lvgl/README.md), [input](esy_middleware/input/README.md), [LCD](esy_middleware/lcd/README.md), [touch](esy_middleware/touch/README.md), [I/O schedulers](esy_middleware/io_scheduler/README.md) |

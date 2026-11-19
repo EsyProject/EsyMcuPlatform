@@ -249,6 +249,16 @@ if(ENABLE_ESY_SENSOR)
     endif()
 endif()
 
+if(ENABLE_ESY_ADC_AD7276)
+    add_subdirectory(adc)
+    target_link_libraries(esy_middleware INTERFACE esy_adc_ad7276)
+endif()
+
+if(ENABLE_ESY_CCD_TCD1254)
+    add_subdirectory(ccd)
+    target_link_libraries(esy_middleware INTERFACE esy_ccd_tcd1254)
+endif()
+
 if(ENABLE_ESY_TOUCH)
     add_subdirectory(touch)
     target_link_libraries(esy_middleware INTERFACE esy_touch)

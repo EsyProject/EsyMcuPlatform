@@ -74,6 +74,8 @@ python3 -B "${ROOT_DIR}/esy_middleware/lcd/tests/test_cmake_consumer.py"
 python3 -B "${ROOT_DIR}/esy_middleware/input/tests/test_cmake_consumer.py"
 python3 -B "${ROOT_DIR}/esy_middleware/event_bus/tests/test_cmake_consumer.py"
 python3 -B "${ROOT_DIR}/esy_middleware/sensor/tests/test_cmake_consumer.py"
+python3 -B "${ROOT_DIR}/esy_middleware/adc/tests/test_cmake_consumer.py"
+python3 -B "${ROOT_DIR}/esy_middleware/ccd/tests/test_cmake_consumer.py"
 python3 -B "${ROOT_DIR}/esy_middleware/touch/tests/test_cmake_consumer.py"
 python3 -B "${ROOT_DIR}/esy_middleware/ble/tests/test_cmake_consumer.py"
 python3 -B "${ROOT_DIR}/esy_middleware/ble/tests/test_btstack_runtime.py"
@@ -162,7 +164,7 @@ ruby "${ROOT_DIR}/tools/quality/run_module_tests.rb" \
 
 # Protocol arithmetic, byte alignment and lifecycle regressions also run under
 # sanitizers, with artifacts isolated from the default coverage configuration.
-for module in esy_hal esy_common/protocol_codec esy_common/smf esy_middleware/protocol esy_middleware/io_scheduler esy_middleware/input esy_middleware/event_bus esy_middleware/sensor esy_middleware/touch esy_middleware/ble esy_middleware/lvgl esy_middleware/mqtt esy_middleware/http esy_middleware/network/lwip esy_middleware/numerics esy_middleware/dual_flash_store esy_middleware/file esy_middleware/settings esy_middleware/diagnostics esy_middleware/ota esy_middleware/remote_manager esy_middleware/time esy_middleware/coredump esy_middleware/credentials esy_middleware/crypto esy_middleware/tls; do
+for module in esy_hal esy_common/protocol_codec esy_common/smf esy_middleware/protocol esy_middleware/io_scheduler esy_middleware/input esy_middleware/event_bus esy_middleware/sensor esy_middleware/adc esy_middleware/ccd esy_middleware/touch esy_middleware/ble esy_middleware/lvgl esy_middleware/mqtt esy_middleware/http esy_middleware/network/lwip esy_middleware/numerics esy_middleware/dual_flash_store esy_middleware/file esy_middleware/settings esy_middleware/diagnostics esy_middleware/ota esy_middleware/remote_manager esy_middleware/time esy_middleware/coredump esy_middleware/credentials esy_middleware/crypto esy_middleware/tls; do
   ruby "${ROOT_DIR}/tools/quality/run_module_tests.rb" "${ROOT_DIR}/${module}/tests" \
     "${ROOT_DIR}/${module}/tests/build/sanitizer" test:all --sanitizer
 done
